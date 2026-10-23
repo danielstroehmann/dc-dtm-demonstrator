@@ -37,6 +37,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
   home-lab. No Authentik, no `shared-net`, no external reverse proxy: the demonstrator
   brings its own reverse proxy (self-signed TLS) and built-in login.
 - Setup and update via one-line installer – see `docs/design/02-nfr.md` (NFR-1).
+- CI deviation from commons git-workflow: a push to `dev` runs tests **and** publishes a
+  preview image `:branch-dev` (no version, no release). Releases still only via `v*` tag (NFR-2).
 
 ### Public repository
 
