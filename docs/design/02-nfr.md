@@ -29,7 +29,7 @@ curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/late
 | Versioning | **Explicit choice** (decided): the user picks what to install – a release tag (`--version vX.Y.Z`, default = latest release) or a branch (`--branch dev`). Never a silent install of `main`. Interactive run shows a selection (latest release preselected); flags skip it. `install.sh` is a release asset; images are published to GHCR per tag and per branch (e.g. `:v1.2.0`, `:branch-dev`). Enter on the preselected latest release counts as a choice (decided) | Branch images: `dev` only, see NFR-2 |
 | Architecture | **amd64 only** (decided) | – |
 | Install location | `/opt/dtm-demonstrator` with `./data` below | – |
-| Web access & TLS | **Local network only** (decided). Reverse proxy container (e.g. Caddy) with a self-signed certificate | – |
+| Web access & TLS | **Local network only** (decided). Reverse proxy container (e.g. Caddy). **TLS mode configurable on the machine** (decided 2026-10-23): `selfsigned` (default), `letsencrypt` (domain + e-mail; HTTP-01 needs port 80 reachable from the internet, otherwise DNS-01 with a provider API token), `custom` (own certificate + key, e.g. issued by DigiCert). Set via installer flags (`--tls`, `--domain`, …), changeable later by re-running the installer | DNS-01 providers to support? |
 | Authentication | **Built-in login** (decided): admin password generated at install and printed once – the UI controls a DTM API key and must never be open | – |
 | DTM credentials | **Entered in the web UI on first start** (decided), stored under `./data` (never in the image) | – |
 
