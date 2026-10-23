@@ -1,4 +1,4 @@
-# UC-1 – Evergreen certificates in manufacturing
+# UC-1 – Evergreen Device IDs for Factory Provisioning
 
 > Status: requirements captured, questions open – as of 2026-10-23. No implementation yet.
 

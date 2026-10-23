@@ -1,0 +1,2 @@
+{% for e in events %}<li class="{{ e.level }}"><time class="t" datetime="{{ e.ts }}" data-tip="{{ e.ts }}">+{{ e.t }}</time><span class="msg">{{ e.message }}</span></li>
+{% endfor %}

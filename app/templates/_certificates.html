@@ -1,0 +1,20 @@
+<section id="certificates">
+  <div class="overflow-auto">
+  <table class="striped compact">
+    <colgroup><col class="c-cn"><col class="c-serial"><col class="c-date"><col class="c-issuer"><col class="c-key"></colgroup>
+    <thead><tr><th>Common name</th><th>Serial</th><th>Valid until</th><th>Issuer</th><th>Key</th></tr></thead>
+    <tbody>{% for c in cert_rows %}
+      <tr><td>{{ c.common_name }}</td><td>{{ c.serial }}</td><td data-tip="{{ c.not_after }}">{{ c.not_after[:10] }}</td><td>{{ c.issuer }}</td><td>{{ c.key_type }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  </div>
+  {% if cert_pages > 1 %}
+  <nav class="pager" aria-label="Certificate pages">
+    <button class="outline btn-sm" {% if cert_page == 1 %}disabled{% endif %}
+            hx-get="/runs/{{ run.id }}/certificates?page={{ cert_page - 1 }}" hx-target="#certificates" hx-swap="outerHTML">‹ Previous</button>
+    <span class="muted">Page {{ cert_page }} of {{ cert_pages }}</span>
+    <button class="outline btn-sm" {% if cert_page == cert_pages %}disabled{% endif %}
+            hx-get="/runs/{{ run.id }}/certificates?page={{ cert_page + 1 }}" hx-target="#certificates" hx-swap="outerHTML">Next ›</button>
+  </nav>
+  {% endif %}
+</section>

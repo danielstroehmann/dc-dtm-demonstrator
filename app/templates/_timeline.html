@@ -1,0 +1,9 @@
+{# Outside #live: only the items are swapped while polling, so the scroll position survives. #}
+<article class="card">
+  <div class="card-head"><h2>Timeline <small>{% if events_total > events | length %}latest {{ events | length }} of {{ events_total }}{% else %}{{ events_total }} events{% endif %}</small></h2></div>
+  <div class="timeline-scroll" tabindex="0" aria-label="Timeline, newest first">
+    <ol class="timeline" {% if active %}hx-get="/runs/{{ run.id }}/timeline" hx-trigger="every 1s" hx-swap="innerHTML"{% endif %}>
+      {% include "_timeline_items.html" %}
+    </ol>
+  </div>
+</article>

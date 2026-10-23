@@ -1,0 +1,19 @@
+<ol class="calls">
+{% for c in group %}
+  {% set id = phase ~ "-" ~ loop.index %}
+  <li>
+    <div class="call-line">
+      <span class="method {{ c.method | lower }}">{{ c.method }}</span>
+      <code class="path">{{ c.path }}</code>
+      <span class="call-time">{% if c.count > 1 %}{{ c.count }}× · {% endif %}{% if c.seconds is not none %}{{ c.seconds }} s{% endif %}{% if c.outcome != "ok" %} · <span class="error">{{ c.outcome }}</span>{% endif %}</span>
+    </div>
+    <p class="call-purpose">{{ c.purpose }}</p>
+    {% if c.spec %}
+    <div class="snippet">
+      <div class="snippet-head"><span></span><button class="btn-sm outline" data-copy="pre-{{ id }}">Copy</button></div>
+      <pre id="pre-{{ id }}"><code>{{ snippets.render(c.spec, dialect) }}</code></pre>
+    </div>
+    {% endif %}
+  </li>
+{% endfor %}
+</ol>

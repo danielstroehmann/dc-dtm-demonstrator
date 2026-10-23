@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}New run · DTM Demonstrator{% endblock %}
+{% block content %}
+<h1>New run</h1>
+{% if not connections %}
+<article class="card">
+  <div class="card-head"><h2>DTM connection missing</h2><a href="/settings" role="button" class="btn-sm">Open settings</a></div>
+</article>
+{% else %}
+<form method="get">
+  {% if connections | length > 1 %}
+  <article class="card">
+    <div class="card-head"><h2>Connection</h2></div>
+    <select name="connection" aria-label="DTM connection for the next run">
+      {% for c in connections %}<option value="{{ c.id }}" {% if c.id == selected %}selected{% endif %}>{{ c.name }} – {{ c.host }}</option>{% endfor %}
+    </select>
+  </article>
+  {% elif selected %}<input type="hidden" name="connection" value="{{ selected }}">{% endif %}
+  {% for key, uc in use_cases.items() %}
+  <article class="card">
+    <div class="card-head"><h2>{{ uc.title }}</h2><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm" aria-label="Choose {{ uc.title }}">Choose</button></div>
+    <p>{{ uc.summary }}</p>
+  </article>
+  {% endfor %}
+</form>
+{% endif %}
+{% endblock %}

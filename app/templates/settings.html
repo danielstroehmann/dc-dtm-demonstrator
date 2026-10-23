@@ -1,19 +1,63 @@
 {% extends "base.html" %}
 {% block title %}Settings · DTM Demonstrator{% endblock %}
 {% block content %}
-<h1>DTM connection</h1>
-<p>All calls are scoped to the account below – the API key may see other accounts, they are never touched.</p>
-{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-<form method="post" action="/settings">
-  <label>Host
-    <input name="host" value="{{ host }}" required pattern="[a-z0-9.\-]+\.[a-z]{2,}">
-  </label>
-  <label>Account ID
-    <input name="account_id" value="{{ account_id }}" required placeholder="UUID of the DTM account">
-  </label>
-  <label>API key {% if has_key %}<small>(configured – leave empty to keep it)</small>{% endif %}
-    <input type="password" name="api_key" autocomplete="off" {% if not has_key %}required{% endif %}>
-  </label>
-  <button type="submit">Check and save</button>
-</form>
+<h1>Settings</h1>
+{% if connections %}
+<article class="card">
+  <div class="card-head"><h2>DTM connections</h2></div>
+  <div class="overflow-auto">
+  <table class="striped data-table">
+    <thead><tr><th>Name</th><th>Host</th><th>Account</th><th><span class="visually-hidden">Default</span></th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>
+    {% for c in connections %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td>{{ c.host }}</td>
+        <td class="mono">{{ c.account_id }}</td>
+        <td>{% if c.is_default %}<span class="badge">Default</span>{% endif %}</td>
+        <td class="actions-cell"><div class="actions">
+          <a href="/settings?edit={{ c.id }}" role="button" class="outline btn-sm">Edit</a>
+          {% if not c.is_default %}
+          <form method="post" action="/settings/connections/{{ c.id }}/default" class="inline">
+            <button type="submit" class="outline btn-sm">Make default</button>
+          </form>
+          {% endif %}
+          {% if in_use[c.id] %}
+          <span data-tip="Has runs that are not rolled back" tabindex="0"><button type="button" class="outline secondary btn-sm" disabled>Delete</button></span>
+          {% else %}
+          <form method="post" action="/settings/connections/{{ c.id }}/delete" class="inline" hx-boost="true"
+                hx-confirm="Delete connection {{ c.name }}?" data-confirm-label="Delete">
+            <button type="submit" class="outline secondary btn-sm">Delete</button>
+          </form>
+          {% endif %}
+        </div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</article>
+{% endif %}
+
+<article class="card" id="connection-form">
+  <div class="card-head"><h2>{{ "Edit connection" if form.id else "Add connection" }}</h2>
+    {% if form.id %}<a href="/settings" role="button" class="outline btn-sm">Cancel</a>{% endif %}</div>
+  {% if form.error %}<p class="error" role="alert">{{ form.error }}</p>{% endif %}
+  <form method="post" action="/settings/connections">
+    {% if form.id %}<input type="hidden" name="id" value="{{ form.id }}">{% endif %}
+    <label>Name
+      <input name="name" value="{{ form.name or '' }}" required maxlength="40" placeholder="e.g. US production, NL">
+    </label>
+    <label>Host
+      <input name="host" value="{{ form.host or '' }}" required pattern="[a-z0-9.\-]+\.[a-z]{2,}">
+    </label>
+    <label>Account ID
+      <input name="account_id" value="{{ form.account_id or '' }}" required placeholder="UUID of the DTM account">
+    </label>
+    <label>API key {% if form.has_key %}<small class="muted">(configured – leave empty to keep it)</small>{% endif %}
+      <input type="password" name="api_key" autocomplete="off" {% if not form.has_key %}required{% endif %}>
+    </label>
+    <button type="submit">Check and save</button>
+  </form>
+</article>
 {% endblock %}

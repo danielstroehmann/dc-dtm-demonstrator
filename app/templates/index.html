@@ -1,31 +1,38 @@
 {% extends "base.html" %}
 {% block content %}
-<hgroup>
-  <h1>Runs</h1>
-  <p>Every object a run creates is named <code>robot-&lt;run&gt;-…</code> and can be rolled back with one click.</p>
-</hgroup>
+<h1>Runs</h1>
 {% if not configured %}
-<article><p>Configure the DTM connection first.</p><a href="/settings" role="button">Open settings</a></article>
+<article class="card">
+  <div class="card-head"><h2>DTM connection missing</h2><a href="/settings" role="button" class="btn-sm">Open settings</a></div>
+</article>
 {% else %}
-<a href="/runs/new" role="button">New run</a>
+<p><a href="/runs/new" role="button" class="cta">New run</a></p>
 {% endif %}
 {% if runs %}
-<div class="overflow-auto">
-<table class="striped">
-  <thead><tr><th>Run</th><th>Use case</th><th>Variant</th><th>Status</th><th>Cleanup</th><th>Created (UTC)</th></tr></thead>
-  <tbody>
-  {% for run in runs %}
-    <tr>
-      <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-      <td>UC-1 {{ run.params.mode }}{% if run.params.mode == "batch" %} ({{ run.params.count }}){% endif %}</td>
-      <td>{{ "API" if run.params.variant == "api" else "Web UI" }}</td>
-      <td><span class="status {{ run.status }}">{{ run.status }}</span></td>
-      <td>{{ run.cleanup_status or "–" }}</td>
-      <td>{{ run.created_at[:16].replace("T", " ") }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
+<article class="card">
+  <div class="overflow-auto">
+  <table class="striped data-table">
+    <thead><tr><th>Run</th><th>Use case</th>{% if several %}<th>Connection</th>{% endif %}<th>Variant</th><th>Status</th><th>Cleanup</th><th>Created (UTC)</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>
+    {% for run in runs %}
+      <tr>
+        <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+        <td>{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {{ run.params.mode }} ({{ run.params.count }})</td>
+        {% if several %}<td>{{ run.connection }}</td>{% endif %}
+        <td>{{ "API" if run.params.variant == "api" else "Web UI" }}</td>
+        <td><span class="status {{ run.status }}">{{ run.status }}</span></td>
+        <td>{{ run.cleanup_status or "–" }}</td>
+        <td>{{ run.created_at[:16].replace("T", " ") }}</td>
+        <td class="actions-cell">{% if run.rolled_back %}
+          <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">
+            <button type="submit" class="secondary outline btn-sm" aria-label="Delete run {{ run.id }}">Delete</button>
+          </form>
+        {% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</article>
 {% endif %}
 {% endblock %}

@@ -1,0 +1,9 @@
+{# Shown right below the Overview once the run has been fully rolled back. #}
+<article class="card quiet">
+  <div class="card-head"><h2>Delete run</h2></div>
+  <div class="cleanup-actions">
+  <form method="post" action="/runs/{{ run.id }}/delete" hx-boost="true">
+    <button type="submit" class="outline">Delete run</button>
+  </form>
+  </div>
+</article>

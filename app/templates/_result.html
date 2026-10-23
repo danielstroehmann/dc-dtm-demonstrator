@@ -1,0 +1,15 @@
+{% set r = run.result %}
+{% if r.certificates or (r.artifact and artifact_available) %}
+<article class="card">
+  <div class="card-head"><h2>Payload</h2></div>
+  {% if r.certificates %}{% include "_certificates.html" %}{% endif %}
+  {% if r.artifact and artifact_available %}
+  <div class="download">
+    {% if run.params.variant == "webui" %}<p class="box-hint">Upload in DTM web UI · policy <code>{{ r.policy }}</code></p>{% endif %}
+    <a href="/runs/{{ run.id }}/artifact" role="button" class="secondary" download>Download {{ r.artifact }}</a>
+  </div>
+  {% endif %}
+</article>
+{% endif %}
+
+{% include "_api_calls.html" %}

@@ -57,6 +57,13 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - Keep the test account clean: remove everything a test creates.
 - Test credentials live only in the local, gitignored `.env` – never in chat logs, docs or commits.
 
+### UI (overrides commons ui-ux "unified look across projects")
+
+- Look & feel recognisable from **docs.digicert.com**: Roboto (self-hosted, OFL), DigiCert
+  blue `#1976d2` (hover `#11508e`, header `#004ba0`), orange accent `#f57c00`, greys
+  `#333`/`#777`/`#f5f5f5` – applied as Pico CSS variables in `app/static/app.css`. Modern
+  components stay (Pico). No DigiCert logos or trademarks as images.
+
 ### Public repository
 
 - The repo is **public on GitHub, also during development**. Never commit secrets, tenant
@@ -68,8 +75,9 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 
 ### Phase
 
-- Design phase 2026-10-23; **implementation of v0.1 started 2026-10-23** (UC-1, installer,
+- Design phase 2026-10-23; **implementation of v0.1 started 2026-10-23** (UC-1, UC-2, installer,
   login, cleanup). Further use cases stay in design until the author starts them.
+- UC-1 and UC-2 share `app/evergreen.py`; `uc01`/`uc02` stay the IDs in run data and object names.
 
 ### Stack (v0.1)
 

@@ -2,8 +2,8 @@
 {% block title %}Log in · DTM Demonstrator{% endblock %}
 {% block nav %}{% endblock %}
 {% block content %}
-<article class="narrow">
-  <h1>Log in</h1>
+<article class="card narrow">
+  <div class="card-head"><h2>Log in</h2></div>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   <form method="post" action="/login">
     <label>Password

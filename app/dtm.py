@@ -35,6 +35,54 @@ class DTMConfig:
     account_id: str
 
 
+def division_body(name: str, description: str, account_id: str, rzone_id: str) -> dict:
+    return {"name": name, "description": description, "account_id": account_id, "primary_rzone_id": rzone_id}
+
+
+def policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, key_type: str,
+                require_approval: bool, key_generation: str = "server_side") -> dict:
+    """key_generation: 'server_side' (DTM creates the key pairs) or 'client_side' (CSRs)."""
+    common = {"key_generation_option": key_generation, "key_type": key_type.lower(),
+              "private_key_format": "pem", "encryption_certificate_source": "provided",
+              "include_chain_option": "include_ica_and_root"}
+    return {"certificate_policy": {
+        "name": name, "division_id": division_id, "certificate_profile_id": profile_id, "ica_id": ica_id,
+        "certificate_management_methods": ["SINGLE", "BATCH"],
+        "key_generation_option": key_generation, "key_generation_type": key_type,
+        "require_device_group_for_enroll": False,
+        "require_approval_for_enroll": require_approval, "require_approval_for_renew": False,
+        "single_cert_request_parameters": {**common, "response_with_certificate_only": False,
+                                           "split_certificate_response": True},
+        "batch_request_parameters": {**common, "certificate_format": "pem", "ecdsa_private_key_syntax": "pkcs8",
+                                     "rsa_private_key_syntax": "pkcs8",
+                                     "input_type": "csv" if key_generation == "server_side" else "csr",
+                                     "output_format": "zip", "report_format": "csv"},
+    }}
+
+
+def single_body(policy_id: str, common_name: str, csr: str | None = None) -> dict:
+    """Server-side key generation, or – with a CSR – the factory's own key pair."""
+    body = {"certificate_policy_id": policy_id,
+            "certificate_profile_attributes": [{"id": "subject.common_name", "value": common_name}],
+            "split_certificate_response": True, "include_certificate_chain": True}
+    if csr is None:
+        return body | {"server_side_key_gen": True, "private_key_format": "pem", "private_key_syntax": "pkcs8"}
+    return body | {"csr": csr}
+
+
+def batch_fields(name: str, policy_id: str, key_type: str) -> dict:
+    """Multipart fields of a server-side batch, without the encryption certificate and the ZIP."""
+    return {"name": name, "certificate_policy_id": policy_id, "certificate_format": "pem",
+            "input_format": "csv", "output_format": "zip", "server_side_key_gen": "true",
+            "key_type": key_type, "private_key_format": "pem", "private_key_syntax": "pkcs8", "emails": ""}
+
+
+def csr_batch_fields(name: str, policy_id: str) -> dict:
+    """Multipart fields of a client-side batch (ZIP of CSR files) – no keys come back, so no encryption."""
+    return {"name": name, "certificate_policy_id": policy_id, "certificate_format": "pem",
+            "input_format": "csr", "output_format": "zip", "emails": ""}
+
+
 def _json(response: httpx.Response):
     # DTM responses may contain raw control characters (e.g. PEM line breaks) inside strings.
     if not response.text:
@@ -142,11 +190,10 @@ class DTMClient:
         return await self.find_ids(POLICIES, name)
 
     # divisions – create returns no ID, so it is looked up by its unique name
-    async def create_division(self, name: str, description: str) -> str:
-        await self._request("POST", DIVISIONS, json={
-            "name": name, "description": description, "account_id": self.config.account_id,
-            "primary_rzone_id": await self.rendezvous_zone(),
-        })
+    async def create_division(self, name: str, description: str, rzone_id: str | None = None) -> str:
+        rzone_id = rzone_id or await self.rendezvous_zone()
+        await self._request("POST", DIVISIONS,
+                            json=division_body(name, description, self.config.account_id, rzone_id))
         return await self._find_id(DIVISIONS, name)
 
     async def delete_division(self, division_id: str) -> None:
@@ -156,23 +203,10 @@ class DTMClient:
 
     # certificate policies
     async def create_policy(self, *, name: str, division_id: str, profile_id: str, ica_id: str,
-                            key_type: str, require_approval: bool) -> str:
-        common = {"key_generation_option": "server_side", "key_type": key_type.lower(),
-                  "private_key_format": "pem", "encryption_certificate_source": "provided",
-                  "include_chain_option": "include_ica_and_root"}
-        await self._request("POST", POLICIES,
-                            expect=(200, 201), json={"certificate_policy": {
-            "name": name, "division_id": division_id, "certificate_profile_id": profile_id, "ica_id": ica_id,
-            "certificate_management_methods": ["SINGLE", "BATCH"],
-            "key_generation_option": "server_side", "key_generation_type": key_type,
-            "require_device_group_for_enroll": False,
-            "require_approval_for_enroll": require_approval, "require_approval_for_renew": False,
-            "single_cert_request_parameters": {**common, "response_with_certificate_only": False,
-                                               "split_certificate_response": True},
-            "batch_request_parameters": {**common, "certificate_format": "pem", "ecdsa_private_key_syntax": "pkcs8",
-                                         "rsa_private_key_syntax": "pkcs8", "input_type": "csv",
-                                         "output_format": "zip", "report_format": "csv"},
-        }})
+                            key_type: str, require_approval: bool, key_generation: str = "server_side") -> str:
+        await self._request("POST", POLICIES, expect=(200, 201), json=policy_body(
+            name=name, division_id=division_id, profile_id=profile_id, ica_id=ica_id, key_type=key_type,
+            require_approval=require_approval, key_generation=key_generation))
         return await self._find_id(POLICIES, name)
 
     async def delete_policy(self, policy_id: str) -> None:
@@ -187,27 +221,23 @@ class DTMClient:
             raise DTMError(f"policy {policy_id} still exists after delete")
 
     # issuance
-    async def issue_single(self, policy_id: str, common_name: str) -> dict:
+    async def issue_single(self, policy_id: str, common_name: str, csr: str | None = None) -> dict:
         response = await self._request(
-            "POST", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate", json={
-                "certificate_policy_id": policy_id,
-                "certificate_profile_attributes": [{"id": "subject.common_name", "value": common_name}],
-                "server_side_key_gen": True, "private_key_format": "pem", "private_key_syntax": "pkcs8",
-                "split_certificate_response": True, "include_certificate_chain": True,
-            })
+            "POST", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate",
+            json=single_body(policy_id, common_name, csr))
         return _json(response)
 
-    async def submit_batch(self, *, name: str, policy_id: str, key_type: str, csv_zip: bytes,
-                           encryption_cert_pem: str) -> dict:
-        fields = {"name": name, "certificate_policy_id": policy_id, "certificate_format": "pem",
-                  "input_format": "csv", "output_format": "zip", "server_side_key_gen": "true",
-                  "key_type": key_type, "private_key_format": "pem", "private_key_syntax": "pkcs8",
-                  "emails": "",
-                  # The spec calls this field `certificate`; DTM only accepts `encryption_certificate`.
-                  "encryption_certificate": encryption_cert_pem}
+    async def submit_batch(self, *, name: str, policy_id: str, payload: bytes, key_type: str,
+                           encryption_cert_pem: str | None) -> dict:
+        """With an encryption certificate: server-side keys (ZIP with a CSV). Without: a ZIP of CSRs."""
+        if encryption_cert_pem:
+            # The spec calls this field `certificate`; DTM only accepts `encryption_certificate`.
+            fields = batch_fields(name, policy_id, key_type) | {"encryption_certificate": encryption_cert_pem}
+        else:
+            fields = csr_batch_fields(name, policy_id)
         response = await self._request("POST", "/devicetrustmanager/certificate-batch-service/api/v1/jobs/certificate-enroll",
                                        expect=(200, 201), data=fields,
-                                       files={"data": ("batch.zip", csv_zip, "application/zip")})
+                                       files={"data": ("batch.zip", payload, "application/zip")})
         return _json(response)
 
     async def batch_job(self, job_id: str, quiet: bool = False) -> dict:

@@ -1,0 +1,27 @@
+{# Static part of the run page – not polled, so paging and open details survive a running cleanup. #}
+{% set r = run.result %}
+<article class="card">
+  <div class="card-head"><h2>Overview</h2></div>
+  {% if r.duration_s is defined %}
+  <div class="grid metrics">
+    <div><small>{{ "Upload done → completed" if run.params.mode == "batch" else "All requests" }}</small><p class="metric">{{ r.duration_s }} s</p></div>
+    {% if r.per_certificate_s %}<div><small>Time per certificate</small><p class="metric">{{ r.per_certificate_s }} s</p></div>{% endif %}
+    {% if r.per_minute %}<div><small>Certificates per minute</small><p class="metric">{{ r.per_minute }}</p></div>{% endif %}
+    {% if r.get("keygen_s") is not none %}<div><small data-tip="Key pairs and CSRs generated in the factory">Key generation</small><p class="metric">{{ r.keygen_s }} s</p></div>{% endif %}
+    {% if r.server_processing_ms %}<div><small>DTM processing time</small><p class="metric">{{ (r.server_processing_ms / 1000) | round(2) }} s</p></div>{% endif %}
+    {% if r.get("approval_s") is not none %}<div><small>Approved after</small><p class="metric">{{ r.approval_s }} s</p></div>{% endif %}
+    <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
+  </div>
+  {% endif %}
+  {% if r.response %}
+  <details><summary>DTM response (first request)</summary>
+    <dl class="kv">{% for k, v in r.response.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
+  </details>
+  {% endif %}
+  {% if r.portal_values %}
+  <section class="box accent">
+    <div class="box-head"><h3>Enter in DTM web UI <small>policy {{ r.policy }}</small></h3></div>
+    <dl class="kv">{% for k, v in r.portal_values.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
+  </section>
+  {% endif %}
+</article>

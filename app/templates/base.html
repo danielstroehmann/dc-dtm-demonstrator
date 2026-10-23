@@ -6,18 +6,20 @@
   <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
   <meta name="description" content="DTM Demonstrator – DigiCert Device Trust Manager use cases">
   <title>{% block title %}DTM Demonstrator{% endblock %}</title>
-  <link rel="stylesheet" href="/static/pico.min.css">
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/htmx.min.js" defer></script>
+  <link rel="preload" href="/static/fonts/roboto-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/pico.min.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <script src="/static/htmx.min.js?v={{ asset_v }}" defer></script>
+  <script src="/static/app.js?v={{ asset_v }}" defer></script>
 </head>
 <body>
-  <header class="container">
-    <nav>
+  <header class="site-header">
+    <nav class="container">
       <ul><li><a href="/" class="brand"><strong>DTM Demonstrator</strong></a></li></ul>
       {% block nav %}
       <ul>
         <li><a href="/settings">Settings</a></li>
-        <li><form method="post" action="/logout" class="inline"><button type="submit" class="outline secondary">Log out</button></form></li>
+        <li><form method="post" action="/logout" class="inline"><button type="submit" class="logout outline">Log out</button></form></li>
       </ul>
       {% endblock %}
     </nav>
@@ -26,5 +28,15 @@
     {% block content %}{% endblock %}
   </main>
   <footer class="container"><small>Version {{ version }}</small></footer>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <article>
+      <h3 id="confirm-title">Please confirm</h3>
+      <p data-confirm-text></p>
+      <form method="dialog" class="dialog-actions">
+        <button value="cancel" class="secondary outline" autofocus>Cancel</button>
+        <button value="ok" class="danger" data-confirm-ok>Confirm</button>
+      </form>
+    </article>
+  </dialog>
 </body>
 </html>

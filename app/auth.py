@@ -45,5 +45,6 @@ class Auth:
         return claims.get("sub") == "admin"
 
     def set_cookie(self, response, token: str) -> None:
+        # Lax: links opened from mail/chat keep the session; cross-site POSTs (CSRF) still get no cookie.
         response.set_cookie(COOKIE, token, max_age=SESSION_HOURS * 3600, httponly=True,
-                            secure=self.secure_cookie, samesite="strict")
+                            secure=self.secure_cookie, samesite="lax")

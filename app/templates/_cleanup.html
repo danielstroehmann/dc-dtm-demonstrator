@@ -1,0 +1,18 @@
+{# Static; the page reloads when a cleanup starts (form POST) or ends (HX-Refresh). #}
+{% if not active and not rolled_back %}
+<article class="card quiet">
+  <div class="card-head"><h2>Clean up</h2></div>
+  <div class="cleanup-actions">
+    <form method="post" action="/runs/{{ run.id }}/cleanup" hx-boost="true" hx-confirm="Full rollback of run {{ run.id }}?" data-confirm-label="Roll back">
+      <input type="hidden" name="mode" value="full">
+      <button type="submit" class="outline">Full rollback</button>
+    </form>
+    {% if run.cleanup_status != "done" %}
+    <form method="post" action="/runs/{{ run.id }}/cleanup" hx-boost="true" hx-confirm="Revoke the certificates of run {{ run.id }}?" data-confirm-label="Revoke">
+      <input type="hidden" name="mode" value="certificates">
+      <button type="submit" class="outline secondary">Certificates only</button>
+    </form>
+    {% endif %}
+  </div>
+</article>
+{% endif %}

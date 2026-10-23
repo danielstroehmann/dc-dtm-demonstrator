@@ -1,5 +1,5 @@
-"""Key material and certificate parsing. Private keys are written to the run directory only
-and are never returned to the UI."""
+"""Key material and certificate parsing. Private keys are never written to disk or returned to
+the UI."""
 
 import io
 import zipfile
@@ -26,6 +26,19 @@ def encryption_keypair(common_name: str) -> tuple[bytes, bytes]:
     key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                 serialization.NoEncryption())
     return cert.public_bytes(serialization.Encoding.PEM), key_pem
+
+
+def factory_csr(common_name: str, key_type: str) -> str:
+    """CSR for a fresh key pair as the factory creates it (P_256 → ECDSA P-256, RSA_2048 → RSA 2048).
+    The private key never leaves this function – the demo has no use for it."""
+    if key_type.upper().startswith("RSA"):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=int(key_type.split("_")[1]))
+    else:
+        key = ec.generate_private_key(ec.SECP256R1())
+    csr = (x509.CertificateSigningRequestBuilder()
+           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+           .sign(key, hashes.SHA256()))
+    return csr.public_bytes(serialization.Encoding.PEM).decode()
 
 
 def decrypt_result(envelope: bytes, cert_pem: bytes, key_pem: bytes) -> bytes:

@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +40,25 @@ MIGRATIONS = [
         level TEXT NOT NULL,
         message TEXT NOT NULL
     );
+    """,
+    # v2: live progress of a running step (shown while waiting for DTM)
+    "ALTER TABLE runs ADD COLUMN progress TEXT",
+    # v3: several DTM connections; the single v1/v2 setting becomes the default connection
+    """
+    CREATE TABLE connections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        host TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        api_key TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO connections (name, host, account_id, api_key, is_default)
+        SELECT 'Default', h.value, a.value, k.value, 1
+        FROM settings h, settings a, settings k
+        WHERE h.key = 'dtm_host' AND a.key = 'dtm_account_id' AND k.key = 'dtm_api_key';
+    DELETE FROM settings WHERE key IN ('dtm_host', 'dtm_account_id', 'dtm_api_key')
+        AND EXISTS (SELECT 1 FROM connections)
     """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -80,6 +100,19 @@ class Store:
                     self._db.execute("ROLLBACK")
                     raise
 
+    @contextmanager
+    def _tx(self):
+        """Explicit transaction: with isolation_level=None a failed, unclosed BEGIN would swallow every
+        later autocommit write."""
+        with self._lock:
+            self._db.execute("BEGIN")
+            try:
+                yield self._db
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
             return self._db.execute(sql, args)
@@ -96,6 +129,48 @@ class Store:
             (key, value),
         )
 
+    # DTM connections (several accounts/environments; one is the default)
+    def connections(self) -> list[dict]:
+        return [dict(r) for r in self._exec("SELECT * FROM connections ORDER BY name").fetchall()]
+
+    def connection(self, connection_id: int | None) -> dict | None:
+        if connection_id is not None and not 0 < connection_id < 2 ** 63:
+            return None
+        if connection_id is None:
+            row = self._exec("SELECT * FROM connections ORDER BY is_default DESC, id LIMIT 1").fetchone()
+        else:
+            row = self._exec("SELECT * FROM connections WHERE id = ?", (connection_id,)).fetchone()
+        return dict(row) if row else None
+
+    def connection_for(self, host: str, account_id: str) -> dict | None:
+        row = self._exec("SELECT * FROM connections WHERE host = ? AND account_id = ? ORDER BY is_default DESC, id",
+                         (host, account_id)).fetchone()
+        return dict(row) if row else None
+
+    def save_connection(self, connection_id: int | None, name: str, host: str, account_id: str,
+                        api_key: str) -> int:
+        with self._lock:
+            if connection_id is None:
+                first = self._db.execute("SELECT COUNT(*) FROM connections").fetchone()[0] == 0
+                cur = self._db.execute(
+                    "INSERT INTO connections (name, host, account_id, api_key, is_default) VALUES (?, ?, ?, ?, ?)",
+                    (name, host, account_id, api_key, int(first)))
+                return cur.lastrowid
+            self._db.execute("UPDATE connections SET name = ?, host = ?, account_id = ?, api_key = ? WHERE id = ?",
+                             (name, host, account_id, api_key, connection_id))
+            return connection_id
+
+    def set_default_connection(self, connection_id: int) -> None:
+        with self._tx() as db:
+            db.execute("UPDATE connections SET is_default = (id = ?)", (connection_id,))
+
+    def delete_connection(self, connection_id: int) -> None:
+        with self._tx() as db:
+            was_default = db.execute("SELECT is_default FROM connections WHERE id = ?", (connection_id,)).fetchone()
+            db.execute("DELETE FROM connections WHERE id = ?", (connection_id,))
+            if was_default and was_default[0]:  # keep exactly one default while any connection exists
+                db.execute("UPDATE connections SET is_default = 1 WHERE id = (SELECT MIN(id) FROM connections)")
+
     # runs
     def create_run(self, run_id: str, use_case: str, params: dict) -> None:
         self._exec(
@@ -111,14 +186,23 @@ class Store:
         return _run(row) if row else None
 
     def list_runs(self) -> list[dict]:
-        return [_run(r) for r in self._exec("SELECT * FROM runs ORDER BY created_at DESC").fetchall()]
+        # The overview needs no results (they hold every issued certificate).
+        return [_run(r) for r in self._exec(
+            "SELECT id, use_case, params, status, created_at, finished_at, NULL AS result, error, cleanup_mode, "
+            "cleanup_status, NULL AS progress FROM runs ORDER BY created_at DESC").fetchall()]
 
     def update_run(self, run_id: str, **fields) -> None:
-        for key in ("params", "result"):
+        for key in ("params", "result", "progress"):
             if key in fields and fields[key] is not None:
                 fields[key] = json.dumps(fields[key])
         cols = ", ".join(f"{k} = ?" for k in fields)
         self._exec(f"UPDATE runs SET {cols} WHERE id = ?", (*fields.values(), run_id))
+
+    def delete_run(self, run_id: str) -> None:
+        with self._tx() as db:
+            for table in ("run_events", "run_objects"):
+                db.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+            db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
     def mark_interrupted(self) -> None:
         """Background tasks die with the process; make that visible after a restart."""
@@ -165,4 +249,5 @@ def _run(row: sqlite3.Row) -> dict:
     run = dict(row)
     run["params"] = json.loads(run["params"])
     run["result"] = json.loads(run["result"]) if run["result"] else None
+    run["progress"] = json.loads(run["progress"]) if run.get("progress") else None
     return run

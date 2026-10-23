@@ -1,15 +1,20 @@
 {% extends "base.html" %}
 {% block title %}New run · DTM Demonstrator{% endblock %}
 {% block content %}
+<nav aria-label="breadcrumb"><ul><li><a href="/runs/new?connection={{ connection.id }}">Use cases</a></li><li>{{ use_case.title }}</li></ul></nav>
 <hgroup>
-  <h1>UC-1 – Evergreen certificates</h1>
-  <p>Server-side key generation in DTM – issued individually or as a batch, via API or in the DTM web UI.</p>
+  <h1>{{ use_case.title }}</h1>
+  {% if several %}<p class="muted">Connection: <strong>{{ connection.name }}</strong> – {{ connection.host }}</p>{% endif %}
+  <p>{{ use_case.summary }}</p>
 </hgroup>
+<article class="card">
 <form method="post" action="/runs">
+  <input type="hidden" name="use_case" value="{{ use_case_id }}">
+  <input type="hidden" name="connection_id" value="{{ connection.id }}">
   <label>Run ID
     <input name="run_id" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16"
            aria-describedby="run-id-help">
-    <small id="run-id-help">Lowercase letters and digits, max. 16. Part of every object name.</small>
+    <small id="run-id-help">a–z, 0–9, max. 16</small>
   </label>
   <fieldset class="grid">
     <legend>Variant</legend>
@@ -21,7 +26,7 @@
     <label><input type="radio" name="mode" value="batch" checked> Batch</label>
     <label><input type="radio" name="mode" value="single"> Single certificate</label>
   </fieldset>
-  <label>Number of certificates (batch)
+  <label>Number of certificates
     <input type="number" name="count" value="10" min="1" max="{{ max_batch }}">
   </label>
   <label>Issuing CA
@@ -35,7 +40,8 @@
     </select>
   </label>
   <label><input type="checkbox" name="approval" value="true" role="switch">
-    Require approval (batch via API – approved immediately by the demonstrator)</label>
-  <button type="submit">Start run</button>
+    Require approval (auto-approved)</label>
+  <button type="submit" class="cta">Start run</button>
 </form>
+</article>
 {% endblock %}
