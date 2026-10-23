@@ -31,6 +31,13 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
   customers.
 - Chat with the author is German.
 
+### Deployment (overrides commons deployment / security)
+
+- Target is a fresh **Ubuntu Server 26.04 minimal**, amd64, local network only – not the
+  home-lab. No Authentik, no `shared-net`, no external reverse proxy: the demonstrator
+  brings its own reverse proxy (self-signed TLS) and built-in login.
+- Setup and update via one-line installer – see `docs/design/02-nfr.md` (NFR-1).
+
 ### Public repository
 
 - The repo is **public on GitHub, also during development**. Never commit secrets, tenant
