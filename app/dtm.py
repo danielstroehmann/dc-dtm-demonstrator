@@ -5,10 +5,11 @@ Request paths and payloads follow what was verified against a live account – t
 OpenAPI spec deviates in several places (see docs/design/uc-01-evergreen.md).
 """
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -16,6 +17,9 @@ import httpx
 # often still complete server-side. Short timeouts plus re-listing beat long waits (R-4).
 REVOKE_TIMEOUT = 8.0
 DEFAULT_TIMEOUT = 60.0
+LOOKUP_RETRIES = 3
+DIVISIONS = "/devicetrustmanager/api/v4/division"
+POLICIES = "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"
 
 
 class DTMError(RuntimeError):
@@ -27,13 +31,18 @@ class DTMError(RuntimeError):
 @dataclass(frozen=True)
 class DTMConfig:
     host: str
-    api_key: str
+    api_key: str = field(repr=False)  # never in reprs, logs or tracebacks
     account_id: str
 
 
 def _json(response: httpx.Response):
     # DTM responses may contain raw control characters (e.g. PEM line breaks) inside strings.
-    return json.loads(response.text, strict=False) if response.text else None
+    if not response.text:
+        raise DTMError(f"unexpected empty response ({response.status_code})", response.status_code)
+    try:
+        return json.loads(response.text, strict=False)
+    except ValueError as exc:
+        raise DTMError(f"unexpected non-JSON response ({response.status_code})", response.status_code) from exc
 
 
 class DTMClient:
@@ -52,18 +61,21 @@ class DTMClient:
         await self._http.aclose()
 
     async def _request(self, method: str, path: str, *, expect: tuple[int, ...] = (200,),
-                       params: dict | None = None, **kwargs) -> httpx.Response:
+                       params: dict | None = None, quiet: bool = False, **kwargs) -> httpx.Response:
+        # quiet: high-frequency calls (job polling, per-certificate revokes) stay out of the
+        # run log; callers summarise them instead.
+        on_call = (lambda _msg: None) if quiet else self._on_call
         params = {**(params or {}), "account_id": self.config.account_id}
         start = time.monotonic()
         try:
             response = await self._http.request(method, path, params=params, **kwargs)
         except httpx.TimeoutException as exc:
-            self._on_call(f"{method} {path} → timeout")
+            on_call(f"{method} {path} → timeout")
             raise DTMError(f"{method} {path} timed out") from exc
         except httpx.HTTPError as exc:
-            self._on_call(f"{method} {path} → {type(exc).__name__}")
+            on_call(f"{method} {path} → {type(exc).__name__}")
             raise DTMError(f"{method} {path} failed: {type(exc).__name__}") from exc
-        self._on_call(f"{method} {path} → {response.status_code} ({time.monotonic() - start:.1f}s)")
+        on_call(f"{method} {path} → {response.status_code} ({time.monotonic() - start:.1f}s)")
         if response.status_code not in expect:
             raise DTMError(f"{method} {path} returned {response.status_code}: {_error_text(response)}",
                            response.status_code)
@@ -110,22 +122,37 @@ class DTMClient:
             raise DTMError("no enabled rendezvous zone available for division creation")
         return enabled[0]["id"]
 
+    async def find_ids(self, path: str, name: str) -> list[str]:
+        return [r["id"] for r in await self._list(path) if r.get("name") == name]
+
     async def _find_id(self, path: str, name: str) -> str:
-        matches = [r["id"] for r in await self._list(path) if r.get("name") == name]
-        if len(matches) != 1:
-            raise DTMError(f"expected exactly one object named {name!r}, found {len(matches)}")
-        return matches[0]
+        for attempt in range(LOOKUP_RETRIES):
+            matches = await self.find_ids(path, name)
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                break
+            await asyncio.sleep(1 + attempt)  # list lags behind the create
+        raise DTMError(f"expected exactly one object named {name!r}, found {len(matches)}")
+
+    async def division_ids(self, name: str) -> list[str]:
+        return await self.find_ids(DIVISIONS, name)
+
+    async def policy_ids(self, name: str) -> list[str]:
+        return await self.find_ids(POLICIES, name)
 
     # divisions – create returns no ID, so it is looked up by its unique name
     async def create_division(self, name: str, description: str) -> str:
-        await self._request("POST", "/devicetrustmanager/api/v4/division", json={
+        await self._request("POST", DIVISIONS, json={
             "name": name, "description": description, "account_id": self.config.account_id,
             "primary_rzone_id": await self.rendezvous_zone(),
         })
-        return await self._find_id("/devicetrustmanager/api/v4/division", name)
+        return await self._find_id(DIVISIONS, name)
 
     async def delete_division(self, division_id: str) -> None:
-        await self._request("DELETE", f"/devicetrustmanager/api/v4/division/{division_id}", expect=(200, 404))
+        await self._request("DELETE", f"{DIVISIONS}/{division_id}", expect=(200, 204, 404))
+        if division_id in [r["id"] for r in await self._list(DIVISIONS)]:
+            raise DTMError(f"division {division_id} still exists after delete")
 
     # certificate policies
     async def create_policy(self, *, name: str, division_id: str, profile_id: str, ica_id: str,
@@ -133,7 +160,7 @@ class DTMClient:
         common = {"key_generation_option": "server_side", "key_type": key_type.lower(),
                   "private_key_format": "pem", "encryption_certificate_source": "provided",
                   "include_chain_option": "include_ica_and_root"}
-        await self._request("POST", "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy",
+        await self._request("POST", POLICIES,
                             expect=(200, 201), json={"certificate_policy": {
             "name": name, "division_id": division_id, "certificate_profile_id": profile_id, "ica_id": ica_id,
             "certificate_management_methods": ["SINGLE", "BATCH"],
@@ -146,14 +173,18 @@ class DTMClient:
                                          "rsa_private_key_syntax": "pkcs8", "input_type": "csv",
                                          "output_format": "zip", "report_format": "csv"},
         }})
-        return await self._find_id(
-            "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy", name)
+        return await self._find_id(POLICIES, name)
 
     async def delete_policy(self, policy_id: str) -> None:
         # Undocumented UI-internal endpoint – the only known way to delete a policy (risk R-1).
-        await self._request("DELETE",
-                            f"/devicetrustmanager/certificate-configuration-service/api-ui/v1/certificate-policy/{policy_id}",
-                            json={}, expect=(200, 204, 404))
+        # A 404 only counts if DTM says the policy is unknown; a vanished route must fail loudly.
+        response = await self._request(
+            "DELETE", f"/devicetrustmanager/certificate-configuration-service/api-ui/v1/certificate-policy/{policy_id}",
+            json={}, expect=(200, 204, 404))
+        if response.status_code == 404 and "entity_not_found" not in response.text:
+            raise DTMError("policy delete endpoint returned 404 without entity_not_found – api-ui path changed? (R-1)")
+        if policy_id in [r["id"] for r in await self._list(POLICIES)]:
+            raise DTMError(f"policy {policy_id} still exists after delete")
 
     # issuance
     async def issue_single(self, policy_id: str, common_name: str) -> dict:
@@ -179,11 +210,16 @@ class DTMClient:
                                        files={"data": ("batch.zip", csv_zip, "application/zip")})
         return _json(response)
 
-    async def batch_job(self, job_id: str) -> dict:
-        return _json(await self._request("GET", f"/devicetrustmanager/certificate-batch-service/api/v1/jobs/{job_id}"))
+    async def batch_job(self, job_id: str, quiet: bool = False) -> dict:
+        return _json(await self._request("GET", f"/devicetrustmanager/certificate-batch-service/api/v1/jobs/{job_id}",
+                                         quiet=quiet))
 
     async def approve_batch(self, job_id: str) -> None:
         await self._request("PUT", f"/devicetrustmanager/certificate-batch-service/api/v1/jobs/{job_id}/approve",
+                            json={}, expect=(200, 204))
+
+    async def reject_batch(self, job_id: str) -> None:
+        await self._request("PUT", f"/devicetrustmanager/certificate-batch-service/api/v1/jobs/{job_id}/reject",
                             json={}, expect=(200, 204))
 
     async def batch_result(self, job_id: str) -> bytes:
@@ -196,31 +232,36 @@ class DTMClient:
         return await self._list("/devicetrustmanager/certificate-issuance-service/api/v2/certificate",
                                 params={"certificate_policy_id": policy_id, "status": "issued"})
 
+    async def count_certificates(self, policy_id: str, status: str) -> int:
+        data = _json(await self._request(
+            "GET", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate", quiet=True,
+            params={"certificate_policy_id": policy_id, "status": status, "limit": 1}))
+        return int(data.get("total", 0))
+
     async def revoke(self, certificate_id: str) -> str:
-        """Returns 'revoked', 'already' or 'timeout'. Timeouts are expected under load (R-4)."""
+        """Returns 'revoked', 'already' or 'retry'. Under load (R-4) timeouts, gateway errors and
+        list lag are expected – the next pass re-lists and retries; nothing is raised."""
         try:
             await self._request(
                 "PUT", f"/devicetrustmanager/certificate-issuance-service/api/v2/certificate/{certificate_id}/revoke",
                 json={"reason": "cessation_of_operation", "comments": "dc-dtm-demonstrator cleanup"},
-                expect=(200, 204), timeout=REVOKE_TIMEOUT)
+                expect=(200, 204), timeout=REVOKE_TIMEOUT, quiet=True)
             return "revoked"
         except DTMError as exc:
-            if exc.status == 400:  # already revoked; the issued list lags behind
-                return "already"
-            if exc.status is None:
-                return "timeout"
-            raise
+            if exc.status in (401, 403):  # a broken key will not heal by retrying
+                raise
+            return "already" if exc.status == 400 else "retry"
 
 
 def _error_text(response: httpx.Response) -> str:
     try:
         data = _json(response)
-    except ValueError:
+    except DTMError:
         return response.text[:200] if not response.text.lstrip().startswith("<") else "(HTML error page)"
     if isinstance(data, dict):
         errors = data.get("errors")
         if isinstance(errors, list) and errors:
-            return "; ".join(str(e.get("message", e)) for e in errors)[:300]
+            return "; ".join(str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in errors)[:300]
         if "error" in data:
             return str(data["error"])[:300]
     return str(data)[:300]

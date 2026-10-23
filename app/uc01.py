@@ -11,7 +11,8 @@ from .dtm import DTMClient, DTMError
 from .store import Store, now
 
 USE_CASE = "uc01"
-MAX_BATCH = 10_000
+# Verified up to 1000 (≈2 min issuance); every certificate consumes a license and slows cleanup.
+MAX_BATCH = 2_000
 POLL_INTERVAL = 0.5
 SHOWN_CERTIFICATES = 50
 # DTM key type for the policy, derived from the issuing CA's algorithm.
@@ -106,13 +107,13 @@ async def _batch(client: DTMClient, store: Store, run_id: str, policy_id: str, p
     deadline = upload_done + max(600, len(names) * 2)
     status = None
     while True:
-        job = await client.batch_job(job_id)
+        job = await client.batch_job(job_id, quiet=True)
         if job.get("status") != status:
             status = job.get("status")
             log(f"t+{time.monotonic() - upload_done:.1f}s job status: {status}")
         if status in ("completed", "failed", "rejected"):
             break
-        if p.get("approval") and approval_s is None and "approv" in str(status).lower():
+        if p.get("approval") and approval_s is None and status == "pending_approval":  # verified live
             log("Approval required – approving via API")
             await client.approve_batch(job_id)
             approval_s = round(time.monotonic() - upload_done, 2)

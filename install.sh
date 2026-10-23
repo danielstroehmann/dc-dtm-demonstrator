@@ -56,7 +56,9 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "run as root (e.g. with sudo)"
 [ -z "$version" ] || [ -z "$branch" ] || die "use either --version or --branch"
-[ -z "$version" ] || [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || die "invalid version: $version"
+VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
+[ -z "$version" ] || [[ "$version" =~ $VERSION_RE ]] || die "invalid version: $version"
+[ -z "$local_image" ] || [[ "$local_image" =~ ^[a-z0-9./_:-]+$ ]] || die "invalid image name: $local_image"
 [ -z "$branch" ] || [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid branch: $branch"
 [ -z "$port" ] || { [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "invalid port: $port"
 [ -z "$tls_mode" ] || [[ "$tls_mode" =~ ^(selfsigned|custom)$ ]] || die "--tls must be selfsigned or custom"
@@ -76,7 +78,7 @@ if $uninstall; then
 			apt-get purge -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin
 			apt-get autoremove -y
 			rm -rf /var/lib/docker /var/lib/containerd /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc
-			getent group docker >/dev/null && groupdel docker || true
+			if getent group docker >/dev/null; then groupdel docker; fi
 			apt-get update -qq
 		fi
 		rm -rf "$INSTALL_DIR"
@@ -108,7 +110,7 @@ if [ -z "$version" ] && [ -z "$branch" ]; then
 			*) version="$choice" ;;
 		esac
 	fi
-	[ -z "$version" ] || [[ "$version" =~ ^v[0-9] ]] || die "invalid version: $version"
+	[ -z "$version" ] || [[ "$version" =~ $VERSION_RE ]] || die "invalid version: $version"
 	[ -z "$branch" ] || [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid branch: $branch"
 fi
 
@@ -130,6 +132,7 @@ if ! command -v docker >/dev/null; then
 	install -m 0755 -d /etc/apt/keyrings
 	curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 	chmod a+r /etc/apt/keyrings/docker.asc
+	# shellcheck source=/dev/null
 	. /etc/os-release
 	echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME:-$VERSION_CODENAME} stable" \
 		>/etc/apt/sources.list.d/docker.list
@@ -162,18 +165,29 @@ fi
 tls_mode="${tls_mode:-$(env_get TLS_MODE)}"; tls_mode="${tls_mode:-selfsigned}"
 port="${port:-$(env_get HTTPS_PORT)}"; port="${port:-443}"
 if [ -z "$hosts" ]; then hosts="$(env_get SITE_HOSTS)"; fi
-if [ -z "$hosts" ]; then hosts="$(hostname -f 2>/dev/null || hostname) $(hostname -I 2>/dev/null)"; fi
+if [ -z "$hosts" ]; then
+	# Host name + IPv4 addresses of real interfaces (not Docker's bridges).
+	hosts="$(hostname -f 2>/dev/null || hostname) $(ip -4 -o addr show scope global 2>/dev/null \
+		| awk '$2 !~ /^(docker|br-|veth)/ {split($4, a, "/"); print a[1]}' | xargs)"
+fi
 # IPv4 and host names only; loopback is useless for remote access.
-hosts=$(echo "$hosts" | xargs -n1 | grep -E '^[A-Za-z0-9.-]+$' | grep -v -E '^(127\.|localhost$)' | sort -u | xargs)
+hosts=$(echo "$hosts" | xargs -n1 | { grep -E '^[A-Za-z0-9.-]+$' || true; } | { grep -v -E '^(127\.|localhost$)' || true; } | sort -u | xargs)
 [ -n "$hosts" ] || die "could not determine host names – pass --host"
-first_ip=$(echo "$hosts" | xargs -n1 | grep -E '^[0-9.]+$' | head -1)
+# Browsers send no SNI for IP addresses; default to the IP of the default route.
+route_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)
+if [ -n "$route_ip" ] && echo " $hosts " | grep -q " $route_ip "; then
+	default_sni="$route_ip"
+else
+	default_sni=$(echo "$hosts" | xargs -n1 | { grep -E '^[0-9.]+$' || true; } | head -1)
+	default_sni="${default_sni:-$(echo "$hosts" | awk '{print $1}')}"
+fi
 
 env_set DEMONSTRATOR_IMAGE "$image"
 env_set TLS_MODE "$tls_mode"
 env_set HTTPS_PORT "$port"
 env_set SITE_HOSTS "\"$hosts\""
 env_set SITE_ADDRESSES "\"$(echo "$hosts" | xargs -n1 | sed 's/.*/https:\/\/&:443/' | paste -sd, - | sed 's/,/, /g')\""
-env_set DEFAULT_SNI "${first_ip:-$(echo "$hosts" | awk '{print $1}')}"
+env_set DEFAULT_SNI "$default_sni"
 
 mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
 chown "$APP_UID" "$INSTALL_DIR/data" && chmod 700 "$INSTALL_DIR/data"
@@ -202,13 +216,19 @@ for _ in $(seq 1 60); do
 	sleep 2
 done
 [ "${state:-}" = healthy ] || { compose logs --tail 50 app; die "the demonstrator did not become healthy"; }
+# The app being healthy says nothing about the proxy (TLS config, certificate files).
+for _ in $(seq 1 15); do
+	curl -fsk --resolve "$default_sni:$port:127.0.0.1" "https://$default_sni:$port/healthz" >/dev/null 2>&1 && proxy_ok=true && break
+	sleep 2
+done
+[ "${proxy_ok:-}" = true ] || { compose logs --tail 50 proxy; die "the HTTPS proxy is not reachable on port $port"; }
 
 echo
 info "DTM Demonstrator $ref is running:"
 for h in $hosts; do
 	echo "      https://$h$([ "$port" = 443 ] || echo ":$port")/"
 done
-[ "$tls_mode" = selfsigned ] && echo "    (self-signed certificate – your browser will ask you to accept it)"
+if [ "$tls_mode" = selfsigned ]; then echo "    (self-signed certificate – your browser will ask you to accept it)"; fi
 if [ -n "$new_password" ]; then
 	echo
 	echo "    Login password (shown only once, stored in $env_file):"

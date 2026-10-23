@@ -8,6 +8,7 @@ from pathlib import Path
 
 # Each entry migrates the schema from version i to i+1. Never edit a released entry –
 # append a new one instead, so older data volumes upgrade cleanly.
+# Statements are split on ';' – do not use ';' inside literals or trigger bodies.
 MIGRATIONS = [
     """
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);

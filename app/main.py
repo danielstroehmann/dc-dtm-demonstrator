@@ -1,17 +1,20 @@
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import cleanup, uc01
 from .auth import COOKIE, Auth
@@ -22,9 +25,9 @@ from .store import Store
 log = logging.getLogger("demonstrator")
 HERE = Path(__file__).parent
 RUN_ID = re.compile(r"^[a-z0-9]{1,16}$")
-ACCOUNT_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
 HOST = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
 ACTIVE = {"pending", "running"}
+SHOWN_EVENTS = 200
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 
@@ -53,12 +56,21 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         config = dtm_config()
         if not config:
             raise HTTPException(409, "DTM connection is not configured")
-        on_call = (lambda msg: store.add_event(run_id, f"API {msg}", "api")) if run_id else (lambda _m: None)
+        if run_id:
+            # A run is bound to the account it was created in – never act on it via another one.
+            params = store.get_run(run_id)["params"]
+            if (params.get("dtm_host"), params.get("account_id")) != (config.host, config.account_id):
+                raise HTTPException(409, f"Run {run_id} belongs to account {params.get('account_id')} on "
+                                         f"{params.get('dtm_host')} – switch the settings back to clean it up.")
+            on_call = lambda msg: store.add_event(run_id, f"API {msg}", "api")  # noqa: E731
+        else:
+            on_call = lambda _m: None  # noqa: E731
         return client_factory(config, on_call)
 
     def spawn(coro_factory, run_id: str) -> None:
+        client = client_for(run_id)  # fails in the request, before anything is started
+
         async def runner():
-            client = client_for(run_id)
             try:
                 await coro_factory(client)
             except Exception:
@@ -83,6 +95,14 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if not request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        return render(request, "error.html", exc.status_code, message=exc.detail)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, _exc):
+        return render(request, "error.html", 400, message="Invalid or missing form values.")
 
     @app.exception_handler(RateLimitExceeded)
     async def rate_limited(request: Request, _exc):
@@ -126,13 +146,16 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     async def save_settings(request: Request, host: str = Form(...), account_id: str = Form(...),
                             api_key: str = Form("")):
         host, account_id, api_key = host.strip().lower(), account_id.strip(), api_key.strip()
-        api_key = api_key or store.get_setting("dtm_api_key") or ""
         error = None
-        if not HOST.match(host):
+        if not HOST.fullmatch(host):
             error = "Invalid host name."
-        elif not ACCOUNT_ID.match(account_id):
+        elif not _is_uuid(account_id):
             error = "The account ID must be a UUID."
-        elif not api_key:
+        elif not api_key and store.get_setting("dtm_api_key") and host != store.get_setting("dtm_host"):
+            # Never send the stored key to a host it was not entered for.
+            error = "Enter the API key again when changing the host."
+        api_key = api_key or store.get_setting("dtm_api_key") or ""
+        if not error and not api_key:
             error = "An API key is required."
         if not error:
             client = client_factory(DTMConfig(host, api_key, account_id), lambda _m: None)
@@ -159,21 +182,23 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         finally:
             await client.aclose()
         return render(request, "run_new.html", cas=cas, profiles=profiles, max_batch=uc01.MAX_BATCH,
-                      default_run_id=datetime.now().strftime("%y%m%d%H%M"))
+                      default_run_id=datetime.now().strftime("%y%m%d%H%M%S"))
 
     @app.post("/runs")
     async def create_run(request: Request, run_id: str = Form(""), variant: str = Form(...),
                          mode: str = Form(...), count: int = Form(10), ca_id: str = Form(...),
                          profile_id: str = Form(...), approval: bool = Form(False)):
-        run_id = run_id.strip().lower() or datetime.now().strftime("%y%m%d%H%M")
+        run_id = run_id.strip().lower() or datetime.now().strftime("%y%m%d%H%M%S")
         client = client_for()
         try:
             cas = {c["id"]: c for c in await client.issuing_cas()}
             profiles = {p["id"] for p in await client.certificate_profiles()}
+        except DTMError as exc:
+            raise HTTPException(502, f"Could not load data from DTM: {exc}") from exc
         finally:
             await client.aclose()
         error = None
-        if not RUN_ID.match(run_id):
+        if not RUN_ID.fullmatch(run_id):
             error = "Run ID: 1–16 lowercase letters or digits, no hyphen."
         elif store.run_exists(run_id):
             error = f"A run named {run_id!r} already exists."
@@ -188,7 +213,9 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if error:
             raise HTTPException(400, error)
         ca = cas[ca_id]
-        params = {"variant": variant, "mode": mode, "count": count if mode == "batch" else 1,
+        config = dtm_config()
+        params = {"dtm_host": config.host, "account_id": config.account_id,
+                  "variant": variant, "mode": mode, "count": count if mode == "batch" else 1,
                   "ca_id": ca_id, "ca_name": ca["name"], "key_type": uc01.KEY_TYPES[ca["key_type"]],
                   "profile_id": profile_id, "approval": approval and mode == "batch" and variant == "api"}
         store.create_run(run_id, uc01.USE_CASE, params)
@@ -196,7 +223,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     def get_run_or_404(run_id: str) -> dict:
-        run = store.get_run(run_id) if RUN_ID.match(run_id) else None
+        run = store.get_run(run_id) if RUN_ID.fullmatch(run_id) else None
         if not run:
             raise HTTPException(404, "Run not found")
         return run
@@ -204,12 +231,17 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     @app.get("/runs/{run_id}")
     async def run_page(request: Request, run_id: str):
         run = get_run_or_404(run_id)
-        return render(request, "run.html", run=run, events=store.events(run_id), active=_active(run))
+        return render(request, "run.html", **live_context(run))
 
     @app.get("/runs/{run_id}/live")
     async def run_live(request: Request, run_id: str):
         run = get_run_or_404(run_id)
-        return render(request, "_run_live.html", run=run, events=store.events(run_id), active=_active(run))
+        return render(request, "_run_live.html", **live_context(run))
+
+    def live_context(run: dict) -> dict:
+        events = store.events(run["id"])
+        return {"run": run, "events": events[-SHOWN_EVENTS:], "events_total": len(events), "active": _active(run),
+                "artifact_available": (data_dir / "runs" / run["id"] / "batch.zip").is_file()}
 
     @app.get("/runs/{run_id}/artifact")
     async def run_artifact(run_id: str):
@@ -224,15 +256,20 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         run = get_run_or_404(run_id)
         if mode not in ("full", "certificates") or _active(run):
             raise HTTPException(409, "Cleanup not possible right now")
+        if run.get("cleanup_mode") == "full" and run.get("cleanup_status") == "done":
+            raise HTTPException(409, "This run has already been rolled back")
         spawn(lambda c: cleanup.cleanup(store, c, run_id, mode, data_dir / "runs" / run_id), run_id)
         store.update_run(run_id, cleanup_status="running")
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
-    @app.exception_handler(HTTPException)
-    async def http_error(request: Request, exc: HTTPException):
-        return render(request, "error.html", exc.status_code, message=exc.detail)
-
     return app
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
 
 
 def _active(run: dict) -> bool:
@@ -242,4 +279,5 @@ def _active(run: dict) -> bool:
 def build() -> FastAPI:
     """Entry point for uvicorn (`app.main:build`, factory mode)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per DTM call is too much
     return create_app(Store(DATA_DIR / "demonstrator.db"), Auth.from_env())

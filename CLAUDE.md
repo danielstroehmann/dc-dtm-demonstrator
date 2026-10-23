@@ -37,6 +37,11 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
   home-lab. No Authentik, no `shared-net`, no external reverse proxy: the demonstrator
   brings its own reverse proxy (self-signed TLS) and built-in login.
 - Setup and update via one-line installer – see `docs/design/02-nfr.md` (NFR-1).
+- Secrets (`ADMIN_PASSWORD`, `JWT_SECRET`) live in `.env` next to the compose file, not in
+  `docker-compose.yml` (commons prefers compose): the installer replaces the compose file on
+  every update, `.env` is kept and never overwritten (0600).
+- Logout deletes the session cookie only; the stateless JWT stays valid until it expires
+  (12 h). Rotating `JWT_SECRET` invalidates all sessions.
 - CI deviation from commons git-workflow: a push to `dev` runs tests **and** publishes a
   preview image `:branch-dev` (no version, no release). Releases still only via `v*` tag (NFR-2).
 

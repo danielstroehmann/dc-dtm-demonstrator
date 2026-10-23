@@ -124,6 +124,8 @@ Spec deviations and details found (all calls with `account_id`):
 - **Revoke:** `PUT /certificate/{id}/revoke` with `reason` (e.g. `cessation_of_operation`).
   Returns `204` on success, `400` if already revoked. Slow, no bulk endpoint, stalls under high
   parallel load; use the failsafe pass approach (R-4).
+- **Cleanup revokes every certificate under the run's policy** (not only `robot-<run>-` CNs):
+  the policy belongs to the run, so portal-issued certificates with other names are included.
 - **Policy delete via `api-ui` works with revoked certificates attached**; then division delete.
   Verified cleanup order: revoke certificates → delete policy (`api-ui`) → delete division.
 - Batch jobs cannot be deleted; they expire after 30 days (`expire_at`) – accepted residue (history).

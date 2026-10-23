@@ -29,7 +29,7 @@
     <p>Certificate management → issue a certificate with policy <code>{{ r.policy }}</code>:</p>
     <dl class="kv">{% for k, v in r.portal_values.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
     {% endif %}
-    {% if r.artifact %}
+    {% if r.artifact and artifact_available %}
     <h3>Upload in the DTM web UI</h3>
     <p>Create a batch job with policy <code>{{ r.policy }}</code> and upload this file:</p>
     <a href="/runs/{{ run.id }}/artifact" role="button" class="secondary" download>Download batch file</a>
@@ -48,7 +48,7 @@
   </article>
   {% endif %}
 
-  {% if not active and run.cleanup_status != "done" %}
+  {% if not active and not (run.cleanup_mode == "full" and run.cleanup_status == "done") %}
   <article>
     <h2>Clean up</h2>
     <div class="grid">
@@ -57,17 +57,19 @@
         <button type="submit">Full rollback</button>
         <small>Revoke certificates, delete policy and division – the account is left as before.</small>
       </form>
+      {% if run.cleanup_status != "done" %}
       <form method="post" action="/runs/{{ run.id }}/cleanup" hx-boost="true" hx-confirm="Revoke all certificates of this run and keep the configuration?">
         <input type="hidden" name="mode" value="certificates">
         <button type="submit" class="secondary">Certificates only</button>
         <small>Revoke certificates, keep division and policy as a reference configuration.</small>
       </form>
+      {% endif %}
     </div>
   </article>
   {% endif %}
 
   <details {% if active %}open{% endif %}>
-    <summary>Log ({{ events | length }})</summary>
+    <summary>Log ({% if events_total > events | length %}last {{ events | length }} of {% endif %}{{ events_total }})</summary>
     <ol class="log">{% for e in events %}
       <li class="{{ e.level }}"><time>{{ e.ts[11:19] }}</time> {{ e.message }}</li>
     {% endfor %}</ol>
