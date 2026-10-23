@@ -63,5 +63,15 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 
 ### Phase
 
-- Architecture and design phase (since 2026-10-23): document and discuss only, no
-  implementation until the author says so.
+- Design phase 2026-10-23; **implementation of v0.1 started 2026-10-23** (UC-1, installer,
+  login, cleanup). Further use cases stay in design until the author starts them.
+
+### Stack (v0.1)
+
+- Python 3.14, FastAPI, Jinja2 + htmx (server-rendered, polling for live views), Pico CSS
+  (light theme), httpx (DTM client), cryptography (CMS/X.509), PyJWT (login cookie),
+  SQLite with `PRAGMA user_version` migrations under `./data`.
+- Caddy as reverse proxy (TLS `selfsigned` via `tls internal` or admin-provided cert).
+- Tests: pytest (unit, integration with mocked DTM, component via TestClient), smoke
+  against a live URL, `live` marker for the DTM test account (local stage 1 only).
+- Run tests: `python -m pytest` (live: `python -m pytest -m live`, needs `.env`).

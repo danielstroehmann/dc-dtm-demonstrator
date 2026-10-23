@@ -1,0 +1,12 @@
+# Self-signed TLS via Caddy's internal CA for the configured host names / IPs only.
+{
+	# Clients send no SNI when connecting by IP address.
+	default_sni {$DEFAULT_SNI}
+	auto_https disable_redirects
+	skip_install_trust
+}
+{$SITE_ADDRESSES} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy app:8000
+}

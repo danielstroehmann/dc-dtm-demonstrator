@@ -26,3 +26,9 @@ data/
 
 # Local dev artifacts (reference-server baselines etc.)
 .local/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

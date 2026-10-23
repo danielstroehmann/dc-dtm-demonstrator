@@ -1,0 +1,14 @@
+.inline { display: inline; margin: 0; }
+.inline button { margin: 0; padding: .35rem .75rem; }
+.narrow { max-width: 28rem; margin: 2rem auto; }
+.error { color: var(--pico-del-color); }
+.status { font-weight: 600; }
+.status.completed, .status.done { color: var(--pico-ins-color); }
+.status.failed, .status.interrupted { color: var(--pico-del-color); }
+.metric { font-size: 1.6rem; font-weight: 700; margin: 0; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.log { font-family: var(--pico-font-family-monospace); font-size: .8rem; padding-left: 1.5rem; }
+.log .api { color: var(--pico-muted-color); }
+.log .error { color: var(--pico-del-color); }
+td code { font-size: .75rem; }

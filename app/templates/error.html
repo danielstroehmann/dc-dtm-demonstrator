@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Error · DTM Demonstrator{% endblock %}
+{% block content %}
+<article>
+  <h1>Something went wrong</h1>
+  <p class="error" role="alert">{{ message }}</p>
+  <a href="/">Back to overview</a>
+</article>
+{% endblock %}

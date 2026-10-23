@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Settings · DTM Demonstrator{% endblock %}
+{% block content %}
+<h1>DTM connection</h1>
+<p>All calls are scoped to the account below – the API key may see other accounts, they are never touched.</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="/settings">
+  <label>Host
+    <input name="host" value="{{ host }}" required pattern="[a-z0-9.\-]+\.[a-z]{2,}">
+  </label>
+  <label>Account ID
+    <input name="account_id" value="{{ account_id }}" required placeholder="UUID of the DTM account">
+  </label>
+  <label>API key {% if has_key %}<small>(configured – leave empty to keep it)</small>{% endif %}
+    <input type="password" name="api_key" autocomplete="off" {% if not has_key %}required{% endif %}>
+  </label>
+  <button type="submit">Check and save</button>
+</form>
+{% endblock %}

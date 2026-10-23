@@ -1,0 +1,75 @@
+<div id="live" {% if active %}hx-get="/runs/{{ run.id }}/live" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+  <p>Status: <span class="status {{ run.status }}">{{ run.status }}</span>
+    {% if run.cleanup_status %} · Cleanup: <span class="status {{ run.cleanup_status }}">{{ run.cleanup_status }}</span>{% endif %}</p>
+  {% if run.error %}<p class="error" role="alert">{{ run.error }}</p>{% endif %}
+
+  {% set r = run.result %}
+  {% if r %}
+  <article>
+    <h2>Result</h2>
+    <p>Division <code>{{ r.division }}</code> · Policy <code>{{ r.policy }}</code></p>
+    {% if r.duration_s is defined %}
+    <div class="grid metrics">
+      <div><small>{{ "Upload done → completed" if run.params.mode == "batch" else "Request duration" }}</small><p class="metric">{{ r.duration_s }} s</p></div>
+      {% if r.server_processing_ms %}<div><small>DTM processing time</small><p class="metric">{{ (r.server_processing_ms / 1000) | round(2) }} s</p></div>{% endif %}
+      {% if r.approval_s %}<div><small>Approved after</small><p class="metric">{{ r.approval_s }} s</p></div>{% endif %}
+      <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
+    </div>
+    {% endif %}
+    {% if r.response %}
+    <details><summary>DTM response (private key not shown)</summary>
+      <dl class="kv">{% for k, v in r.response.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
+    </details>
+    {% endif %}
+    {% if r.private_keys_returned or r.private_key_returned %}
+    <p><small>DTM returned {{ r.private_keys_returned or 1 }} private key(s) – kept out of the UI and discarded.</small></p>
+    {% endif %}
+    {% if r.portal_values %}
+    <h3>Enter in the DTM web UI</h3>
+    <p>Certificate management → issue a certificate with policy <code>{{ r.policy }}</code>:</p>
+    <dl class="kv">{% for k, v in r.portal_values.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
+    {% endif %}
+    {% if r.artifact %}
+    <h3>Upload in the DTM web UI</h3>
+    <p>Create a batch job with policy <code>{{ r.policy }}</code> and upload this file:</p>
+    <a href="/runs/{{ run.id }}/artifact" role="button" class="secondary" download>Download batch file</a>
+    {% endif %}
+    {% if r.certificates %}
+    <h3>Issued certificates{% if r.certificate_total > r.certificates | length %} (first {{ r.certificates | length }} of {{ r.certificate_total }}){% endif %}</h3>
+    <div class="overflow-auto">
+    <table class="striped">
+      <thead><tr><th>Common name</th><th>Serial</th><th>Valid until</th><th>Issuer</th><th>Key</th></tr></thead>
+      <tbody>{% for c in r.certificates %}
+        <tr><td>{{ c.common_name }}</td><td><code>{{ c.serial }}</code></td><td>{{ c.not_after }}</td><td>{{ c.issuer }}</td><td>{{ c.key_type }}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+    </div>
+    {% endif %}
+  </article>
+  {% endif %}
+
+  {% if not active and run.cleanup_status != "done" %}
+  <article>
+    <h2>Clean up</h2>
+    <div class="grid">
+      <form method="post" action="/runs/{{ run.id }}/cleanup" hx-boost="true" hx-confirm="Revoke all certificates and delete the policy and division of this run?">
+        <input type="hidden" name="mode" value="full">
+        <button type="submit">Full rollback</button>
+        <small>Revoke certificates, delete policy and division – the account is left as before.</small>
+      </form>
+      <form method="post" action="/runs/{{ run.id }}/cleanup" hx-boost="true" hx-confirm="Revoke all certificates of this run and keep the configuration?">
+        <input type="hidden" name="mode" value="certificates">
+        <button type="submit" class="secondary">Certificates only</button>
+        <small>Revoke certificates, keep division and policy as a reference configuration.</small>
+      </form>
+    </div>
+  </article>
+  {% endif %}
+
+  <details {% if active %}open{% endif %}>
+    <summary>Log ({{ events | length }})</summary>
+    <ol class="log">{% for e in events %}
+      <li class="{{ e.level }}"><time>{{ e.ts[11:19] }}</time> {{ e.message }}</li>
+    {% endfor %}</ol>
+  </details>
+</div>

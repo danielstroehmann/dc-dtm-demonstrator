@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+  <meta name="description" content="DTM Demonstrator – DigiCert Device Trust Manager use cases">
+  <title>{% block title %}DTM Demonstrator{% endblock %}</title>
+  <link rel="stylesheet" href="/static/pico.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="container">
+    <nav>
+      <ul><li><a href="/" class="brand"><strong>DTM Demonstrator</strong></a></li></ul>
+      {% block nav %}
+      <ul>
+        <li><a href="/settings">Settings</a></li>
+        <li><form method="post" action="/logout" class="inline"><button type="submit" class="outline secondary">Log out</button></form></li>
+      </ul>
+      {% endblock %}
+    </nav>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="container"><small>Version {{ version }}</small></footer>
+</body>
+</html>

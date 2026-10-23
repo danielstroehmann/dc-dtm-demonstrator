@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<hgroup>
+  <h1>Runs</h1>
+  <p>Every object a run creates is named <code>robot-&lt;run&gt;-…</code> and can be rolled back with one click.</p>
+</hgroup>
+{% if not configured %}
+<article><p>Configure the DTM connection first.</p><a href="/settings" role="button">Open settings</a></article>
+{% else %}
+<a href="/runs/new" role="button">New run</a>
+{% endif %}
+{% if runs %}
+<div class="overflow-auto">
+<table class="striped">
+  <thead><tr><th>Run</th><th>Use case</th><th>Variant</th><th>Status</th><th>Cleanup</th><th>Created (UTC)</th></tr></thead>
+  <tbody>
+  {% for run in runs %}
+    <tr>
+      <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+      <td>UC-1 {{ run.params.mode }}{% if run.params.mode == "batch" %} ({{ run.params.count }}){% endif %}</td>
+      <td>{{ "API" if run.params.variant == "api" else "Web UI" }}</td>
+      <td><span class="status {{ run.status }}">{{ run.status }}</span></td>
+      <td>{{ run.cleanup_status or "–" }}</td>
+      <td>{{ run.created_at[:16].replace("T", " ") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

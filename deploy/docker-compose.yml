@@ -1,0 +1,29 @@
+# Installed to /opt/dtm-demonstrator by install.sh. Values come from .env next to this file.
+services:
+  app:
+    image: ${DEMONSTRATOR_IMAGE}
+    restart: unless-stopped
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - ./data:/data
+    networks: [internal]
+
+  proxy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      SITE_ADDRESSES: ${SITE_ADDRESSES}
+      DEFAULT_SNI: ${DEFAULT_SNI}
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/tls:ro
+      - ./caddy-data:/data
+    networks: [internal]
+
+networks:
+  internal:

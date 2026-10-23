@@ -1,0 +1,11 @@
+# Admin-provided certificate and key (copied to ./tls by install.sh).
+{
+	# Clients send no SNI when connecting by IP address.
+	default_sni {$DEFAULT_SNI}
+	auto_https off
+}
+{$SITE_ADDRESSES} {
+	tls /tls/cert.pem /tls/key.pem
+	encode zstd gzip
+	reverse_proxy app:8000
+}

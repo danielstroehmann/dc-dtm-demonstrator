@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}New run · DTM Demonstrator{% endblock %}
+{% block content %}
+<hgroup>
+  <h1>UC-1 – Evergreen certificates</h1>
+  <p>Server-side key generation in DTM – issued individually or as a batch, via API or in the DTM web UI.</p>
+</hgroup>
+<form method="post" action="/runs">
+  <label>Run ID
+    <input name="run_id" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16"
+           aria-describedby="run-id-help">
+    <small id="run-id-help">Lowercase letters and digits, max. 16. Part of every object name.</small>
+  </label>
+  <fieldset class="grid">
+    <legend>Variant</legend>
+    <label><input type="radio" name="variant" value="api" checked> Via API (measured)</label>
+    <label><input type="radio" name="variant" value="webui"> In the DTM web UI</label>
+  </fieldset>
+  <fieldset class="grid">
+    <legend>Issuance</legend>
+    <label><input type="radio" name="mode" value="batch" checked> Batch</label>
+    <label><input type="radio" name="mode" value="single"> Single certificate</label>
+  </fieldset>
+  <label>Number of certificates (batch)
+    <input type="number" name="count" value="10" min="1" max="{{ max_batch }}">
+  </label>
+  <label>Issuing CA
+    <select name="ca_id" required>
+      {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
+    </select>
+  </label>
+  <label>Certificate profile
+    <select name="profile_id" required>
+      {% for p in profiles %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label><input type="checkbox" name="approval" value="true" role="switch">
+    Require approval (batch via API – approved immediately by the demonstrator)</label>
+  <button type="submit">Start run</button>
+</form>
+{% endblock %}

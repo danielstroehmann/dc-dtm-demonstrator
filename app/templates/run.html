@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id }} · DTM Demonstrator{% endblock %}
+{% block content %}
+<hgroup>
+  <h1>Run {{ run.id }}</h1>
+  <p>UC-1 {{ run.params.mode }}{% if run.params.mode == "batch" %} · {{ run.params.count }} certificates{% endif %}
+     · {{ "API" if run.params.variant == "api" else "DTM web UI" }} · {{ run.params.ca_name }} ({{ run.params.key_type }})
+     {% if run.params.approval %} · with approval{% endif %}</p>
+</hgroup>
+{% include "_run_live.html" %}
+{% endblock %}
