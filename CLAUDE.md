@@ -40,6 +40,18 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - CI deviation from commons git-workflow: a push to `dev` runs tests **and** publishes a
   preview image `:branch-dev` (no version, no release). Releases still only via `v*` tag (NFR-2).
 
+### DTM account scoping (global, all use cases)
+
+- The API key has access to **several DTM accounts**. Every DTM call must be explicitly
+  scoped to the configured account (`account_id`) – never rely on a default account.
+  Cleanup must never touch objects outside that account.
+- **DTM blueprints are forbidden.** Never call, execute or build on the blueprint service –
+  ignore it entirely. Create DTM objects with the regular management APIs only.
+- **Existing CAs are read-only.** The account's root/issuing CAs (ECDSA and RSA) are used
+  for issuance but never created, modified, disabled or deleted by this project.
+- Keep the test account clean: remove everything a test creates.
+- Test credentials live only in the local, gitignored `.env` – never in chat logs, docs or commits.
+
 ### Public repository
 
 - The repo is **public on GitHub, also during development**. Never commit secrets, tenant

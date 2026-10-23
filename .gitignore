@@ -23,3 +23,6 @@ data/
 # Local-only Claude Code files (not published)
 .claude/commons/
 .claude/settings.local.json
+
+# Local dev artifacts (reference-server baselines etc.)
+.local/

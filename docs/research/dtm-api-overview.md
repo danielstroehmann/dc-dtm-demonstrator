@@ -49,7 +49,7 @@ Two device-side components belong to it:
 | `/authentication-service/api/v1,v2` | Authentication policies, passcodes, auth certificates |
 | `/certificate-batch-service/api/v1` | Batch jobs (registration, enrollment, passcode import) with approve/reject |
 | `/cloud-platform-policy/api/v4` | Cloud onboarding (AWS, Azure IoT DPS, Azure Event Grid), MQTT brokers |
-| `/blueprint-service/api/v1` | Blueprints: execute predefined step sequences |
+| `/blueprint-service/api/v1` | Blueprints – **not used by this project** (see `CLAUDE.md`) |
 | `/audit-log-service/api/v1` | Audit log |
 | `/api/v1/secure-object` | Secure objects (managed files/secrets for devices) |
 
@@ -85,8 +85,7 @@ Device registration includes a **license check**.
 ### a) Setup (one-time, admin)
 Division → certificate policy (incl. enrollment method) → authentication policy (e.g.
 passcode) → link device group. Helpful: `GET .../certificate-policy/{id}/enrollment-specification`
-and `/example-request` return the required fields and example requests. **Blueprints** could
-make this setup reproducible via API in one step – to check.
+and `/example-request` return the required fields and example requests.
 
 ### b) Device identity
 - **Zero touch with TrustEdge (EST)** **[Practice]**: CA certs from `/cacerts` → bootstrap
@@ -127,12 +126,18 @@ Audit log, device/artifact/release/deployment logs, dashboard, scheduled reports
 6. The TrustEdge agent crashes on empty/corrupt `desired_attributes.pb`/`metrics.pb` (`ERR_BASE64_BAD_INPUT`) → self-heal needed.
 7. Update pickup is delayed by the agent's poll interval – relevant for live demos.
 8. The agent needs IPv4 localhost (`::1` in `/etc/hosts` interferes).
-9. → The **spec is not fully reliable**; every endpoint we use needs a real test against the demo environment.
+9. Division create needs `primary_rzone_id` and returns no ID; policy create needs per-method
+   parameter blocks; batch enroll needs `input_format=csv` and the field `encryption_certificate`
+   (spec: `certificate`); batch `data_available` is true before completion – details in
+   [UC-1](../design/uc-01-evergreen.md).
+10. Certificate policies can only be deleted via the undocumented `api-ui/v1` path (R-1);
+   deleting a division does not cascade (R-2); mass revocation is slow (R-4) – see
+   [risks](../design/03-risks-and-tests.md).
+11. → The **spec is not fully reliable**; every endpoint we use needs a real test against the demo environment.
 
 ## 6. Open research items
 
 - What exactly is a **rendezvous zone** (onboarding concept, FDO-like?) and is it worth it for the demo?
-- **Blueprints**: which predefined blueprints exist, and can we create our own?
 - Can the agent receive **remote commands / desired attributes** (hint: `desired_attributes.pb`)? No docs found so far.
 - Which **inventory attributes** does TrustEdge report, and how are custom ones reported (tutorial "Report custom inventory attributes")?
 - **PQC demo**: MQTT with PQC (TrustEdge tutorial exists) + PQC metrics in the dashboard – strong demo topic.

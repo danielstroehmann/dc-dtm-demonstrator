@@ -44,7 +44,7 @@ by side.
 **Use cases as data, not as code branches:** each use case is described declaratively –
 parameters, DTM setup steps, device behavior, cleanup steps and the explanatory texts for
 the presentation. New use cases come from a new definition, not from reworking the
-orchestrator. To check: whether DTM **blueprints** can take over part of the setup.
+orchestrator. DTM **blueprints are not used** (decided 2026-10-23, see `CLAUDE.md`).
 
 ## 4. Use-case catalog (first proposal)
 
@@ -111,6 +111,12 @@ passive, because the factory (= the host) does the work.
 | Key material (batch) | Only per run under `./data/runs/<id>`, deleted on cleanup | Demo keys, but handled cleanly anyway |
 | Device image | One slim standard image (openssl, curl, SCEP/ACME clients), behavior via env; TrustEdge separate | One build, fast start of many containers, low resource usage |
 
+### Account scoping (decided 2026-10-23, global)
+
+The API key can access several DTM accounts. Every DTM call is explicitly scoped to the one
+configured `account_id`; reads, writes and cleanup never touch other accounts. The UI always
+shows which account is active.
+
 ### Naming convention (decided 2026-10-23, format still a proposal)
 
 Everything created for a demo – DTM objects, certificate subjects, containers, networks,
@@ -151,7 +157,16 @@ existing runs – otherwise `robot-acme-` would also match a run named `acme-2` 
    is left as it was before the demo. Open: some things cannot be undone via API –
    certificate policies (no delete endpoint), issued certificates (revocable, but remain as
    revoked records), audit log entries. Acceptable residue still to be defined (see 7a).
-   7a. Proposed definition of "restored": no *active* object remains (deleted where possible,
-   otherwise revoked/disabled); history (audit log, revoked records) remains by design.
+   7a. Definition of "restored" (accepted 2026-10-23): no *active* object remains (deleted
+   where possible, otherwise revoked/disabled); history (audit log, revoked records) remains
+   by design.
+   7b. **Two cleanup modes** (decided 2026-10-23):
+   - *Full* – restore the account as described above.
+   - *Devices only* – delete devices and revoke their certificates (frees licenses), but keep
+     the DTM configuration (division, policies, device groups) so it can serve as a
+     reference configuration, e.g. for a customer.
+   A run cleaned with *devices only* stays listed and can be fully cleaned later. Local key
+   material and containers are removed in both modes. Open: do passcodes / auth certificates
+   count as configuration (kept) or as credentials (removed)?
 8. **Access:** only the author behind SSO, or do colleagues operate the demonstrator too?
 9. ~~Language~~ → repo, docs and solution **fully English** (decided 2026-10-23, see `CLAUDE.md`).

@@ -24,6 +24,8 @@ Then open the URL printed at the end in your browser. *(Not available yet – se
 
 - [Vision](docs/design/01-vision.md) – goals, use-case catalog, high-level architecture, decisions, open questions
 - [Non-functional requirements](docs/design/02-nfr.md) – target platform, one-line setup
+- [UC-1 Evergreen certificates](docs/design/uc-01-evergreen.md) – requirements and open questions
+- [Risks and test cases](docs/design/03-risks-and-tests.md) – known risks, required live tests
 - [DTM API overview](docs/research/dtm-api-overview.md) – research notes on the DTM APIs
 - [DTM API endpoint index](docs/research/dtm-api-endpoints.md) – generated from the public OpenAPI spec
 
