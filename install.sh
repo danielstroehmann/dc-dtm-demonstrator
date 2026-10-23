@@ -67,6 +67,11 @@ compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrato
 
 # --- uninstall -------------------------------------------------------------------------------
 if $uninstall; then
+	if [ -f /etc/systemd/system/dtm-demonstrator.service ]; then
+		systemctl disable --now --quiet dtm-demonstrator.service || true
+		rm -f /etc/systemd/system/dtm-demonstrator.service
+		systemctl daemon-reload
+	fi
 	if [ -f "$INSTALL_DIR/docker-compose.yml" ] && command -v docker >/dev/null; then
 		info "Stopping the demonstrator"
 		if $purge; then compose down --remove-orphans --rmi all || true; else compose down --remove-orphans || true; fi
@@ -89,16 +94,19 @@ if $uninstall; then
 fi
 
 # --- choose what to install (explicit choice, never a silent install of main) -----------------
+# [ -r /dev/tty ] is true even without a controlling terminal (mode 0666) – actually open it.
+have_tty() { { : </dev/tty; } 2>/dev/null; }
+
 tty_read() { # prompt default -> answer; works when the script itself comes from a pipe
 	local answer=""
-	if [ -r /dev/tty ]; then read -r -p "$1" answer </dev/tty || true; fi
+	if have_tty; then read -r -p "$1" answer </dev/tty || true; fi
 	echo "${answer:-$2}"
 }
 
 if [ -z "$version" ] && [ -z "$branch" ]; then
 	latest=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
 		| sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1 || true)
-	if $assume_yes || [ ! -r /dev/tty ]; then
+	if $assume_yes || ! have_tty; then
 		[ -n "$latest" ] || die "no release published yet – choose one with --branch NAME"
 		version="$latest"
 	else
@@ -147,16 +155,45 @@ fetch() { curl -fsSL "https://raw.githubusercontent.com/$REPO/$ref/$1" -o "$2" |
 fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"
 
 env_file="$INSTALL_DIR/.env"
-touch "$env_file" && chmod 600 "$env_file"
-env_get() { sed -n "s/^$1=//p" "$env_file" | tail -1 | sed 's/^"\(.*\)"$/\1/'; }
-env_set() { # replace or append KEY=VALUE
-	if grep -q "^$1=" "$env_file"; then sed -i "s|^$1=.*|$1=$2|" "$env_file"; else echo "$1=$2" >>"$env_file"; fi
+if [ ! -s "$env_file" ]; then
+	cat >"$env_file" <<'EOF'
+# DTM Demonstrator settings. Edit, then reboot or run: systemctl restart dtm-demonstrator
+# SITE_HOSTS: space-separated host names / IPv4 addresses the HTTPS certificate covers.
+# DEFAULT_SNI: the address used when a browser connects by IP (no SNI).
+EOF
+fi
+chmod 600 "$env_file"
+env_tmp=""
+trap 'rm -f "$env_tmp"' EXIT  # never leave a copy of the secrets behind
+env_get() { sed -n "s/^$1=//p" "$env_file" | tail -1 | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/'; }
+env_rewrite() { # drop KEY, optionally append KEY='VALUE' – single quotes: compose takes the value literally
+	env_tmp=$(mktemp "$env_file.XXXXXX")
+	{ grep -a -v "^$1=" "$env_file" || true; [ $# -lt 2 ] || printf "%s='%s'\n" "$1" "$2"; } >"$env_tmp"
+	chmod 600 "$env_tmp" && mv "$env_tmp" "$env_file"
+	env_tmp=""
 }
+env_set() { env_rewrite "$1" "$2"; }
 
-# Secrets: generated once, never overwritten on later runs.
-new_password=""
+# Secrets: set once, never overwritten on later runs.
+new_password="" shown_password=""
 if [ -z "$(env_get ADMIN_PASSWORD)" ]; then
-	new_password=$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-24)
+	if ! $assume_yes && have_tty; then
+		while true; do
+			pw1="" pw2=""
+			IFS= read -r -s -p "Initial login password (min. 12 characters, empty = generate one): " pw1 </dev/tty || true; echo
+			[ -z "$pw1" ] && break
+			if [ "${#pw1}" -lt 12 ]; then echo "  Too short."; continue; fi
+			# ' and \ cannot be stored safely for docker compose
+			case "$pw1" in *"'"* | *\\*) echo "  The password must not contain ' or \\ – pick another."; continue ;; esac
+			IFS= read -r -s -p "Repeat the password: " pw2 </dev/tty || true; echo
+			[ "$pw1" = "$pw2" ] && { new_password="$pw1"; break; }
+			echo "  The passwords do not match."
+		done
+	fi
+	if [ -z "$new_password" ]; then
+		new_password=$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-24)
+		shown_password="$new_password"  # generated: show it once at the end
+	fi
 	env_set ADMIN_PASSWORD "$new_password"
 fi
 [ -n "$(env_get JWT_SECRET)" ] || env_set JWT_SECRET "$(openssl rand -hex 32)"
@@ -169,24 +206,40 @@ if [ -z "$hosts" ]; then
 	# Host name + IPv4 addresses of real interfaces (not Docker's bridges).
 	hosts="$(hostname -f 2>/dev/null || hostname) $(ip -4 -o addr show scope global 2>/dev/null \
 		| awk '$2 !~ /^(docker|br-|veth)/ {split($4, a, "/"); print a[1]}' | xargs)"
+	if ! $assume_yes && have_tty; then
+		# The DNS name the browser uses is often not the local host name – the certificate must cover it.
+		extra=$(tty_read "Additional host names for HTTPS, space-separated (detected: $(echo "$hosts" | xargs)) []: " "")
+		hosts="$hosts $extra"
+	fi
 fi
 # IPv4 and host names only; loopback is useless for remote access.
-hosts=$(echo "$hosts" | xargs -n1 | { grep -E '^[A-Za-z0-9.-]+$' || true; } | { grep -v -E '^(127\.|localhost$)' || true; } | sort -u | xargs)
+valid_hosts=""
+for h in $(echo "$hosts" | tr ',' ' '); do  # word splitting handles spaces, tabs, newlines
+	if [[ "$h" =~ ^[A-Za-z0-9.-]+$ ]] && ! [[ "$h" =~ ^(127\.|localhost$) ]]; then
+		valid_hosts="$valid_hosts $h"
+	else
+		echo "WARNING: ignoring host '$h' (plain host names or IPv4 addresses only, no scheme or port)" >&2
+	fi
+done
+hosts=$(echo "$valid_hosts" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//')
 [ -n "$hosts" ] || die "could not determine host names – pass --host"
 # Browsers send no SNI for IP addresses; default to the IP of the default route.
 route_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)
-if [ -n "$route_ip" ] && echo " $hosts " | grep -q " $route_ip "; then
+previous_sni=$(env_get DEFAULT_SNI)
+if [ -n "$previous_sni" ] && [[ " $hosts " == *" $previous_sni "* ]]; then
+	default_sni="$previous_sni"  # keep a hand-picked value while it is still covered
+elif [ -n "$route_ip" ] && [[ " $hosts " == *" $route_ip "* ]]; then
 	default_sni="$route_ip"
 else
-	default_sni=$(echo "$hosts" | xargs -n1 | { grep -E '^[0-9.]+$' || true; } | head -1)
-	default_sni="${default_sni:-$(echo "$hosts" | awk '{print $1}')}"
+	default_sni=$(echo "$hosts" | tr ' ' '\n' | { grep -E '^[0-9.]+$' || true; } | head -1)
+	default_sni="${default_sni:-${hosts%% *}}"
 fi
 
 env_set DEMONSTRATOR_IMAGE "$image"
 env_set TLS_MODE "$tls_mode"
 env_set HTTPS_PORT "$port"
-env_set SITE_HOSTS "\"$hosts\""
-env_set SITE_ADDRESSES "\"$(echo "$hosts" | xargs -n1 | sed 's/.*/https:\/\/&:443/' | paste -sd, - | sed 's/,/, /g')\""
+env_set SITE_HOSTS "$hosts"
+env_rewrite SITE_ADDRESSES  # derived from SITE_HOSTS when the proxy starts (older installs stored it)
 env_set DEFAULT_SNI "$default_sni"
 
 mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
@@ -203,12 +256,40 @@ if [ "$tls_mode" = custom ]; then
 fi
 fetch "deploy/Caddyfile.$tls_mode" "$INSTALL_DIR/Caddyfile"
 
+# --- boot integration: apply .env changes on every start ------------------------------------
+# Containers keep the environment they were created with; `compose up -d` at boot recreates the
+# ones whose configuration (e.g. .env) changed.
+docker_bin=$(command -v docker)
+[[ "$docker_bin" == /snap/* ]] && die "Docker from the snap store is not supported – remove it and re-run (the installer sets up Docker Engine)"
+cat >/etc/systemd/system/dtm-demonstrator.service <<EOF
+[Unit]
+Description=DTM Demonstrator
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$INSTALL_DIR
+# No ExecStop: Docker's restart policy stays the fallback if this unit fails at boot.
+ExecStart=$docker_bin compose --project-directory $INSTALL_DIR -p dtm-demonstrator up -d --remove-orphans
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --quiet dtm-demonstrator.service
+
 # --- start ----------------------------------------------------------------------------------
 if [ -z "$local_image" ]; then
 	info "Pulling images"
 	compose pull --quiet
 fi
-compose up -d --remove-orphans
+systemctl restart dtm-demonstrator.service  # = compose up -d; keeps the unit state truthful
 info "Waiting for the demonstrator to become healthy"
 for _ in $(seq 1 60); do
 	state=$(docker inspect -f '{{.State.Health.Status}}' "$(compose ps -q app)" 2>/dev/null || true)
@@ -229,8 +310,8 @@ for h in $hosts; do
 	echo "      https://$h$([ "$port" = 443 ] || echo ":$port")/"
 done
 if [ "$tls_mode" = selfsigned ]; then echo "    (self-signed certificate – your browser will ask you to accept it)"; fi
-if [ -n "$new_password" ]; then
+if [ -n "$shown_password" ]; then
 	echo
 	echo "    Login password (shown only once, stored in $env_file):"
-	echo "      $new_password"
+	echo "      $shown_password"
 fi

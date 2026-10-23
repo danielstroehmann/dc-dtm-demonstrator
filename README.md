@@ -4,21 +4,28 @@ A demonstrator for **DigiCert® Device Trust Manager (DTM)**: it runs typical DT
 end to end – configuration in DTM, simulated devices (one container each) that obtain and
 use certificates, live observation – and rolls everything back afterwards with one click.
 
-> **Status: architecture & design phase.** There is no code yet – only design documents.
+> **Status: v0.1 in development** – UC-1 and UC-2 work end to end; no release published yet.
 
-## Quick start (planned)
+## Install
 
-On a fresh Ubuntu Server 26.04 (minimal installation), one command prepares the machine and
-starts the demonstrator:
+On a fresh Ubuntu Server 26.04 (minimal installation), one command prepares the machine (Docker),
+asks for the initial login password and the host names for the HTTPS certificate, and starts the
+demonstrator:
 
 ```bash
+# latest release
 curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.sh | sudo bash
+# a branch preview (e.g. dev)
+curl -fsSL https://raw.githubusercontent.com/danielstroehmann/dc-dtm-demonstrator/dev/install.sh | sudo bash -s -- --branch dev
 ```
 
-A specific version: append `-s -- --version vX.Y.Z` to `sudo bash`.
+Then open one of the printed URLs. Options: `--version vX.Y.Z`, `--host NAME` (repeatable),
+`--tls custom --tls-cert … --tls-key …`, `--port N`, `--yes` (no questions; a password is generated
+and shown once), `--uninstall [--purge]`.
 
-Then open the URL printed at the end in your browser. *(Not available yet – see
-[NFRs](docs/design/02-nfr.md).)*
+Settings live in `/opt/dtm-demonstrator/.env` (e.g. `SITE_HOSTS` for the certificate names). After editing it, reboot or run
+`systemctl restart dtm-demonstrator` – the containers are recreated with the new values. Re-running
+the one-liner updates the installation and keeps data, password and settings.
 
 ## Documentation
 

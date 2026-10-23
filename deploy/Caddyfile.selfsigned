@@ -8,5 +8,6 @@
 {$SITE_ADDRESSES} {
 	tls internal
 	encode zstd gzip
+	header -Server
 	reverse_proxy app:8000
 }

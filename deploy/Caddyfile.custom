@@ -7,5 +7,6 @@
 {$SITE_ADDRESSES} {
 	tls /tls/cert.pem /tls/key.pem
 	encode zstd gzip
+	header -Server
 	reverse_proxy app:8000
 }

@@ -20,8 +20,15 @@ services:
     restart: unless-stopped
     depends_on: [app]
     environment:
-      SITE_ADDRESSES: ${SITE_ADDRESSES}
+      SITE_HOSTS: ${SITE_HOSTS}
       DEFAULT_SNI: ${DEFAULT_SNI}
+    # Caddy needs "https://<name>:443, …"; derive it from the one editable key SITE_HOSTS.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export SITE_ADDRESSES="$$(for h in $$SITE_HOSTS; do printf 'https://%s:443, ' "$$h"; done | sed 's/, $$//')";
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     ports:
       - "${HTTPS_PORT:-443}:443"
     volumes:
