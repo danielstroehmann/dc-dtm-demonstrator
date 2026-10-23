@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets – never commit (public repo)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.jks
+secrets/
+
+# Runtime state (runs, generated keys, logs)
+data/
+*.log
+
+# Local-only Claude Code files (not published)
+.claude/commons/
+.claude/settings.local.json
