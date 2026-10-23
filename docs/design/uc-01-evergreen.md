@@ -43,14 +43,14 @@
   web UI variant the demonstrator does not know the IDs → find the certificates via the
   `robot-<run-id>-…` names (CN) that the generated artifacts contain.
 
-## Open questions
+## Resolved questions
 
-1. **Single request in the web UI with server-side keys:** there is no CSR to upload. Is the
-   artifact then just the prefilled values (CN etc.) to enter in the portal?
-2. **License release:** does revoking a certificate free its Essential license? (verify
-   against the test account)
-3. **Batch input format** for server-side keys: ZIP with CSV of subject values – exact CSV
-   columns per certificate policy (verify via `enrollment-specification`).
+1. **Single request in the web UI** (server-side keys, no CSR): the demonstrator shows the
+   prefilled values (CN etc.) to enter in the portal – confirmed 2026-10-23.
+2. **License release on revocation:** not verified; irrelevant in the test account (license
+   consumption is no concern there).
+3. **Batch input format** (server-side keys): ZIP with a CSV, header `subject.common_name`,
+   one CN per line – verified in end-to-end test 2.
 
 ## Findings from the test account (2026-10-23, read-only)
 
