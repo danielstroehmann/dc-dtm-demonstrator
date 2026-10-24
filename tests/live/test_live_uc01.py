@@ -22,6 +22,9 @@ pytestmark = pytest.mark.live
 
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 RUN_TIMEOUT_S = 300
+# Binding author rule (CLAUDE.md): live runs keep DTM load minimal – at most 2 certificates per run,
+# a batch of 2 counts as a full batch test. tests/live/conftest.py enforces the limit.
+LIVE_COUNT = 2
 CLEANUP_TIMEOUT_S = 600
 
 
@@ -125,14 +128,15 @@ def assert_clean(after_cleanup: dict, events: list[dict]):
 
 
 async def test_live_batch_with_approval(config, tmp_path):
-    run, after_cleanup, events, run_id = await execute(config, tmp_path, mode="batch", count=3, approval=True)
+    run, after_cleanup, events, run_id = await execute(config, tmp_path, mode="batch", count=LIVE_COUNT, approval=True)
     messages = [e["message"] for e in events]
     assert run and run["status"] == "completed", messages[-8:]
     r = run["result"]
     assert r["approval_s"] is not None, "approval step was not detected"
-    assert r["certificate_total"] == 3 and r["private_keys_returned"] == 3
-    assert sorted(c["common_name"] for c in r["certificates"]) == evergreen.common_names(run_id, "batch", 3, "uc01")
-    assert r["success_items"] == 3 and not r["failed_items"]
+    assert r["certificate_total"] == LIVE_COUNT and r["private_keys_returned"] == LIVE_COUNT
+    assert sorted(c["common_name"] for c in r["certificates"]) == evergreen.common_names(run_id, "batch", LIVE_COUNT,
+                                                                                         "uc01")
+    assert r["success_items"] == LIVE_COUNT and not r["failed_items"]
     assert "PRIVATE KEY" not in str(run) and "BEGIN" not in str(r["api_calls"])
     assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "POST", "GET", "LOCAL", "POST", "PUT",
                                                     "GET", "GET", "LOCAL"]
@@ -145,15 +149,16 @@ async def test_live_batch_with_approval(config, tmp_path):
 
 
 async def test_live_single(config, tmp_path):
-    run, after_cleanup, events, run_id = await execute(config, tmp_path, mode="single", count=3)
+    run, after_cleanup, events, run_id = await execute(config, tmp_path, mode="single", count=LIVE_COUNT)
     messages = [e["message"] for e in events]
     assert run and run["status"] == "completed", messages[-8:]
     r = run["result"]
-    assert [c["common_name"] for c in r["certificates"]] == evergreen.common_names(run_id, "single", 3, "uc01")
+    assert [c["common_name"] for c in r["certificates"]] == evergreen.common_names(run_id, "single", LIVE_COUNT, "uc01")
     assert all(c["key_type"].startswith("ECDSA") for c in r["certificates"])
-    assert r["certificate_total"] == 3 and r["private_keys_returned"] == 3 and "PRIVATE KEY" not in str(run)
+    assert r["certificate_total"] == LIVE_COUNT and r["private_keys_returned"] == LIVE_COUNT
+    assert "PRIVATE KEY" not in str(run)
     assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "POST", "GET", "POST"]
-    assert (r["api_calls"][-1]["count"], r["api_calls"][-1]["outcome"]) == (3, "ok")
+    assert (r["api_calls"][-1]["count"], r["api_calls"][-1]["outcome"]) == (LIVE_COUNT, "ok")
     assert r["per_certificate_s"] > 0 and r["per_minute"] > 0
     assert config.api_key not in str(run)
     assert_clean(after_cleanup, events)
@@ -161,13 +166,14 @@ async def test_live_single(config, tmp_path):
 
 async def test_live_uc02_batch(config, tmp_path):
     """UC-2: the demonstrator plays the factory – CSRs only, no private key travels."""
-    run, after_cleanup, events, run_id = await execute(config, tmp_path, use_case="uc02", mode="batch", count=3)
+    run, after_cleanup, events, run_id = await execute(config, tmp_path, use_case="uc02", mode="batch", count=LIVE_COUNT)
     messages = [e["message"] for e in events]
     assert run and run["status"] == "completed", messages[-8:]
     r = run["result"]
-    assert sorted(c["common_name"] for c in r["certificates"]) == evergreen.common_names(run_id, "batch", 3, "uc02")
+    assert sorted(c["common_name"] for c in r["certificates"]) == evergreen.common_names(run_id, "batch", LIVE_COUNT,
+                                                                                         "uc02")
     assert all(c["key_type"].startswith("ECDSA") for c in r["certificates"])
-    assert r["certificate_total"] == 3 and r["private_keys_returned"] == 0
+    assert r["certificate_total"] == LIVE_COUNT and r["private_keys_returned"] == 0
     assert r["keygen_s"] is not None and r["artifact"] == "csrs.zip"
     assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "POST", "GET", "LOCAL", "POST", "GET",
                                                     "GET"]

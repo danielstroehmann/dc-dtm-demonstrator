@@ -55,6 +55,10 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - **Existing CAs are read-only.** The account's root/issuing CAs (ECDSA and RSA) are used
   for issuance but never created, modified, disabled or deleted by this project.
 - Keep the test account clean: remove everything a test creates.
+- **Minimise load on DTM during development** (2026-10-24): our testing surfaced a DTM revocation
+  timeout bug that endangers DTM SLAs. Live batches use **at most 2 certificates** – that counts as
+  a successful test for everything batch-related. Prefer the fake DTM; run live tests only when a
+  change touches real DTM behaviour, and keep each live run to the minimum number of calls.
 - Test credentials live only in the local, gitignored `.env` – never in chat logs, docs or commits.
 
 ### UI (overrides commons ui-ux "unified look across projects")

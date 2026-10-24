@@ -13,10 +13,14 @@ asks for the initial login password and the host names for the HTTPS certificate
 demonstrator:
 
 ```bash
-# latest release
-curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.sh | sudo bash
-# a branch preview (e.g. dev)
 curl -fsSL https://raw.githubusercontent.com/danielstroehmann/dc-dtm-demonstrator/dev/install.sh | sudo bash -s -- --branch dev
+```
+
+This installs the current development preview (`dev`). Once the first release is published, the
+latest release installs with:
+
+```bash
+curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.sh | sudo bash
 ```
 
 Then open one of the printed URLs. Options: `--version vX.Y.Z`, `--host NAME` (repeatable),
