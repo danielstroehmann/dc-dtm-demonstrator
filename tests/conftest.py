@@ -195,6 +195,11 @@ class FakeOpenSSL:
     def _write(self):
         (self.bin_dir / "config.json").write_text(json.dumps(self.config))
 
+    def pass_through(self, real_openssl: str) -> None:
+        """Hand every non-cmp openssl command to the real binary (for executing whole snippets)."""
+        self.config["real_openssl"] = real_openssl
+        self._write()
+
     def fail_with(self, message: str) -> None:
         self.config["fail"] = message
         self._write()

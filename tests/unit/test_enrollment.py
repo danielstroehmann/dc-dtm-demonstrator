@@ -164,25 +164,68 @@ async def test_station_hosts_and_files(tmp_path):
 COMBOS = [(p, a) for p in enrollment.PROTOCOLS for a in enrollment.AUTHS]
 
 
+def steps_of(protocol, auth, cn="robot-x1-uc03-dev-0001", key_type="P_256"):
+    return enrollment.enroll_steps(protocol, auth, cn, key_type)
+
+
 @pytest.mark.parametrize("protocol,auth", COMBOS)
-def test_enroll_command_shapes(protocol, auth):
-    command = enrollment.enroll_command(protocol, auth, "robot-x1-uc03-dev-0001", "P_256")
-    assert set(command) == {"bash", "powershell"}
-    for shell, text in command.items():
-        assert "x-api-key" not in text.lower() and "DTM_API_KEY" not in text and "account_id" not in text
-        assert "PRIVATE KEY" not in text
+def test_enroll_steps_structure(protocol, auth):
+    steps = steps_of(protocol, auth)
+    setup = {("est", "certificate"): 1, ("rest", "certificate"): 1, ("cmpv2", "certificate"): 1}.get((protocol, auth), 0)
+    assert [s["kind"] for s in steps] == ["setup"] * setup + ["keygen", "call", "convert"]
+    assert [s["phase"] for s in steps] == ["setup"] * setup + ["recurring"] * 3
+    for s in steps:
+        assert set(s) == {"kind", "purpose", "method", "path", "command", "phase"}
+        assert set(s["command"]) == {"bash", "powershell"} and all(s["command"].values())
+        assert s["method"] == ("POST" if s["kind"] == "call" else "LOCAL")
+    assert len({s["purpose"] for s in steps}) == len(steps)  # each step is its own entry
+    call = steps[setup + 1]
+    assert call["path"] == {"rest": enrollment.REST_PATH,
+                            "est": "/.well-known/est/devicetrustmanager/{POLICY_ID}/simpleenroll",
+                            "cmpv2": enrollment.CMP_PATH.format(alternative_id="{CMP_ID}")}[protocol]
+    if setup:
+        setup_bash = steps[0]["command"]["bash"]
+        if protocol == "cmpv2":
+            assert "ca-chain.pem" in setup_bash and "ConvertFrom-Json" in steps[0]["command"]["powershell"]
+        else:  # PKCS#12 only for Windows curl.exe; bash needs nothing
+            assert setup_bash.startswith("#") and "\n" not in setup_bash
+            assert "openssl pkcs12 -export" in steps[0]["command"]["powershell"]
+
+
+@pytest.mark.parametrize("protocol,auth", COMBOS)
+def test_enroll_steps_carry_no_secret_and_the_right_auth(protocol, auth):
+    steps = steps_of(protocol, auth)
+    for s in steps:
+        for shell, text in s["command"].items():
+            assert "x-api-key" not in text.lower() and "DTM_API_KEY" not in text and "account_id" not in text
+            assert "PRIVATE KEY" not in text and "BEGIN CERTIFICATE" not in text
+    call = next(s for s in steps if s["kind"] == "call")
+    for shell, text in call["command"].items():
+        ps = shell == "powershell"
         if auth == "passcode":  # always a variable the user sets
-            assert ("${PASSCODE" if shell == "bash" else "$env:PASSCODE") in text
-    ps = command["powershell"]
-    if protocol != "cmpv2":
-        assert '"$PWD/' in ps or "Set-Content" in ps  # .NET file IO resolves against $PWD, not the process dir
+            assert ("$env:PASSCODE" if ps else "${PASSCODE") in text
+        if protocol == "cmpv2":
+            assert "clientauth." not in text and "DIOT_" in text and "-certout device.crt" in text
+            assert ("-ref " in text and "-secret env:PASSCODE" in text) == (auth == "passcode")
+            assert ("-extracerts factory.crt -trusted ca-chain.pem" in text) == (auth == "certificate")
+        else:
+            assert ("clientauth." in text) == (auth == "certificate")
+            client_cert = "--cert-type P12 --cert factory.p12" if ps else "--cert factory.crt --key factory.key"
+            assert (client_cert in text) == (auth == "certificate")
+            marker = "Authorization: Basic" if protocol == "est" else "x-passcode:"
+            assert (marker in text) == (auth == "passcode")
+            assert ("--fail-with-body" if protocol == "rest" else "--fail ") in text
+            assert "|" not in text.replace("printf %s \"${PASSCODE}\" | openssl base64 -A", "")  # no pipes
+    for s in steps:  # .NET file IO resolves against the process dir – always "$PWD/…"
+        ps = s["command"]["powershell"]
         assert ps.count("[IO.File]::") == ps.count('"$PWD/')
 
 
 @pytest.mark.parametrize("key_type,expected,other", [("P_256", "P-256", "rsa"), ("RSA_2048", "rsa", "P-256")])
-def test_enroll_command_key_type(key_type, expected, other):
+def test_enroll_steps_key_type(key_type, expected, other):
     for protocol in enrollment.PROTOCOLS:
-        bash = enrollment.enroll_command(protocol, "passcode", "cn", key_type)["bash"]
+        keygen = next(s for s in steps_of(protocol, "passcode", key_type=key_type) if s["kind"] == "keygen")
+        bash = keygen["command"]["bash"]
         assert expected in bash and other not in bash
 
 
@@ -222,7 +265,13 @@ CURL_STUB = textwrap.dedent("""\
             .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
             .sign(ca_key, hashes.SHA256()))
     if "/simpleenroll" in opts["url"]:
-        sys.stdout.write(base64.b64encode(pkcs7.serialize_certificates([cert], serialization.Encoding.DER)).decode())
+        answer = base64.b64encode(pkcs7.serialize_certificates([cert], serialization.Encoding.DER)).decode()
+        if os.environ.get("STUB_EST_WRAP", "64") == "64":  # MIME-style lines; "none": one line
+            answer = "".join(answer[i:i + 64] + "\\n" for i in range(0, len(answer), 64))
+        if "-o" in opts:
+            open(opts["-o"], "w").write(answer)
+        else:
+            sys.stdout.write(answer)
     else:
         open(opts["-o"], "w").write(json.dumps({"pem": cert.public_bytes(serialization.Encoding.PEM).decode()}))
     """)
@@ -257,13 +306,19 @@ def bash_env(tmp_path):
     return run, work, env
 
 
+def bash_session(protocol, auth, cn):
+    """All steps one after another in one shell – how a user pastes them."""
+    return "\n".join(s["command"]["bash"] for s in steps_of(protocol, auth, cn))
+
+
 @pytest.mark.parametrize("protocol", ["est", "rest"])
 @pytest.mark.parametrize("auth", ["passcode", "certificate"])
-def test_bash_enroll_command_runs(bash_env, protocol, auth):
+def test_bash_enroll_steps_run(bash_env, protocol, auth):
+    if protocol == "rest" and not shutil.which("jq"):
+        pytest.skip("jq not available")
     run, work, env = bash_env
     cn = "robot-x1-uc03-dev-0001"
-    calls = run(enrollment.enroll_command(protocol, auth, cn, "P_256")["bash"])
-    (call,) = calls
+    (call,) = run(bash_session(protocol, auth, cn))
     host = "clientauth.dtm.example.com" if auth == "certificate" else "dtm.example.com"
     path = (enrollment.EST_PATH.format(policy_id="IOT_abc") if protocol == "est" else enrollment.REST_PATH)
     assert call["opts"]["url"] == f"https://{host}{path}" and call["opts"]["-X"] == "POST"
@@ -280,12 +335,57 @@ def test_bash_enroll_command_runs(bash_env, protocol, auth):
         request = json.loads(call["body"])
         assert request["certificate_policy_id"] == "IOT_abc"
         assert request["certificate_profile_attributes"] == [{"id": "subject.common_name", "value": cn}]
-        cert = x509.load_pem_x509_certificate(json.loads((work / "certificate.json.out").read_text())["pem"].encode())
-    else:
-        cert = x509.load_pem_x509_certificate((work / "device.crt").read_bytes())
+    # the convert step leaves a PEM device certificate for the device key
+    cert = x509.load_pem_x509_certificate((work / "device.crt").read_bytes())
     key = serialization.load_pem_private_key((work / "device.key").read_bytes(), None)
     assert cert.public_key().public_numbers() == key.public_key().public_numbers()
     assert cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == cn
+
+
+@pytest.mark.parametrize("auth", ["passcode", "certificate"])
+def test_bash_cmp_steps_run(bash_env, cmp_openssl, auth):
+    """keygen and convert run with the real openssl, the cmp call with the recording fake."""
+    if auth == "certificate" and not shutil.which("jq"):
+        pytest.skip("jq not available")
+    run, work, env = bash_env
+    real = next(p for p in (shutil.which("openssl", path=d) for d in env["PATH"].split(os.pathsep)
+                            if d != str(cmp_openssl.bin_dir)) if p)
+    cmp_openssl.pass_through(real)
+    env["PATH"] = f"{cmp_openssl.bin_dir}{os.pathsep}{env['PATH']}"
+    env |= {"CMP_ID": "abc123", "PASSCODE_REF": "ref-42"}
+    cn = "robot-x1-uc03-cmpv2-0001"
+    prepare = ""
+    if auth == "certificate":
+        ica, _ = make_cert("Fake ICA", ca=True)
+        blob = base64.b64encode(ica.public_bytes(serialization.Encoding.DER)).decode()
+        (work / "policy.json").write_text(json.dumps({"ca_chain": [{"blob": blob}]}))
+        prepare = enrollment.factory_command("robot-x1-uc03-factory")["bash"] + "\n"
+    run(prepare + bash_session("cmpv2", auth, cn))
+    (call,) = cmp_openssl.calls()
+    argv = call["argv"]
+
+    def opt(flag):
+        return argv[argv.index(flag) + 1]
+    assert opt("-server") == "https://dtm.example.com" + enrollment.CMP_PATH.format(alternative_id="abc123")
+    assert opt("-newkey") == "device.key" and opt("-subject") == f"/CN={cn}" and opt("-certout") == "device.crt"
+    if auth == "passcode":
+        assert opt("-ref") == "ref-42" and opt("-secret") == "env:PASSCODE"
+        assert env["PASSCODE"] not in " ".join(argv)
+    else:
+        assert opt("-cert") == opt("-extracerts") == "factory.crt" and opt("-trusted") == "ca-chain.pem"
+        assert call["files"]["-trusted"] == cert_pem(x509.load_der_x509_certificate(base64.b64decode(blob)))
+    cert = x509.load_pem_x509_certificate((work / "device.crt").read_bytes())
+    key = serialization.load_pem_private_key((work / "device.key").read_bytes(), None)
+    assert cert.public_key().public_numbers() == key.public_key().public_numbers()
+
+
+def test_bash_est_convert_accepts_single_line_base64(bash_env):
+    """DTM's line wrapping of the base64 PKCS#7 answer is not verified. `openssl base64 -d` without
+    -A silently decodes a single long line to nothing; with -A it handles both forms."""
+    run, work, env = bash_env
+    env["STUB_EST_WRAP"] = "none"
+    run(bash_session("est", "passcode", "robot-x1-uc03-dev-0001"))
+    x509.load_pem_x509_certificate((work / "device.crt").read_bytes())
 
 
 def test_bash_factory_command_runs(bash_env):
@@ -331,7 +431,7 @@ def test_new_tokens_become_shell_variables():
 
 
 def test_render_has_no_alternative_auth_any_more():
-    """Enrollment commands come from enrollment.enroll_command only; render() always speaks to the
+    """Enrollment commands come from enrollment.enroll_steps only; render() always speaks to the
     management API with the API key."""
     spec = {"method": "POST", "path": enrollment.REST_PATH, "json": {}, "auth": "passcode"}
     curl = snippets.render(spec, "curl")

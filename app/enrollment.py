@@ -292,7 +292,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
     round trip is measured; key generation is reported separately."""
     names = common_names(run_id, p["protocol"], p["count"], p["use_case"])
     log(f"Enrolling {len(names)} device(s) via {PROTOCOLS[p['protocol']]} ({AUTHS[p['auth']].lower()}), one by one")
-    issued, seconds, keygen, per_device = [], [], 0.0, []
+    issued, seconds, keygen, per_device, keys = [], [], 0.0, [], 0
     started_wall = time.time()
     outcome = "error"
     try:
@@ -301,6 +301,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
             key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])
             generated = time.monotonic()
             keygen += generated - start
+            keys += 1
             issued.append(await station.enroll(cn, key_pem, csr))
             seconds.append(time.monotonic() - generated)
             per_device.append(time.monotonic() - start)
@@ -309,9 +310,12 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
                                                "started": started_wall, "total": len(names), "done": done})
         outcome = "ok"
     finally:
-        api.add(f"Enroll a device via {PROTOCOLS[p['protocol']]} (once per device)", "LOCAL",
-                PROTOCOLS[p["protocol"]], sum(seconds) or None, outcome, count=len(issued) + (outcome != "ok"),
-                spec={"command": enroll_command(p["protocol"], p["auth"], names[0], p["key_type"])})
+        timing = {"keygen": (keygen or None, "ok", keys),
+                  "call": (sum(seconds) or None, outcome, len(issued) + (outcome != "ok"))}
+        for step in enroll_steps(p["protocol"], p["auth"], names[0], p["key_type"]):
+            seconds_, outcome_, count = timing.get(step["kind"], (None, "ok", 1))
+            api.add(step["purpose"], step["method"], step["path"], seconds_, outcome_, count=count,
+                    spec={"command": step["command"]}, phase=step["phase"])
     total = sum(seconds)
     # A station also generates every key pair – the extrapolation uses the median per device of
     # key generation + round trip (robust against one slow request).
@@ -340,78 +344,94 @@ CA_CHAIN_PS = ("# ca-chain.pem from the policy (policy.json): DTM signs CMPv2 an
                "(Get-Content policy.json -Raw | ConvertFrom-Json).ca_chain | ForEach-Object {\n"
                '  [IO.File]::WriteAllBytes("$PWD/ca.der", [Convert]::FromBase64String($_.blob))\n'
                "  openssl x509 -inform DER -in ca.der } | Set-Content ca-chain.pem")
-# Windows' curl.exe (Schannel) takes the client certificate as PKCS#12, not PEM + key.
 P12_PS = "openssl pkcs12 -export -inkey factory.key -in factory.crt -out factory.p12 -passout pass:"
 
 
-def enroll_command(protocol: str, auth: str, cn: str, key_type: str) -> dict:
-    """Copyable device enrollment, per shell. Secrets only as variables the user sets."""
-    command = _enroll_command(protocol, auth, cn, key_type)
-    if auth == "certificate" and protocol == "cmpv2":
-        command = {"bash": CA_CHAIN_BASH + "\n" + command["bash"], "powershell": CA_CHAIN_PS + "\n" + command["powershell"]}
-    elif auth == "certificate":
-        command["powershell"] = P12_PS + "\n" + command["powershell"]
-    return command
-
-
-def _enroll_command(protocol: str, auth: str, cn: str, key_type: str) -> dict:
-    new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
-    keygen = f'openssl req -new -newkey {new_key} -nodes -keyout device.key -subj "/CN={cn}"'
+def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]:
+    """Copyable device enrollment as separate steps, like the other use cases: generate key (+ CSR)
+    locally → the protocol call → turn the answer into a PEM certificate. One-time preparations
+    are setup steps. Secrets only as variables the user sets.
+    Each step: purpose, method, path (for the label), command {bash, powershell}, phase, kind
+    ("keygen" | "call" | "convert" | "setup")."""
+    rsa = key_type.upper().startswith("RSA")
+    new_key = "rsa:2048" if rsa else "ec -pkeyopt ec_paramgen_curve:P-256"
+    req = f'openssl req -new -newkey {new_key} -nodes -keyout device.key -subj "/CN={cn}"'
     clientauth = auth == "certificate" and protocol != "cmpv2"
+    host_b, host_p = ("clientauth.${DTM_HOST}", "clientauth.$env:DTM_HOST") if clientauth else ("${DTM_HOST}", "$env:DTM_HOST")
+    steps = []
+
+    def step(kind, purpose, method, path, bash, powershell, phase="recurring"):
+        steps.append({"kind": kind, "purpose": purpose, "method": method, "path": path,
+                      "command": {"bash": bash, "powershell": powershell}, "phase": phase})
+
+    if clientauth:  # Windows' curl.exe (Schannel) takes the client certificate as PKCS#12
+        step("setup", "Convert the factory certificate for Windows curl.exe (local, once)", "LOCAL", "openssl",
+             "# Linux/macOS: curl uses factory.crt and factory.key directly – nothing to do", P12_PS, "setup")
+    if protocol == "cmpv2" and auth == "certificate":
+        step("setup", "Build ca-chain.pem from the policy – DTM signs CMPv2 answers with the issuing CA (local, once)",
+             "LOCAL", "openssl", CA_CHAIN_BASH, CA_CHAIN_PS, "setup")
+
     if protocol == "rest":
         tls = "--cert factory.crt --key factory.key" if clientauth else '-H "x-passcode: ${PASSCODE}"'
         ps_tls = "--cert-type P12 --cert factory.p12" if clientauth else '-H "x-passcode: $env:PASSCODE"'
-        host_b = "clientauth.${DTM_HOST}" if clientauth else "${DTM_HOST}"
-        host_p = "clientauth.$env:DTM_HOST" if clientauth else "$env:DTM_HOST"
         body = '{"certificate_policy_id": "%s", "csr": "%s", "certificate_profile_attributes": [{"id": "subject.common_name", "value": "%s"}]}'
-        return {
-            "bash": (f"{keygen} -out device.csr\nexport CSR=\"$(awk '{{printf \"%s\\\\n\", $0}}' device.csr)\"\n"
-                     f"cat > certificate.json <<EOF\n{body % ('${POLICY_ID}', '${CSR}', cn)}\nEOF\n"
-                     f'curl -sS --fail-with-body -X POST "https://{host_b}{REST_PATH}" {tls} \\\n'
-                     '  -H "Content-Type: application/json" --data @certificate.json -o certificate.json.out'),
-            "powershell": (f"{keygen} -out device.csr\n"
-                           '$env:CSR = (Get-Content device.csr -Raw).Replace("`r", "").Replace("`n", "\\n")\n'
-                           f'Set-Content certificate.json "{(body % ("$env:POLICY_ID", "$env:CSR", cn)).replace(chr(34), chr(96) + chr(34))}"\n'
-                           f'curl.exe -sS -X POST "https://{host_p}{REST_PATH}" {ps_tls} `\n'
-                           '  -H "Content-Type: application/json" --data "@certificate.json" -o certificate.json.out'),
-        }
-    if protocol == "est":
-        path_b = EST_PATH.format(policy_id="${POLICY_ID}")
-        path_p = EST_PATH.format(policy_id="$env:POLICY_ID")
+        step("keygen", "Generate the device key and CSR (local, per device)", "LOCAL", "openssl",
+             f"{req} -out device.csr\nexport CSR=\"$(awk '{{printf \"%s\\\\n\", $0}}' device.csr)\"",
+             f"{req} -out device.csr\n" + '$env:CSR = (Get-Content device.csr -Raw).Replace("`r", "").Replace("`n", "\\n")')
+        step("call", "Send the CSR, receive the certificate (once per device)", "POST", REST_PATH,
+             f"cat > certificate.json <<EOF\n{body % ('${POLICY_ID}', '${CSR}', cn)}\nEOF\n"
+             f'curl -sS --fail-with-body -X POST "https://{host_b}{REST_PATH}" {tls} \\\n'
+             '  -H "Content-Type: application/json" --data @certificate.json -o certificate.json.out',
+             f'Set-Content certificate.json "{(body % ("$env:POLICY_ID", "$env:CSR", cn)).replace(chr(34), chr(96) + chr(34))}"\n'
+             f'curl.exe -sS --fail-with-body -X POST "https://{host_p}{REST_PATH}" {ps_tls} `\n'
+             '  -H "Content-Type: application/json" --data "@certificate.json" -o certificate.json.out')
+        step("convert", "Extract the certificate from the JSON response (local)", "LOCAL", "jq",
+             "jq -r .pem certificate.json.out > device.crt",
+             "(Get-Content certificate.json.out -Raw | ConvertFrom-Json).pem | Set-Content device.crt")
+    elif protocol == "est":
+        path_b, path_p = EST_PATH.format(policy_id="${POLICY_ID}"), EST_PATH.format(policy_id="$env:POLICY_ID")
         tls = ("--cert factory.crt --key factory.key" if clientauth else
                '-H "Authorization: Basic $(printf %s "${PASSCODE}" | openssl base64 -A)"')
         ps_tls = ("--cert-type P12 --cert factory.p12" if clientauth else
                   '-H "Authorization: Basic $([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:PASSCODE)))"')
-        host_b = "clientauth.${DTM_HOST}" if clientauth else "${DTM_HOST}"
-        host_p = "clientauth.$env:DTM_HOST" if clientauth else "$env:DTM_HOST"
-        return {
-            "bash": (f"{keygen} -outform DER -out device.der\nopenssl base64 -A -in device.der -out device.b64\n"
-                     f'curl -sS --fail -X POST "https://{host_b}{path_b}" {tls} \\\n'
-                     '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" \\\n'
-                     "  --data-binary @device.b64 | base64 -d > device.p7b\n"
-                     "openssl pkcs7 -inform DER -in device.p7b -print_certs -out device.crt"),
-            "powershell": (f"{keygen} -outform DER -out device.der\n"
-                           '[Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/device.der")) | Set-Content device.b64\n'
-                           f'curl.exe -sS -X POST "https://{host_p}{path_p}" {ps_tls} `\n'
-                           '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" `\n'
-                           '  --data-binary "@device.b64" -o device.b64.out\n'
-                           '[IO.File]::WriteAllBytes("$PWD/device.p7b", [Convert]::FromBase64String((Get-Content device.b64.out -Raw)))\n'
-                           "openssl pkcs7 -inform DER -in device.p7b -print_certs -out device.crt"),
-        }
-    genkey = ("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device.key"
-              if key_type.upper().startswith("RSA") else
-              "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out device.key")
-    creds = ("-ref ${PASSCODE_REF} -secret env:PASSCODE" if auth == "passcode"
-             else "-cert factory.crt -key factory.key -extracerts factory.crt -trusted ca-chain.pem")
-    ps_creds = ("-ref $env:PASSCODE_REF -secret env:PASSCODE" if auth == "passcode"
-                else "-cert factory.crt -key factory.key -extracerts factory.crt -trusted ca-chain.pem")
-    lines = [f"-server https://{{host}}{CMP_PATH.format(alternative_id='{cmp}')}",
-             "-tls_used -tls_trusted {bundle}", f'-newkey device.key -subject "/CN={cn}"', "{creds}",
-             "-implicit_confirm -certout device.crt"]
-    bash = [line.format(host="${DTM_HOST}", cmp="${CMP_ID}", bundle="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}",
-                        creds=creds) for line in lines]
-    ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE", creds=ps_creds) for line in lines]
-    return {"bash": ("# CA_BUNDLE: public root CAs for TLS (macOS: /etc/ssl/cert.pem)\n"
-                     + genkey + "\nopenssl cmp -cmd ir " + " \\\n  ".join(bash)),
-            "powershell": ("# CA_BUNDLE: a PEM file with the public root CAs (Windows has none by default)\n"
-                           + genkey + "\nopenssl cmp -cmd ir " + " `\n  ".join(ps))}
+        step("keygen", "Generate the device key and CSR, base64 DER for EST (local, per device)", "LOCAL", "openssl",
+             f"{req} -outform DER -out device.der\nopenssl base64 -A -in device.der -out device.b64",
+             f"{req} -outform DER -out device.der\n"
+             '[Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/device.der")) | Set-Content device.b64')
+        step("call", "Send the CSR via EST simpleenroll (once per device)", "POST",
+             EST_PATH.format(policy_id="{POLICY_ID}"),
+             f'curl -sS --fail -X POST "https://{host_b}{path_b}" {tls} \\\n'
+             '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" \\\n'
+             "  --data-binary @device.b64 -o device.b64.out",
+             f'curl.exe -sS --fail -X POST "https://{host_p}{path_p}" {ps_tls} `\n'
+             '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" `\n'
+             '  --data-binary "@device.b64" -o device.b64.out')
+        step("convert", "Convert the PKCS#7 answer to a PEM certificate (local)", "LOCAL", "openssl",
+             "openssl base64 -d -A -in device.b64.out -out device.p7b\n"
+             "openssl pkcs7 -inform DER -in device.p7b -print_certs -out device.crt",
+             '[IO.File]::WriteAllBytes("$PWD/device.p7b", [Convert]::FromBase64String((Get-Content device.b64.out -Raw)))\n'
+             "openssl pkcs7 -inform DER -in device.p7b -print_certs -out device.crt")
+    else:
+        genkey = ("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device.key" if rsa else
+                  "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out device.key")
+        creds = ("-ref ${PASSCODE_REF} -secret env:PASSCODE" if auth == "passcode"
+                 else "-cert factory.crt -key factory.key -extracerts factory.crt -trusted ca-chain.pem")
+        ps_creds = ("-ref $env:PASSCODE_REF -secret env:PASSCODE" if auth == "passcode"
+                    else "-cert factory.crt -key factory.key -extracerts factory.crt -trusted ca-chain.pem")
+        lines = [f"-server https://{{host}}{CMP_PATH.format(alternative_id='{cmp}')}",
+                 "-tls_used -tls_trusted {bundle}", f'-newkey device.key -subject "/CN={cn}"', "{creds}",
+                 "-implicit_confirm -certout device.crt"]
+        bash = [line.format(host="${DTM_HOST}", cmp="${CMP_ID}", bundle="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}",
+                            creds=creds) for line in lines]
+        ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE", creds=ps_creds) for line in lines]
+        step("keygen", "Generate the device key – CMPv2 sends the public key, no CSR (local, per device)", "LOCAL",
+             "openssl", genkey, genkey)
+        step("call", "Request the certificate via CMPv2 (initialization request, once per device)", "POST",
+             CMP_PATH.format(alternative_id="{CMP_ID}"),
+             "# CA_BUNDLE: public root CAs for TLS (macOS: /etc/ssl/cert.pem)\nopenssl cmp -cmd ir " + " \\\n  ".join(bash),
+             "# CA_BUNDLE: a PEM file with the public root CAs (Windows has none by default)\n"
+             "openssl cmp -cmd ir " + " `\n  ".join(ps))
+        step("convert", "Inspect the issued certificate – openssl cmp already wrote it as PEM (local)", "LOCAL", "openssl",
+             "openssl x509 -in device.crt -noout -subject -serial -enddate",
+             "openssl x509 -in device.crt -noout -subject -serial -enddate")
+    return steps

@@ -61,6 +61,19 @@ def all_snippets(run: dict) -> str:
     return "\n".join(out)
 
 
+def enroll_entries(run: dict) -> list[dict]:
+    """The api_calls entries of the device enrollment (everything after the DTM setup)."""
+    p = run["params"]
+    names = evergreen.common_names(run["id"], p["protocol"], p["count"], UC)
+    purposes = {s["purpose"] for s in enrollment.enroll_steps(p["protocol"], p["auth"], names[0], p["key_type"])}
+    return [c for c in run["result"]["api_calls"] if c["purpose"] in purposes]
+
+
+def protocol_call(run: dict) -> dict:
+    (call,) = [c for c in enroll_entries(run) if c["method"] != "LOCAL"]
+    return call
+
+
 def files_text(directory: Path) -> str:
     return "".join(p.read_text(errors="replace") for p in directory.rglob("*") if p.is_file())
 
@@ -248,8 +261,12 @@ async def test_metrics_and_extrapolation(store, enroll_net, tmp_path, monkeypatc
     # per device (keygen + round trip): 0.75 / 1.25 / 3.25 → median 1.25 s, robust against the slow one
     assert r["median_device_s"] == 1.25 and "median_s" not in r
     assert r["estimate_devices"] == 1000 and r["estimate_min"] == 20.8  # 1000 × 1.25 s / 60
-    enroll_call = next(c for c in r["api_calls"] if c["method"] == "LOCAL" and c["path"] == "EST")
-    assert enroll_call["count"] == 3 and enroll_call["outcome"] == "ok"
+    by_kind = {s["kind"]: s for s in enrollment.enroll_steps("est", "passcode", "x", "P_256")}
+    entries = {c["purpose"]: c for c in enroll_entries(run)}
+    keygen, call, convert = (entries[by_kind[k]["purpose"]] for k in ("keygen", "call", "convert"))
+    assert (keygen["seconds"], keygen["count"], keygen["outcome"]) == (0.75, 3, "ok")  # summed keygen
+    assert (call["seconds"], call["count"], call["outcome"]) == (4.5, 3, "ok")  # summed round trips
+    assert (convert["seconds"], convert["count"]) == (None, 1)
 
 
 # --- shared CMPv2 profile ----------------------------------------------------------------------
@@ -314,8 +331,9 @@ async def test_dtm_rejects_enrollment(store, enroll_net, tmp_path, protocol, lab
     # the ledger is complete, so the rollback still finds everything
     kinds = {o["kind"] for o in store.objects("rj1")}
     assert {"division", "auth_policy", "policy"} <= kinds
-    enroll = next(c for c in run["result"]["api_calls"] if c["method"] == "LOCAL" and c["path"] == label)
+    enroll = protocol_call(run)  # the steps are recorded even when the first request fails
     assert enroll["outcome"] == "error" and enroll["count"] == 1
+    assert len(enroll_entries(run)) == len(enrollment.enroll_steps(protocol, auth, "x", "P_256"))
     assert (await do_cleanup(store, enroll_net, "rj1", "full", tmp_path))["cleanup_status"] == "done"
     assert all(o["status"] == "DELETED" for objs in enroll_net.auth_objects.values() for o in objs.values())
     assert enroll_net.policies == {} and enroll_net.divisions == {}
@@ -569,29 +587,28 @@ async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, 
     assert "PRIVATE KEY" not in text and "BEGIN CERTIFICATE" not in text
     if auth == "passcode":
         assert enroll_net.active_auth("passcode")[0]["body"]["passcode"] not in text
-    enroll = next(c for c in run["result"]["api_calls"] if c["method"] == "LOCAL"
-                  and c["path"] == enrollment.PROTOCOLS[protocol])
+    enroll = protocol_call(run)
     for dialect in snippets.DIALECTS:
         command = snippets.render(enroll["spec"], dialect)
         ps = dialect == "powershell"
         assert command == enroll["spec"]["command"]["powershell" if ps else "bash"]
         assert "x-api-key" not in command.lower() and "account_id" not in command
-        assert "/CN=robot-sn1-uc03-" in command
         if protocol == "cmpv2":
+            assert "/CN=robot-sn1-uc03-" in command
             assert "clientauth." not in command and "DIOT_" in command
             assert ("-secret env:PASSCODE" in command) == (auth == "passcode")
             assert ("-extracerts factory.crt -trusted ca-chain.pem" in command) == (auth == "certificate")
-            builds_chain = ("ConvertFrom-Json" if ps else "jq -r '.ca_chain[].blob' policy.json") in command
-            assert builds_chain == (auth == "certificate")
         else:
             assert ("clientauth." in command) == (auth == "certificate")
             client_cert = "--cert-type P12 --cert factory.p12" if ps else "--cert factory.crt --key factory.key"
             assert (client_cert in command) == (auth == "certificate")
-            assert ("openssl pkcs12 -export" in command) == (ps and auth == "certificate")
             marker = "Authorization: Basic" if protocol == "est" else "x-passcode:"
             assert (marker in command) == (auth == "passcode")
-            if not ps:  # an HTTP error must not produce a "certificate" file silently
-                assert ("--fail-with-body" if protocol == "rest" else "curl -sS --fail ") in command
+            # an HTTP error must not produce a "certificate" file silently
+            assert ("--fail-with-body" if protocol == "rest" else "--fail ") in command
+    setup_text = "\n".join(c["spec"]["command"]["powershell"] for c in enroll_entries(run) if c["phase"] == "setup")
+    assert ("openssl pkcs12 -export" in setup_text) == (auth == "certificate" and protocol != "cmpv2")
+    assert ("ConvertFrom-Json" in setup_text) == (auth == "certificate" and protocol == "cmpv2")
     if auth == "certificate":
         factory = next(c for c in run["result"]["api_calls"] if c["path"] == "openssl")
         command = snippets.render(factory["spec"], "curl")
@@ -599,7 +616,7 @@ async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, 
         assert "basicConstraints=critical,CA:FALSE" in command and "keyUsage=critical,digitalSignature" in command
         assert "FACTORY_CERT" in snippets.render(factory["spec"], "powershell")
     # management calls keep the API key header (as a variable), never its value
-    management = [c for c in run["result"]["api_calls"] if c["method"] in ("POST", "GET")]
+    management = [c for c in run["result"]["api_calls"] if c["spec"] and "path" in c["spec"]]
     assert management and all("x-api-key: ${DTM_API_KEY}" in snippets.render(c["spec"], "curl")
                               for c in management)
 
@@ -633,3 +650,26 @@ async def test_station_cmp_argv_is_accepted_by_real_openssl(store, enroll_net, c
     assert result.returncode != 0
     assert "unknown option" not in output and "invalid" not in output and "usage" not in output, output
     assert "connect" in output or "transfer" in output, output
+
+
+@pytest.mark.parametrize("protocol,auth", COMBOS)
+async def test_enrollment_steps_are_separate_api_call_entries(store, enroll_net, cmp_openssl, tmp_path,
+                                                              protocol, auth):
+    run = await start(store, enroll_net, "st1", tmp_path, protocol=protocol, auth=auth)
+    assert run["status"] == "completed", run["error"]
+    calls = run["result"]["api_calls"]
+    names = evergreen.common_names("st1", protocol, 2, UC)
+    steps = enrollment.enroll_steps(protocol, auth, names[0], "P_256")
+    recorded = enroll_entries(run)
+    # one entry per step, in order, with the step's own label, command and phase
+    assert [(c["purpose"], c["method"], c["path"], c["spec"], c["phase"]) for c in recorded] == [
+        (s["purpose"], s["method"], s["path"], {"command": s["command"]}, s["phase"]) for s in steps]
+    assert recorded == calls[-len(steps):]  # nothing else after the enrollment
+    # exactly one entry of the whole run is the protocol request
+    protocol_path = steps[[s["kind"] for s in steps].index("call")]["path"]
+    assert [c["path"] for c in calls].count(protocol_path) == 1
+    call = protocol_call(run)
+    assert call["count"] == 2 and call["outcome"] == "ok" and call["phase"] == "recurring"
+    for c in recorded:
+        if c["method"] == "LOCAL" and c["purpose"] != steps[[s["kind"] for s in steps].index("keygen")]["purpose"]:
+            assert c["seconds"] is None and c["count"] == 1  # setup/convert are not timed

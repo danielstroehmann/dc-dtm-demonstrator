@@ -4,7 +4,8 @@ issues the certificate with the fake DTM's issuing CA, so the engine parses a re
 
 Every call is recorded (argv, the CMP_SECRET environment variable, the files the arguments point
 to) so tests can assert the exact flags afterwards. Configuration lives next to the installed
-script in `config.json`: {"ca_cert", "ca_key", "record", "fail"}.
+script in `config.json`: {"ca_cert", "ca_key", "record", "fail", "real_openssl"} – with
+"real_openssl" set, every other openssl command is passed on to the real binary.
 
 Like the real client it rejects an incomplete protection (no -ref/-secret and no -cert/-key) and
 prints a "CMP error" line plus exits non-zero when told to fail.
@@ -44,6 +45,8 @@ def main() -> None:
     config = CONFIG
     config.update(json.loads((Path(sys.argv[0]).resolve().parent / "config.json").read_text()))
     argv = sys.argv[1:]
+    if argv[:1] != ["cmp"] and config.get("real_openssl"):  # everything but cmp: the real tool
+        os.execv(config["real_openssl"], [config["real_openssl"], *argv])
     options, i = {}, 1
     while i < len(argv):
         if argv[i] in VALUE_FLAGS:
