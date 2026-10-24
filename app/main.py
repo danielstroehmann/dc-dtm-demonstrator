@@ -2,8 +2,10 @@ import asyncio
 import hashlib
 import logging
 import re
+import secrets
 import shutil
 import sqlite3
+import string
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -30,6 +32,13 @@ from .store import Store
 log = logging.getLogger("demonstrator")
 HERE = Path(__file__).parent
 RUN_ID = re.compile(r"^[a-z0-9]{1,16}$")
+RUN_ID_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def new_run_id() -> str:
+    """Default run ID: 6 random characters. DTM keeps the names of deleted policies reserved, so a
+    reused run ID would fail – random IDs make a collision practically impossible."""
+    return "".join(secrets.choice(RUN_ID_ALPHABET) for _ in range(6))
 NAME = re.compile(r"[A-Za-z0-9 ._-]{1,40}")
 HOST = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
 ACTIVE = {"pending", "running"}
@@ -310,14 +319,14 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return render(request, "run_new.html", use_case=USE_CASES[use_case], use_case_id=use_case, cas=cas,
                       profiles=profiles, connection=_public(conn), several=len(store.connections()) > 1,
                       max_batch=evergreen.MAX_BATCH,
-                      default_run_id=datetime.now().strftime("%y%m%d%H%M%S"))
+                      default_run_id=new_run_id())
 
     @app.post("/runs")
     async def create_run(request: Request, run_id: str = Form(""), variant: str = Form(...),
                          mode: str = Form(...), count: int = Form(10), ca_id: str = Form(...),
                          profile_id: str = Form(...), approval: bool = Form(False),
                          use_case: str = Form("uc01"), connection_id: str = Form("")):
-        run_id = run_id.strip().lower() or datetime.now().strftime("%y%m%d%H%M%S")
+        run_id = run_id.strip().lower() or new_run_id()
         if use_case not in USE_CASES:
             raise HTTPException(400, "Unknown use case")
         conn = selected_connection(connection_id)

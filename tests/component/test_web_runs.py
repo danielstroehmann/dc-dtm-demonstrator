@@ -164,11 +164,63 @@ def test_run_id_is_normalised(configured_user, store):
     finished(store, "abc9")
 
 
-def test_default_run_id(configured_user, store):
-    response = configured_user.post("/runs", data=form(run_id=""), follow_redirects=False)
-    run_id = response.headers["location"].rsplit("/", 1)[1]
-    assert len(run_id) == 12 and run_id.isdigit()
-    finished(store, run_id)
+# Run IDs end up in DTM object names, and DTM keeps the names of deleted policies reserved – so a
+# generated ID must not repeat: 6 random characters [a-z0-9] instead of a timestamp.
+GENERATED_ID = re.compile(r"[a-z0-9]{6}")
+
+
+def created_id(response) -> str:
+    assert response.status_code == 303, response.text
+    return response.headers["location"].removeprefix("/runs/")
+
+
+@pytest.mark.parametrize("submitted", ["", "   "])
+def test_empty_run_id_gets_a_generated_one(configured_user, store, submitted):
+    run_id = created_id(configured_user.post("/runs", data=form(run_id=submitted), follow_redirects=False))
+    assert GENERATED_ID.fullmatch(run_id), run_id
+    assert finished(store, run_id)["status"] == "completed"
+
+
+def test_generated_run_ids_do_not_repeat(configured_user, store):
+    ids = [created_id(configured_user.post("/runs", data=form(run_id=""), follow_redirects=False))
+           for _ in range(3)]
+    assert all(GENERATED_ID.fullmatch(i) for i in ids) and len(set(ids)) == 3  # 3 runs, no "already exists"
+    for run_id in ids:
+        finished(store, run_id)
+    assert {r["id"] for r in store.list_runs()} == set(ids)
+
+
+def test_form_default_run_id_is_random(configured_user):
+    ids = [re.search(r'<input name="run_id"[^>]*value="([^"]*)"', configured_user.get("/runs/new/uc01").text).group(1)
+           for _ in range(5)]
+    assert all(GENERATED_ID.fullmatch(i) for i in ids), ids
+    # 36^6 ≈ 2.2e9 values: one collision among 5 is ~5e-9 likely, so allow it; a constant or
+    # time-based default (same value within a second) fails
+    assert len(set(ids)) >= 4, ids
+
+
+def test_new_run_id_alphabet_and_spread():
+    from app.main import new_run_id
+    ids = [new_run_id() for _ in range(2000)]
+    assert all(GENERATED_ID.fullmatch(i) for i in ids)
+    assert len(set(ids)) >= 1998  # collisions are possible but must stay rare
+    chars = set("".join(ids))
+    assert chars == set("abcdefghijklmnopqrstuvwxyz0123456789")  # 12000 draws hit every character
+
+
+@pytest.mark.parametrize("typed,stored", [("myrun1", "myrun1"), ("  MyRun1 ", "myrun1"), ("a", "a"),
+                                          ("x" * 16, "x" * 16)])
+def test_user_chosen_run_id_is_kept(configured_user, store, typed, stored):
+    run_id = created_id(configured_user.post("/runs", data=form(run_id=typed), follow_redirects=False))
+    assert run_id == stored and store.get_run(stored)["id"] == stored
+    finished(store, stored)
+
+
+def test_user_chosen_run_id_must_be_unique(configured_user, store):
+    created_id(configured_user.post("/runs", data=form(run_id="dup1"), follow_redirects=False))
+    finished(store, "dup1")
+    response = configured_user.post("/runs", data=form(run_id="DUP1"), follow_redirects=False)
+    assert response.status_code == 400 and "already exists" in response.text
 
 
 @pytest.mark.parametrize("variant,mode,approval", [
@@ -813,8 +865,12 @@ def test_approval_time_is_a_metric_tile(configured_user, store, fake):
 def test_instant_approval_still_shows_tile(configured_user, store):
     configured_user.post("/runs", data=form(mode="batch", count="2", approval="true"))
     run = finished(store, "r1")
-    assert run["result"]["approval_s"] == 0.0
-    assert "<small>Approved after</small>" in configured_user.get("/runs/r1").text
+    # The fake approves without delay, but approval_s is wall time rounded to 0.01 s – on a busy
+    # runner it can be 0.01 or more, so only bound it. The edge case (0.0 is falsy) is forced below.
+    assert 0 <= run["result"]["approval_s"] < 0.5
+    store.update_run("r1", result=run["result"] | {"approval_s": 0.0})
+    html = configured_user.get("/runs/r1").text
+    assert '<small>Approved after</small><p class="metric">0.0 s</p>' in html
 
 
 

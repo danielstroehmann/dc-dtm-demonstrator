@@ -250,6 +250,31 @@ async def test_batch_records_api_calls_without_secrets(store, fake, tmp_path):
         assert secret not in everything, secret
 
 
+def assert_rates(r: dict, count: int, seconds: float, slack: float) -> None:
+    """per_certificate_s and per_minute must both describe the same raw issuing time t. Only rounded
+    values are visible, so t is bracketed instead of compared with a fixed tolerance (with a fake DTM t is
+    ~0.1 s, where rounding duration_s alone moves the rate by more than 5 %):
+    t = seconds ± slack, and t = count * (per_certificate_s ± 0.0005) (3 decimals). per_minute is
+    round(count / t * 60), so it must lie within that range of t, ±0.5."""
+    lo = max(seconds - slack, count * (r["per_certificate_s"] - 0.0005))
+    hi = min(seconds + slack, count * (r["per_certificate_s"] + 0.0005))
+    assert 0 < lo <= hi, ("per_certificate_s does not match the measured time", r["per_certificate_s"], seconds)
+    assert count / hi * 60 - 0.5 <= r["per_minute"] <= count / lo * 60 + 0.5, (r["per_minute"], lo, hi)
+
+
+def test_assert_rates_brackets_rounding_but_catches_wrong_rates():
+    import random
+    rng = random.Random(7)
+    for _ in range(2000):  # the regime of the tests: a few certificates, >= 0.08 s (fake DTM) up to live times
+        t, n = rng.uniform(0.08, 30), rng.randint(1, 10)
+        good = evergreen.rates(t, n)
+        assert_rates(good, n, round(t, 2), slack=0.005)  # the app's own rounding always passes
+        for wrong in ({"per_minute": round(n / t)}, {"per_minute": round(n / t * 60 * 1.1) + 1},
+                      {"per_certificate_s": round(t / n * 1.1, 3) + 0.002}):
+            with pytest.raises(AssertionError):
+                assert_rates(good | wrong, n, round(t, 2), slack=0.005)
+
+
 async def test_batch_rates_exclude_approval(store, fake, tmp_path):
     fake.approve_delay = 0.3
     fake.job_delay = 0.03
@@ -259,8 +284,8 @@ async def test_batch_rates_exclude_approval(store, fake, tmp_path):
     assert r["approval_s"] >= 0.3
     issuing = r["duration_s"] - r["approval_s"]
     assert 0 < issuing < r["duration_s"]
-    assert abs(r["per_certificate_s"] * 4 - issuing) < 0.03
-    assert abs(r["per_minute"] - 4 / issuing * 60) / r["per_minute"] < 0.1
+    # the app subtracts the (already rounded) approval_s from the raw time; only duration_s adds rounding
+    assert_rates(r, 4, issuing, slack=0.005)
 
 
 async def test_progress_written_only_on_change_with_fixed_start(store, fake, tmp_path, monkeypatch):
@@ -375,8 +400,7 @@ async def test_single_issues_count_certificates_sequentially(store, fake, tmp_pa
     single = r["api_calls"][-1]
     assert (single["count"], single["outcome"]) == (4, "ok") and single["seconds"] >= 0.08
     assert single["spec"]["json"]["certificate_profile_attributes"][0]["value"] == sent[0]
-    assert abs(r["per_certificate_s"] * 4 - r["duration_s"]) < 0.01
-    assert abs(r["per_minute"] - 4 / r["duration_s"] * 60) / r["per_minute"] < 0.05
+    assert_rates(r, 4, r["duration_s"], slack=0.005)  # duration_s is rounded to 2 decimals
     progress = [p for p in seen if p and p.get("total")]
     assert [p["done"] for p in progress] == [1, 2, 3, 4] and {p["total"] for p in progress} == {4}
     assert progress[0]["label"] == "Requesting 4 certificates one by one" and len({p["started"] for p in progress}) == 1

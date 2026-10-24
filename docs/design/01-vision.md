@@ -126,7 +126,7 @@ files – is named `<prefix>-<run-id>-<use-case-specific-rest>`:
 | Part | Proposal | Purpose |
 |---|---|---|
 | Prefix | fixed: `robot` (decided) | Recognize anything created by the automation |
-| Run ID | freely chosen per demo, e.g. `acme`; default if left empty: timestamp `yymmddHHMM` (decided) | Identify the demo run; target of the one-click cleanup |
+| Run ID | freely chosen per demo, e.g. `acme`; default if left empty: 6 random characters `[a-z0-9]` (decided 2026-10-24 – DTM keeps names of deleted policies reserved, so IDs must not repeat) | Identify the demo run; target of the one-click cleanup |
 | Rest | per use case, e.g. `est-devgroup`, `batch-dev-0042` | Readable in the DTM console during the demo |
 
 Example: `robot-acme-est-dev-0007`. Characters limited to `[a-z0-9-]` – the spec
