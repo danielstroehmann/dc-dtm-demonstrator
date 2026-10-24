@@ -350,7 +350,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         client = client_for(connection_id=conn["id"])
         try:
             cas = {c["id"]: c for c in await client.issuing_cas()}
-            profiles = {p["id"] for p in await client.certificate_profiles()}
+            profiles = {p["id"]: p for p in await client.certificate_profiles()}
         except DTMError as exc:
             raise HTTPException(502, f"Could not load data from DTM: {exc}") from exc
         finally:
@@ -368,6 +368,9 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             error = "Select an issuing CA of this account."
         elif profile_id not in profiles:
             error = "Select a certificate profile."
+        elif use_case == "uc04" and not profiles[profile_id]["renew_anytime"]:
+            error = ("This certificate profile does not allow renewing a valid certificate at any time – "
+                     "choose one with 'Renew valid certificate: anytime'.")
         if error:
             raise HTTPException(400, error)
         ca = cas[ca_id]

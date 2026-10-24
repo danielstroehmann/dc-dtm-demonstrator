@@ -169,9 +169,31 @@ async def test_issuing_cas_only_active_intermediates_of_this_account(router, cli
 
 
 async def test_certificate_profiles_only_active(router, client):
+    renew = {"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": "anytime"}
     router.get(f"{DTM}/certificate-configuration-service/api/v1/certificate-profile").mock(return_value=page([
-        {"id": "a", "name": "A", "status": "ACTIVE"}, {"id": "b", "name": "B", "status": "INACTIVE"}]))
-    assert await client.certificate_profiles() == [{"id": "a", "name": "A"}]
+        {"id": "a", "name": "A", "status": "ACTIVE", "body": [renew]},
+        {"id": "b", "name": "B", "status": "INACTIVE", "body": [renew]},
+        {"id": "c", "name": "C", "status": "ACTIVE"}]))
+    assert await client.certificate_profiles() == [{"id": "a", "name": "A", "renew_anytime": True},
+                                                   {"id": "c", "name": "C", "renew_anytime": False}]
+
+
+@pytest.mark.parametrize("body,expected", [
+    (None, False),                                                                     # no body at all
+    ([], False),                                                                       # no entry
+    ([{"key": "csr", "value": "anytime"}], False),                                     # other key
+    ([{"key": "renewal_settings.renew_valid_cert", "value": "anytime"}], True),        # enabled omitted
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": "anytime"}], True),
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": False, "value": "anytime"}], False),
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": "dont_allow"}], False),
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": "30"}], False),  # window
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": None}], False),
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": "ANYTIME"}], False),  # exact
+    ([{"key": "renewal_settings.renew_valid_cert", "enabled": None, "value": "anytime"}], True),
+])
+def test_renew_anytime(body, expected):
+    profile = {"id": "p", "name": "P"} | ({} if body is None else {"body": body})
+    assert dtm._renew_anytime(profile) is expected
 
 
 async def test_no_enabled_rendezvous_zone(router, client):

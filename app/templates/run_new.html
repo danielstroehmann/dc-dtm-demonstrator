@@ -73,9 +73,10 @@
             {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
           </select>
         </label>
-        <label {% if use_case_id == "uc03" %}data-tip="CMPv2 uses the shared profile robot-uc03-cmp-profile, created once from this one"{% endif %}>Certificate profile
+        <label {% if use_case_id == "uc03" %}data-tip="CMPv2 uses the shared profile robot-uc03-cmp-profile, created once from this one"{% elif use_case_id == "uc04" %}data-tip="Only profiles that allow renewing a valid certificate at any time"{% endif %}>Certificate profile
           <select name="profile_id" required>
-            {% for p in profiles %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+            {% for p in profiles if use_case_id != "uc04" or p.renew_anytime %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+            {% if use_case_id == "uc04" and not (profiles | selectattr("renew_anytime") | list) %}<option value="" disabled selected>No profile allows renewal at any time</option>{% endif %}
           </select>
         </label>
       </div>

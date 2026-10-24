@@ -330,3 +330,28 @@ def test_renewal_block_renders_in_every_dialect(store):
     for s in enrollment.renew_steps("cn", "P_256"):
         for dialect in snippets.DIALECTS:
             assert requests_in(snippets.render({"command": s["command"]}, dialect)) == (s["method"] != "LOCAL")
+
+
+@pytest.mark.parametrize("profile_id", ["profile-server", "profile-window", "profile-legacy"])
+async def test_renewal_disabled_by_the_profile(store, enroll_net, tmp_path, fast_timing, profile_id):
+    """Engine level (the form would refuse these profiles): DTM answers 400 "Renewal is disabled";
+    the error explains it, nothing is retried or changed."""
+    await start(store, enroll_net, "rd1", tmp_path, profile_id=profile_id)
+    before, files = store.get_run("rd1"), device_file(tmp_path, "rd1")
+    fast_timing.clear()
+    run = await renew(store, "rd1", tmp_path)
+    assert run["status"] == "completed" and run["result"] == before["result"]
+    assert device_file(tmp_path, "rd1") == files and len(enroll_net.issued()) == 1
+    assert len(renewal_requests(enroll_net)) == 1 and fast_timing.count(enrollment.RENEW_RETRY_S) == 0
+    (error,) = [e["message"] for e in store.events("rd1") if e["level"] == "error"]
+    assert error.startswith("Renewal failed: EST simplereenroll returned 400:") and "Renewal is disabled" in error
+    assert error.endswith(" – the certificate profile does not allow renewing a valid certificate")
+
+
+async def test_other_400_errors_get_no_renewal_hint(store, enroll_net, tmp_path):
+    from tests.fakedtm import _error
+    await start(store, enroll_net, "o4", tmp_path)
+    enroll_net.enroll_fail = _error(400, "invalid CSR")
+    await renew(store, "o4", tmp_path)
+    (error,) = [e["message"] for e in store.events("o4") if e["level"] == "error"]
+    assert "invalid CSR" in error and "does not allow renewing" not in error

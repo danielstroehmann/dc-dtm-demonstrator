@@ -120,6 +120,15 @@ def csr_batch_fields(name: str, policy_id: str) -> dict:
             "input_format": "csr", "output_format": "zip", "emails": ""}
 
 
+def _renew_anytime(profile: dict) -> bool:
+    """UC-4 renews a fresh certificate on click – the profile must allow renewing a valid
+    certificate at any time (otherwise DTM answers "Renewal is disabled")."""
+    body = profile.get("body")
+    entries = body if isinstance(body, list) else []  # data from DTM – one odd profile must not break the forms
+    entry = next((e for e in entries if isinstance(e, dict) and e.get("key") == "renewal_settings.renew_valid_cert"), {})
+    return entry.get("enabled", True) is not False and entry.get("value") == "anytime"
+
+
 def _json(response: httpx.Response):
     # DTM responses may contain raw control characters (e.g. PEM line breaks) inside strings.
     if not response.text:
@@ -198,7 +207,8 @@ class DTMClient:
 
     async def certificate_profiles(self) -> list[dict]:
         items = await self._list("/devicetrustmanager/certificate-configuration-service/api/v1/certificate-profile")
-        return [{"id": p["id"], "name": p["name"]} for p in items if p.get("status") == "ACTIVE"]
+        return [{"id": p["id"], "name": p["name"], "renew_anytime": _renew_anytime(p)}
+                for p in items if p.get("status") == "ACTIVE"]
 
     async def rendezvous_zone(self) -> str:
         zones = await self._list("/devicetrustmanager/api/v4/rendezvous-zone")

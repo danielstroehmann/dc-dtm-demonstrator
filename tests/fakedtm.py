@@ -130,6 +130,25 @@ def _error(status: int, message: str) -> httpx.Response:
     return _json_response(status, {"errors": [{"code": "error", "message": message}]})
 
 
+def _profile(profile_id: str, name: str, template: str, renew_valid_cert: str | None) -> dict:
+    body = [{"key": "subject.common_name", "optional": False, "enabled": True, "sources": ["user_supplied"],
+             "value": None},
+            {"key": "csr", "optional": False, "enabled": True, "sources": ["user_supplied"], "value": None}]
+    if renew_valid_cert is not None:
+        body.append({"key": "renewal_settings.renew_valid_cert", "optional": False, "enabled": True,
+                     "sources": ["default"], "value": renew_valid_cert})
+    return {"id": profile_id, "name": name, "status": "ACTIVE", "certificate_template": {"id": template},
+            "body": body}
+
+
+def renews_anytime(profile: dict) -> bool:
+    """The fake's own reading of the profile (independent of app/dtm.py)."""
+    for entry in profile.get("body") or []:
+        if entry.get("key") == "renewal_settings.renew_valid_cert":
+            return entry.get("enabled") is not False and entry.get("value") == "anytime"
+    return False
+
+
 # --- the fake ----------------------------------------------------------------------------
 
 class FakeDTM:
@@ -154,13 +173,13 @@ class FakeDTM:
             self._ca("ca-disabled", "Disabled ICA", "ecdsa", status="disabled"),
             self._ca("ca-other-account", "Other account ICA", "ecdsa", account=OTHER_ACCOUNT_ID),
         ]
+        # Profile list records carry the profile body (verified live). renewal_settings.renew_valid_cert:
+        # "anytime" (live), "dont_allow" or a window before expiry (docs); the legacy one has no entry.
         self.profiles = [
-            {"id": PROFILE_ID, "name": profile_name, "status": "ACTIVE", "certificate_template": {"id": "tpl-client"},
-             "body": [{"key": "subject.common_name", "optional": False, "enabled": True,
-                       "sources": ["user_supplied"], "value": None},
-                      {"key": "csr", "optional": False, "enabled": True, "sources": ["user_supplied"],
-                       "value": None}]},
-            {"id": "profile-server", "name": "Basic server certificate profile", "status": "ACTIVE"},
+            _profile(PROFILE_ID, profile_name, "tpl-client", "anytime"),
+            _profile("profile-server", "Basic server certificate profile", "tpl-server", "dont_allow"),
+            _profile("profile-window", "Renew within 30 days profile", "tpl-client", "30"),
+            _profile("profile-legacy", "Legacy device profile", "tpl-client", None),
             {"id": "profile-old", "name": "Old profile", "status": "INACTIVE"},
         ]
         self.zones = [
@@ -567,6 +586,9 @@ class FakeDTM:
         if self.reenroll_unauthorized > 0:
             self.reenroll_unauthorized -= 1
             return _error(401, "est_unauthorized")
+        profile = next((p for p in self.profiles if p["id"] == policy.get("certificate_profile_id")), {})
+        if not renews_anytime(profile):  # verified live on a profile without "anytime"
+            return _json_response(400, {"errors": [{"code": "invalid_input", "message": "Renewal is disabled"}]})
         try:
             csr = x509.load_der_x509_csr(base64.b64decode(request.content, validate=True))
         except ValueError:

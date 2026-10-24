@@ -358,7 +358,9 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
             await asyncio.sleep(RENEW_RETRY_S)
     if response.status_code >= 300:
         text = response.text[:200] if not response.text.lstrip().startswith("<") else "(HTML error page)"
-        raise EnrollmentError(f"EST simplereenroll returned {response.status_code}: {text}")
+        hint = (" – the certificate profile does not allow renewing a valid certificate"
+                if "Renewal is disabled" in response.text else "")
+        raise EnrollmentError(f"EST simplereenroll returned {response.status_code}: {text}{hint}")
     try:
         issued = certs.parse_pkcs7_certificates(base64.b64decode(response.content))[0]
     except (ValueError, IndexError) as exc:

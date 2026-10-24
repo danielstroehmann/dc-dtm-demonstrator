@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 from tests.component.test_web_runs import cleaned, finished, form
 from tests.conftest import wait_for
 from tests.fakedtm import ECDSA_CA_ID, PROFILE_ID
@@ -180,3 +182,67 @@ def test_certificates_cleanup_removes_the_device_dir(configured_user, store, enr
     assert cleaned(store, "d1")["cleanup_status"] == "done"
     assert not (data_dir / "runs" / "d1" / "device").exists()
     assert (data_dir / "runs" / "d1" / "certificates").is_dir()
+
+
+# --- profiles that allow renewing a valid certificate at any time --------------------------------
+
+def profile_options(html: str) -> list[tuple[str, str]]:
+    select = re.search(r'<select name="profile_id"[^>]*>(.*?)</select>', html, re.S).group(1)
+    return re.findall(r'<option value="([^"]*)"[^>]*>([^<]+)</option>', select)
+
+
+def test_uc04_form_offers_only_renewable_profiles(configured_user):
+    html = configured_user.get("/runs/new/uc04").text
+    assert profile_options(html) == [(PROFILE_ID, "Basic client certificate profile")]
+    assert 'data-tip="Only profiles that allow renewing a valid certificate at any time"' in html
+    assert "No profile allows renewal at any time" not in html
+
+
+def test_other_use_cases_keep_all_active_profiles(configured_user):
+    expected = [(PROFILE_ID, "Basic client certificate profile"),
+                ("profile-server", "Basic server certificate profile"),
+                ("profile-window", "Renew within 30 days profile"), ("profile-legacy", "Legacy device profile")]
+    for use_case in ("uc01", "uc02", "uc03"):
+        html = configured_user.get(f"/runs/new/{use_case}").text
+        assert profile_options(html) == expected, use_case
+        assert "No profile allows renewal at any time" not in html
+        assert "Only profiles that allow renewing" not in html
+
+
+def test_uc04_form_without_any_renewable_profile(configured_user, fake):
+    for profile in fake.profiles:
+        for entry in profile.get("body") or []:
+            if entry["key"] == "renewal_settings.renew_valid_cert":
+                entry["value"] = "dont_allow"
+    html = configured_user.get("/runs/new/uc04").text
+    assert profile_options(html) == [("", "No profile allows renewal at any time")]
+    assert re.search(r'<option value="" disabled selected>No profile allows renewal at any time</option>', html)
+
+
+@pytest.mark.parametrize("profile_id", ["profile-server", "profile-window", "profile-legacy"])
+def test_uc04_create_refuses_a_profile_without_renewal(configured_user, store, fake, profile_id):
+    response = configured_user.post("/runs", data=uc04_form(profile_id=profile_id), follow_redirects=False)
+    assert response.status_code == 400
+    assert "does not allow renewing a valid certificate at any time" in response.text
+    assert store.list_runs() == []
+    assert [n for n in fake.route_order() if n not in ("cas", "profiles")] == []  # no DTM write
+
+
+def test_same_profile_is_fine_for_uc03(configured_user, store, enroll_net):
+    data = uc04_form(use_case="uc03", profile_id="profile-server", count="1")
+    assert configured_user.post("/runs", data=data, follow_redirects=False).status_code == 303
+    assert finished(store, "d1")["status"] == "completed"
+
+
+def test_renewal_disabled_in_dtm_shows_the_hint(configured_user, store, enroll_net):
+    """The profile was changed in DTM after the run started – DTM refuses, the run explains why."""
+    configured_user.post("/runs", data=uc04_form())
+    finished(store, "d1")
+    profile = next(p for p in enroll_net.profiles if p["id"] == PROFILE_ID)
+    next(e for e in profile["body"] if e["key"] == "renewal_settings.renew_valid_cert")["value"] = "dont_allow"
+    configured_user.post("/runs/d1/renew")
+    wait_for(lambda: any(e["message"].startswith("Renewal failed") for e in store.events("d1")), what="failure")
+    renewed(store)
+    hint = "the certificate profile does not allow renewing a valid certificate"
+    assert hint in configured_user.get("/runs/d1/timeline").text
+    assert renewals(store) == 0
