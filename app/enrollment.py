@@ -7,6 +7,7 @@ authentication policy. Verified live 2026-10-24 (docs/design/uc-03-factory-proto
 
 import asyncio
 import base64
+import os
 import re
 import secrets
 import shutil
@@ -46,6 +47,12 @@ POLICY_PATH = dtm.POLICIES
 REST_PATH = "/devicetrustmanager/certificate-issuance-service/api/v2/certificate"
 EST_PATH = "/.well-known/est/devicetrustmanager/{policy_id}/simpleenroll"
 CMP_PATH = "/devicetrustmanager/certificate-issuance-service/api/v1/cmp/DIOT_{alternative_id}"
+RENEW_PATH = "/.well-known/est/devicetrustmanager/{policy_id}/simplereenroll"
+# DTM accepts a just-issued certificate for renewal only after a few seconds (401 est_unauthorized
+# right after issuance, verified live) – a renewal clicked immediately retries a little.
+RENEW_ATTEMPTS = 3
+RENEW_RETRY_S = 3.0
+MAX_RENEWALS = 5  # every renewal consumes a license and DTM requests
 
 
 class EnrollmentError(ValueError):
@@ -78,6 +85,7 @@ class Station:
         # DTM signs signature-protected CMPv2 responses with the issuing CA – trust its chain.
         (workdir / "ca-chain.pem").write_text(ca_chain_pem)
         self.http = httpx.AsyncClient(verify=context, timeout=REQUEST_TIMEOUT)
+        self.last_key: bytes | None = None
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -265,6 +273,12 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             station = Station(p["dtm_host"], protocol, auth, policy_id, cmp_id, passcode, passcode_ref, factory,
                               Path(tmp), ca_chain_pem)
             result |= await _enroll(station, api, store, run_id, p, log)
+            if p["use_case"] == "uc04":  # the device in the field: its key and certificate
+                _save_device(run_dir, station.last_key, result["certificates"][-1]["pem"])
+                result["renewals"] = []
+                _record_renewal_steps(api.calls, result["certificates"][-1]["common_name"], p["key_type"], None, None)
+                for key in ("estimate_min", "estimate_devices"):  # one device – nothing to extrapolate
+                    result.pop(key, None)
         certs.save_certificates(run_dir, result.get("certificates") or [])
         store.update_run(run_id, status="completed", result=result, progress=None, finished_at=now())
         log("Run completed", "success")
@@ -279,6 +293,109 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     finally:
         if station:
             await station.aclose()
+
+
+def _save_device(run_dir: Path, key_pem: bytes, cert_pem: str) -> None:
+    """UC-4: the simulated device's key and current certificate in one file – written atomically
+    (a crash never leaves a mismatching pair) and created with 0600. Demo material: never shown or
+    downloadable, removed on any cleanup."""
+    device = run_dir / "device"
+    device.mkdir(parents=True, exist_ok=True)
+    device.chmod(0o700)
+    tmp = device / "device.pem.tmp"
+    tmp.unlink(missing_ok=True)
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+        handle.write(key_pem + cert_pem.encode())
+    os.replace(tmp, device / "device.pem")
+
+
+async def renew(store: Store, run_id: str, run_dir: Path) -> None:
+    """UC-4, per click: the device renews in the field via EST simplereenroll. It authenticates with
+    its current certificate (mTLS on the clientauth host) – no passcode, no factory certificate.
+    Verified live on Essentials: same CN, new serial and validity; the old certificate stays issued.
+    Whatever happens, the run leaves "renewing" again."""
+    log = lambda msg, level="step": store.add_event(run_id, msg, level)  # noqa: E731
+    try:
+        await _renew(store, run_id, run_dir, log)
+    except (DTMError, ValueError, OSError) as exc:
+        log(f"Renewal failed: {exc}", "error")
+    except Exception as exc:
+        log(f"Renewal failed unexpectedly: {type(exc).__name__}", "error")
+        raise
+    finally:
+        store.claim_status(run_id, "renewing", "completed")
+        store.update_run(run_id, progress=None)
+
+
+async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
+    run_ = store.get_run(run_id)
+    p, result = run_["params"], run_["result"]
+    policies = store.objects(run_id, "policy")
+    if not policies or not SAFE_ID.fullmatch(policies[0]["dtm_id"]):
+        raise EnrollmentError("the run has no usable certificate policy")
+    policy_id, cn = policies[0]["dtm_id"], result["certificates"][0]["common_name"]
+    store.update_run(run_id, progress={"label": "Renewing in the field", "started": time.time()})
+    log("Renewal in the field: the device authenticates with its current certificate")
+    start = time.monotonic()
+    key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])  # a fresh key pair
+    keygen = time.monotonic() - start
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_cert_chain(run_dir / "device" / "device.pem")
+    async with httpx.AsyncClient(verify=context, timeout=REQUEST_TIMEOUT) as http:
+        for attempt in range(1, RENEW_ATTEMPTS + 1):
+            start = time.monotonic()
+            try:
+                response = await http.post(
+                    f"https://clientauth.{p['dtm_host']}{RENEW_PATH.format(policy_id=policy_id)}",
+                    headers={"Content-Type": "application/pkcs10", "Content-Transfer-Encoding": "base64"},
+                    content=base64.b64encode(csr.public_bytes(serialization.Encoding.DER)))
+            except httpx.HTTPError as exc:
+                raise EnrollmentError(f"EST simplereenroll failed: {type(exc).__name__}") from exc
+            seconds = time.monotonic() - start
+            if response.status_code != 401 or attempt == RENEW_ATTEMPTS:
+                break
+            log(f"DTM does not accept the new certificate yet – retrying in {RENEW_RETRY_S:g}s", "wait")
+            await asyncio.sleep(RENEW_RETRY_S)
+    if response.status_code >= 300:
+        text = response.text[:200] if not response.text.lstrip().startswith("<") else "(HTML error page)"
+        raise EnrollmentError(f"EST simplereenroll returned {response.status_code}: {text}")
+    try:
+        issued = certs.parse_pkcs7_certificates(base64.b64decode(response.content))[0]
+    except (ValueError, IndexError) as exc:
+        raise EnrollmentError("EST simplereenroll answer contains no certificate") from exc
+    pem = issued["pem"]
+    certs.save_certificates(run_dir, [issued])  # the result knows the certificate before the device switches
+    result["certificates"].append(issued)
+    result["certificate_total"] = len(result["certificates"])
+    result["renewals"] = result.get("renewals", []) + [
+        {"serial": issued["serial"], "seconds": round(seconds, 2), "keygen_s": round(keygen, 2),
+         "attempts": attempt, "at": now()}]
+    _record_renewal_steps(result["api_calls"], cn, p["key_type"], keygen, seconds)
+    store.update_run(run_id, result=result)
+    _save_device(run_dir, key_pem, pem)
+    log(f"Renewed in {seconds:.2f}s (round trip{f', attempt {attempt}' if attempt > 1 else ''}) – new serial "
+        f"{issued['serial']}, valid until {issued['not_after']}; the previous certificate stays valid", "success")
+    store.update_run(run_id, status="completed")
+
+
+def _record_renewal_steps(calls: list[dict], cn: str, key_type: str, keygen: float | None,
+                          seconds: float | None) -> None:
+    """The renewal block of the reproducible steps: seeded untimed right after the enrollment, then
+    each renewal adds its count and time per step."""
+    existing = {c["purpose"]: c for c in calls if c.get("phase") == "renewal"}
+    timing = {"keygen": keygen, "call": seconds}
+    renewed = seconds is not None
+    for step in renew_steps(cn, key_type):
+        took = timing.get(step["kind"])
+        if step["purpose"] in existing:
+            entry = existing[step["purpose"]]
+            entry["count"] += renewed
+            if took is not None:
+                entry["seconds"] = round((entry["seconds"] or 0) + took, 2)
+            continue
+        calls.append({"purpose": step["purpose"], "method": step["method"], "path": step["path"],
+                      "seconds": None if took is None else round(took, 2), "outcome": "ok", "count": int(renewed),
+                      "spec": {"command": step["command"]}, "phase": "renewal"})
 
 
 async def _record(store: Store, run_id: str, kind: str, name: str, create) -> str:
@@ -299,6 +416,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
         for done, cn in enumerate(names, 1):
             start = time.monotonic()
             key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])
+            station.last_key = key_pem  # UC-4: the device keeps it for the renewal in the field
             generated = time.monotonic()
             keygen += generated - start
             keys += 1
@@ -435,3 +553,42 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
              "openssl x509 -in device.crt -noout -subject -serial -enddate",
              "openssl x509 -in device.crt -noout -subject -serial -enddate")
     return steps
+
+
+def renew_steps(cn: str, key_type: str) -> list[dict]:
+    """UC-4 renewal in the field, as separate steps: new key + CSR → EST simplereenroll with the
+    current certificate as mTLS client certificate → PEM; the new key replaces the old one."""
+    new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
+    req = (f'openssl req -new -newkey {new_key} -nodes -keyout device-new.key -subj "/CN={cn}" '
+           "-outform DER -out renew.der")
+    path_b, path_p = RENEW_PATH.format(policy_id="${POLICY_ID}"), RENEW_PATH.format(policy_id="$env:POLICY_ID")
+    return [
+        {"kind": "keygen", "phase": "renewal", "method": "LOCAL", "path": "openssl",
+         "purpose": "Generate a new device key and CSR – the identity fields are taken from the current certificate (local)",
+         "command": {"bash": f"{req}\nopenssl base64 -A -in renew.der -out renew.b64",
+                     "powershell": f"{req}\n"
+                                   '[Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/renew.der")) | Set-Content renew.b64\n'
+                                   "# Windows curl.exe takes the current certificate as PKCS#12\n"
+                                   "openssl pkcs12 -export -inkey device.key -in device.crt -out device.p12 -passout pass:"}},
+        {"kind": "call", "phase": "renewal", "method": "POST", "path": RENEW_PATH.format(policy_id="{POLICY_ID}"),
+         "purpose": "Renew via EST simplereenroll – authenticated by the current device certificate (in the field)",
+         "command": {"bash": "# DTM accepts a just-issued certificate for renewal only after a few seconds\nsleep 10\n"
+                             f'curl -sS --fail -X POST "https://clientauth.${{DTM_HOST}}{path_b}" '
+                             "--cert device.crt --key device.key \\\n"
+                             '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" \\\n'
+                             "  --data-binary @renew.b64 -o renew.b64.out",
+                     "powershell": "# DTM accepts a just-issued certificate for renewal only after a few seconds\nStart-Sleep 10\n"
+                                   f'curl.exe -sS --fail -X POST "https://clientauth.$env:DTM_HOST{path_p}" '
+                                   "--cert-type P12 --cert device.p12 `\n"
+                                   '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" `\n'
+                                   '  --data-binary "@renew.b64" -o renew.b64.out'}},
+        {"kind": "convert", "phase": "renewal", "method": "LOCAL", "path": "openssl",
+         "purpose": "Convert the answer to PEM and switch the device to the new key and certificate (local)",
+         "command": {"bash": "openssl base64 -d -A -in renew.b64.out -out renew.p7b\n"
+                             "openssl pkcs7 -inform DER -in renew.p7b -print_certs -out device.crt\n"
+                             "mv device-new.key device.key",
+                     "powershell": '[IO.File]::WriteAllBytes("$PWD/renew.p7b", [Convert]::FromBase64String((Get-Content renew.b64.out -Raw)))\n'
+                                   "openssl pkcs7 -inform DER -in renew.p7b -print_certs -out device.crt\n"
+                                   "Move-Item -Force device-new.key device.key\n"
+                                   "Remove-Item device.p12  # it holds the previous key"}},
+    ]

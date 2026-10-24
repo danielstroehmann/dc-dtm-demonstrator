@@ -42,6 +42,12 @@ USE_CASES = {
         "a passcode or its own client certificate. Up to ten requests in a row are timed and extrapolated to a "
         "production run.",
         "client_side", ("EST · CMPv2 · REST", "Passcode · Factory certificate", "Up to 10 requests")),
+    "uc04": UseCase(
+        "Evergreen Device ID with Renewal in the Field",
+        "One device is enrolled in the factory via EST and later renews its certificate in the field with a "
+        "click – authenticated by the certificate it already holds. No device group, so the Essentials license "
+        "is enough.",
+        "client_side", ("EST", "Single device", "Renewal per click")),
 }
 DIVISION_DESCRIPTION = "dc-dtm-demonstrator run – safe to delete"
 # Verified up to 1000 (≈2 min issuance); every certificate consumes a license and slows cleanup.

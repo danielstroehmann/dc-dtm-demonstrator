@@ -204,9 +204,15 @@ class Store:
                 db.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
             db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
+    def claim_status(self, run_id: str, expected: str, new: str) -> bool:
+        """Atomic status change – False if another request changed the status first."""
+        return self._exec("UPDATE runs SET status = ? WHERE id = ? AND status = ?", (new, run_id, expected)).rowcount == 1
+
     def mark_interrupted(self) -> None:
         """Background tasks die with the process; make that visible after a restart."""
         self._exec("UPDATE runs SET status = 'interrupted' WHERE status IN ('pending', 'running')")
+        # An interrupted renewal leaves the device with its previous, still valid certificate.
+        self._exec("UPDATE runs SET status = 'completed' WHERE status = 'renewing'")
         self._exec("UPDATE runs SET cleanup_status = 'interrupted' WHERE cleanup_status = 'running'")
 
     # ledger of DTM objects created by a run – the primary source for cleanup

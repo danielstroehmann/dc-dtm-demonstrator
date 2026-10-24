@@ -147,7 +147,7 @@ async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
     base = evergreen.prefix(run_id, run["use_case"])
     lookups = [("division", f"{base}-division", client.division_ids),
                ("policy", f"{base}-policy", client.policy_ids)]
-    if run["use_case"] == "uc03":  # the factory's credential lives in its own authentication policy
+    if run["use_case"] in ("uc03", "uc04"):  # the factory's credential lives in its own authentication policy
         credential = ("auth_certificate", "factory") if run["params"].get("auth") == "certificate" else ("passcode", "passcode")
         lookups += [(kind, f"{base}-{suffix}", lambda n, k=kind: client.auth_object_ids(k, n))
                     for kind, suffix in (credential, ("auth_policy", "auth"))]
@@ -196,6 +196,8 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                     await client.delete_division(division["dtm_id"])
                     store.mark_removed(run_id, "division", division["dtm_id"])
                 shutil.rmtree(run_dir, ignore_errors=True)
+            else:  # UC-4: the device's key belongs to a revoked certificate now – nothing to keep it for
+                shutil.rmtree(run_dir / "device", ignore_errors=True)
             store.update_run(run_id, cleanup_status="done")
             log("Cleanup done" + (" – account restored" if mode == "full" else " – configuration kept"), "success")
     except DTMError as exc:

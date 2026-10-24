@@ -49,6 +49,7 @@ AUTH_COLLECTIONS = {"auth_policy": "authentication-policy", "passcode": "passcod
                     "auth_certificate": "authentication-certificate"}
 CLIENTAUTH_HOST = f"clientauth.{HOST}"
 EST_PATH_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/simpleenroll"
+REENROLL_PATH_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/simplereenroll"
 CMP_PATH_PREFIX = f"{DTM}/certificate-issuance-service/api/v1/cmp/DIOT_"
 
 ECDSA_CA_ID = "ca-ecdsa-ica"
@@ -205,6 +206,11 @@ class FakeDTM:
         # inside JSON strings. Off by default so the UC-3 suites test the rest of the flow;
         # test_rest_enrollment_tolerates_raw_line_breaks covers it explicitly.
         self.rest_raw_control_chars = False
+        # UC-4: DTM answers 401 est_unauthorized for a just-issued certificate (verified live) –
+        # the next N simplereenroll calls are refused that way.
+        self.reenroll_unauthorized = 0
+        self.reenroll_presented: list[str] = []  # serials of the client certificates presented
+        self.reenroll_delay = 0.0  # real seconds per simplereenroll (to overlap requests in tests)
         self._register()
         self._register_enrollment()
 
@@ -474,6 +480,8 @@ class FakeDTM:
                 side_effect=self._enroll_wrap("est", self._est))
             r.route(method="POST", host=host, path__regex=rf"^{CERT_PATH}$").mock(
                 side_effect=self._enroll_wrap("rest", self._rest))
+        r.route(method="POST", host=CLIENTAUTH_HOST, path__regex=rf"^{REENROLL_PATH_RE}$").mock(
+            side_effect=self._enroll_wrap("reenroll", self._reenroll))
         r.route().mock(side_effect=self._unknown)
 
     def _enroll_wrap(self, name, handler):
@@ -486,7 +494,8 @@ class FakeDTM:
                 if isinstance(self.enroll_fail, Exception):
                     raise self.enroll_fail
                 return self.enroll_fail
-            return handler(request, oid) if oid is not None else handler(request)
+            result = handler(request, oid) if oid is not None else handler(request)
+            return await result if asyncio.iscoroutine(result) else result
         return side_effect
 
     def _authenticate(self, request: httpx.Request, policy: dict, passcode: str | None):
@@ -534,6 +543,37 @@ class FakeDTM:
             return _error(400, "CSR signature invalid")
         cn = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         _record, cert, _key = self._new_certificate(oid, cn, csr.public_key())
+        p7 = pkcs7.serialize_certificates([cert], serialization.Encoding.DER)
+        return httpx.Response(200, content=base64.b64encode(p7),
+                              headers={"content-type": "application/pkcs7-mime; smime-type=certs-only"})
+
+    async def _reenroll(self, request, oid):
+        """EST simplereenroll: authenticated only by the current certificate (mTLS) – it must be a
+        certificate this fake issued under that policy and still ISSUED; the CSR keeps its subject."""
+        if self.reenroll_delay:
+            await _real_sleep(self.reenroll_delay)
+        policy = self.policies.get(oid)
+        if not policy or "EST" not in policy["certificate_management_methods"]:
+            return _error(404, "EST is not enabled for this policy")
+        if not self.tls_client_cert:
+            return _error(401, "est_unauthorized")
+        current = x509.load_pem_x509_certificate(self.tls_client_cert.encode())
+        self.reenroll_presented.append(format(current.serial_number, "X"))
+        record = next((c for c in self.certificates.values()
+                       if c["serial_number"] == format(current.serial_number, "x") and c["policy_id"] == oid), None)
+        if record is None or record["status"] != "ISSUED" or current.issuer != self.ica_cert.subject:
+            return _error(401, "est_unauthorized")
+        current.verify_directly_issued_by(self.ica_cert)
+        if self.reenroll_unauthorized > 0:
+            self.reenroll_unauthorized -= 1
+            return _error(401, "est_unauthorized")
+        try:
+            csr = x509.load_der_x509_csr(base64.b64decode(request.content, validate=True))
+        except ValueError:
+            return _error(400, "invalid CSR")
+        if not csr.is_signature_valid or csr.subject != current.subject:
+            return _error(400, "CSR subject must match the current certificate")
+        _record, cert, _key = self._new_certificate(oid, record["common_name"], csr.public_key())
         p7 = pkcs7.serialize_certificates([cert], serialization.Encoding.DER)
         return httpx.Response(200, content=base64.b64encode(p7),
                               headers={"content-type": "application/pkcs7-mime; smime-type=certs-only"})

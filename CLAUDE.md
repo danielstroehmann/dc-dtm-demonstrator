@@ -84,6 +84,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - UC-1 and UC-2 share `app/evergreen.py`; `uc01`/`uc02` stay the IDs in run data and object names.
 - UC-3 (`uc03`, enrollment protocols EST/CMPv2/REST) lives in `app/enrollment.py`; CMPv2 uses `openssl cmp`
   and one shared `robot-uc03-cmp-profile` per account that is never deleted (DTM refuses it).
+- UC-4 (`uc04`, one device: EST enrollment + renewal in the field per click) also runs on
+  `app/enrollment.py` (`renew`); the simulated device's key lives in the run dir until the rollback.
 
 ### Stack (v0.1)
 

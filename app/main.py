@@ -42,7 +42,7 @@ def new_run_id() -> str:
     return "".join(secrets.choice(RUN_ID_ALPHABET) for _ in range(6))
 NAME = re.compile(r"[A-Za-z0-9 ._-]{1,40}")
 HOST = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
-ACTIVE = {"pending", "running"}
+ACTIVE = {"pending", "running", "renewing"}
 SHOWN_EVENTS = 200
 CERTIFICATES_PER_PAGE = 10
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -64,6 +64,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["snippets"] = snippets
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
     templates.env.globals["auths"] = enrollment.AUTHS
+    templates.env.globals["max_renewals"] = enrollment.MAX_RENEWALS
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     limiter = Limiter(key_func=get_remote_address)
     app.state.limiter = limiter
@@ -124,8 +125,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(409, "DTM connection is not configured")
         return conn
 
-    def spawn(coro_factory, run_id: str) -> None:
-        client = client_for(run_id)  # fails in the request, before anything is started
+    def spawn(coro_factory, run_id: str, with_client: bool = True) -> None:
+        client = client_for(run_id) if with_client else None  # fails in the request, before anything is started
 
         async def runner():
             try:
@@ -133,7 +134,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             except Exception:
                 log.exception("background task for run %s failed", run_id)
             finally:
-                await client.aclose()
+                if client:
+                    await client.aclose()
         task = asyncio.create_task(runner())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
@@ -334,8 +336,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         run_id = run_id.strip().lower() or new_run_id()
         if use_case not in USE_CASES:
             raise HTTPException(400, "Unknown use case")
-        uc03 = use_case == "uc03"
-        if uc03:  # enrollment protocols: API only, sequential single requests, no approval
+        enrolled = use_case in ("uc03", "uc04")  # both run on the enrollment engine
+        if use_case == "uc04":  # one device via EST; renewal later per click
+            protocol, count = "est", 1
+        if enrolled:  # enrollment protocols: API only, sequential single requests, no approval
             variant, mode, approval = "api", "single", False
             # Checked before DTM is asked for anything.
             if protocol not in enrollment.PROTOCOLS or auth_method not in enrollment.AUTHS:
@@ -375,12 +379,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                   "variant": variant, "mode": mode, "count": count,
                   "ca_id": ca_id, "ca_name": ca["name"], "key_type": evergreen.KEY_TYPES[ca["key_type"]],
                   "profile_id": profile_id, "approval": approval and mode == "batch" and variant == "api"}
-        if uc03:
+        if enrolled:
             params |= {"protocol": protocol, "auth": auth_method}
         # A reused run ID must not inherit files of a deleted run (e.g. an old batch.zip).
         shutil.rmtree(data_dir / "runs" / run_id, ignore_errors=True)
         store.create_run(run_id, use_case, params)
-        engine = enrollment.run if uc03 else evergreen.run
+        engine = enrollment.run if enrolled else evergreen.run
         spawn(lambda c: engine(store, c, run_id, data_dir / "runs" / run_id), run_id)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -442,6 +446,20 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     async def run_certificates(request: Request, run_id: str, page: int = 1):
         run = get_run_or_404(run_id)
         return render(request, "_certificates.html", run=run, **certificate_page(run, page))
+
+    @app.post("/runs/{run_id}/renew")
+    async def renew_run(run_id: str):
+        run = get_run_or_404(run_id)
+        if run["use_case"] == "uc04" and run["status"] == "renewing":  # double click: just show the run
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        if run["use_case"] != "uc04" or run["status"] != "completed" or run.get("cleanup_status"):
+            raise HTTPException(409, "Only a completed UC-4 run that is not cleaned up can be renewed")
+        if len((run.get("result") or {}).get("renewals") or []) >= enrollment.MAX_RENEWALS:
+            raise HTTPException(409, f"At most {enrollment.MAX_RENEWALS} renewals per run")
+        # Claim the run before the task starts – a concurrent request must not start a second renewal.
+        if store.claim_status(run_id, "completed", "renewing"):
+            spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     @app.get("/runs/{run_id}/certificates/{serial}.pem")
     async def run_certificate_pem(run_id: str, serial: str):

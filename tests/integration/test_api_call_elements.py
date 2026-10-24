@@ -7,7 +7,7 @@ import re
 import pytest
 
 from app import evergreen, snippets
-from tests.integration import test_uc01_flow, test_uc02_flow, test_uc03_flow
+from tests.integration import test_uc01_flow, test_uc02_flow, test_uc03_flow, test_uc04_flow
 
 # A request is one invocation of a network client. Comment lines are ignored (they may mention curl).
 REQUEST = re.compile(r"(?<![\w.$/-])(?:curl(?:\.exe)?|wget|Invoke-RestMethod)(?=\s)|(?<![\w.-])openssl cmp(?=\s)")
@@ -67,3 +67,14 @@ async def test_uc03_elements(store, enroll_net, cmp_openssl, tmp_path, protocol,
     # and exactly one of them is the enrollment request
     networked = [c for c in run["result"]["api_calls"] if c["method"] != "LOCAL"]
     assert sum(c["path"] == test_uc03_flow.protocol_call(run)["path"] for c in networked) == 1
+
+
+@pytest.mark.parametrize("auth", ["passcode", "certificate"])
+async def test_uc04_elements_including_the_renewal_block(store, enroll_net, tmp_path, auth):
+    run = await test_uc04_flow.start(store, enroll_net, "e4", tmp_path, auth=auth)
+    assert run["status"] == "completed", run["error"]
+    for _ in range(2):
+        run = await test_uc04_flow.renew(store, "e4", tmp_path)
+    renewal = [c for c in run["result"]["api_calls"] if c["phase"] == "renewal"]
+    assert len(renewal) == 3 and sum(c["method"] != "LOCAL" for c in renewal) == 1
+    assert assert_one_request_per_element(run) == len(run["result"]["api_calls"])

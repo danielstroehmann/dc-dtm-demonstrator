@@ -1,0 +1,13 @@
+{% from "_icons.html" import icon %}
+{# UC-4: the device renews in the field – the page reloads when the renewal ends (HX-Refresh). #}
+{% set renewals = run.result.renewals or [] %}
+{% set limit_reached = renewals | length >= max_renewals %}
+<article class="card focus">
+  <div class="card-head"><h2>Renewal in the Field</h2>
+    <form method="post" action="/runs/{{ run.id }}/renew" class="inline">
+      <button type="submit" class="btn-icon" {% if run.status == "renewing" or limit_reached %}disabled{% endif %}
+              {% if run.status == "renewing" %}aria-busy="true"{% endif %}
+              {% if limit_reached %}data-tip="At most {{ max_renewals }} renewals per run"{% endif %}>{{ icon("refresh") }}Renew now</button>
+    </form></div>
+  {% if renewals %}<p class="muted">Current certificate: <span class="mono">{{ renewals[-1].serial }}</span></p>{% endif %}
+</article>

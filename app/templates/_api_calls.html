@@ -6,6 +6,7 @@
 {% set has_phase = calls[0].phase is defined %}
 {% set setup = calls | selectattr("phase", "equalto", "setup") | list if has_phase else [] %}
 {% set recurring = calls | selectattr("phase", "equalto", "recurring") | list if has_phase else calls %}
+{% set renewal = calls | selectattr("phase", "equalto", "renewal") | list if has_phase else [] %}
 <article class="card api-calls" id="api-calls">
   <div class="card-head">
     <h2>Reproducible Steps</h2>
@@ -37,11 +38,21 @@
   {% if recurring %}
   <section class="box accent">
     <div class="box-head">
-      <h3>Certificate Order</h3>
+      <h3>{{ "Factory Enrollment" if run.use_case == "uc04" else "Certificate Order" }}</h3>
       <button class="btn-sm outline" data-copy="script-recurring-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "recurring", group = recurring %}{% include "_api_call_list.html" %}{% endwith %}
     <pre id="script-recurring-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "recurring") }}</pre>
+  </section>
+  {% endif %}
+  {% if renewal %}
+  <section class="box accent">
+    <div class="box-head">
+      <h3>Renewal in the Field</h3>
+      <button class="btn-sm outline" data-copy="script-renewal-{{ dialect }}">Copy as script</button>
+    </div>
+    {% with phase = "renewal", group = renewal %}{% include "_api_call_list.html" %}{% endwith %}
+    <pre id="script-renewal-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "renewal") }}</pre>
   </section>
   {% endif %}
   <pre id="script-all-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect) }}</pre>

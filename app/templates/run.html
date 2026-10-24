@@ -19,6 +19,7 @@
 </ol>
 {% include "_run_live.html" %}
 {% if finished %}{% include "_result_overview.html" %}{% endif %}
+{% if run.use_case == "uc04" and run.status in ("completed", "renewing") and not run.cleanup_status %}{% include "_renew.html" %}{% endif %}
 {% if rolled_back %}{% include "_delete_run.html" %}{% endif %}
 {% include "_timeline.html" %}
 {% if finished %}{% include "_result.html" %}{% endif %}

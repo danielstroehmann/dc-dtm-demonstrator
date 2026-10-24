@@ -84,6 +84,15 @@ The EST URL is documented as "copy from the policy page" – check whether
 | **Deleted policies are soft-deleted** | `GET …/certificate-policy/{id}` returns `status: DELETED`; the **name stays reserved** ("already exists") → a run ID cannot be reused after rollback (affects UC-1/UC-2 too) |
 | **Profile of a deleted policy cannot be deleted** | *"referenced by a certificate management policy"* even after the policy is deleted → the per-run CMP profile can only be **disabled** (residue: one disabled `robot-…-cmp-profile` per CMPv2 run). The portal refuses the delete with the same error (author, 2026-10-24) – DTM behaviour, to be reported to DigiCert |
 
+## Renewal in the field – Essentials (verified live 2026-10-24)
+
+EST policy without device group (Essentials), authentication policy with a passcode only: enrollment with
+the passcode, then `simplereenroll` on `clientauth.<host>` with the **issued device certificate as mTLS
+client certificate** (no passcode, no factory certificate) → `200`, renewed certificate with the same CN,
+new serial, new validity (2.6 s). Policy default `est_request_parameters.renewal_authentication_mode:
+RENEWING_CERTIFICATE_ONLY`. The old certificate stays **issued** (not revoked automatically) – both count
+as licenses. Candidate for a UC-4 "factory enrollment → renewal in the field".
+
 ## Open
 
 1. CMPv2 profile residue – **implemented as recommended:** one shared `robot-uc03-cmp-profile` per account, created by the first CMPv2 run from the selected profile, found by name later, kept on full rollback (the only documented residue). Per-run profiles would leave one undeletable profile per run. The author can still decide otherwise.

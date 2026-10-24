@@ -11,6 +11,8 @@
     {% if r.get("keygen_s") is not none %}<div><small data-tip="Key pairs and CSRs generated in the factory">Key generation</small><p class="metric">{{ r.keygen_s }} s</p></div>{% endif %}
     {% if r.server_processing_ms %}<div><small>DTM processing time</small><p class="metric">{{ (r.server_processing_ms / 1000) | round(2) }} s</p></div>{% endif %}
     {% if r.get("approval_s") is not none %}<div><small>Approved after</small><p class="metric">{{ r.approval_s }} s</p></div>{% endif %}
+    {% if r.renewals %}<div><small>Renewals</small><p class="metric">{{ r.renewals | length }}</p></div>
+    <div><small data-tip="EST simplereenroll, authenticated by the current certificate">Last renewal</small><p class="metric">{{ r.renewals[-1].seconds }} s</p></div>{% endif %}
     <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
   </div>
   {% endif %}

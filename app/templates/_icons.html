@@ -5,6 +5,7 @@
 {%- elif name == "key" %}<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>
 {%- elif name == "factory" %}<path d="M3 21V10l6 4V10l6 4V6l6 3v12z"/><path d="M7 17h2M12 17h2M17 17h1"/>
 {%- elif name == "exchange" %}<path d="M4 8h14l-3-3M20 16H6l3 3"/>
+{%- elif name == "refresh" %}<path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/>
 {%- elif name == "logout" %}<path d="M15 4h4v16h-4M10 16l-4-4 4-4M6 12h10"/>
 {%- elif name == "undo" %}<path d="M4 4v6h6"/><path d="M4.6 15a8 8 0 1 0 1.9-8.3L4 10"/>
 {%- elif name == "play" %}<path d="M8 5v14l11-7z"/>
@@ -12,6 +13,6 @@
 {%- endif %}</svg>
 {%- endmacro %}
 {% macro pill(status) -%}
-{%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run"}.get(status, "") -%}
+{%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "renewing": "run"}.get(status, "") -%}
 <span class="pill {{ kind }}">{{ status }}</span>
 {%- endmacro %}

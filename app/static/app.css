@@ -237,6 +237,9 @@ button.danger:hover { background: #8c1d18; border-color: #8c1d18; }
   --ok-tint: #e8f5e9; --bad-tint: #fdecea; --run-tint: #e3f0fc; --idle-tint: #f1f3f5;
 }
 html, body { background: #f7f9fb; }
+/* Always reserve the scrollbar's space – otherwise short and long pages differ in width and the
+   centred header jumps sideways when switching between them. */
+html { scrollbar-gutter: stable; }
 body { min-height: 100vh; display: flex; flex-direction: column; }
 body > main { flex: 1 0 auto; width: 100%; }
 main.container { padding-top: 0; }
@@ -262,7 +265,7 @@ button, button[type="submit"], input[type="submit"], [type="button"], [type="res
 .site-header .nav-link { color: rgba(255, 255, 255, 0.85); padding: var(--s2) var(--s3); border-radius: var(--pico-border-radius);
   font-size: 0.95rem; }
 .site-header .nav-link:hover { background: rgba(255, 255, 255, 0.1); text-decoration: none; color: #fff; }
-.site-header .nav-link[aria-current="page"] { color: #fff; background: rgba(255, 255, 255, 0.14); }
+.site-header .nav-link[aria-current="page"] { color: #fff; background: rgba(255, 255, 255, 0.14); text-decoration: none; }
 .conn-chip { display: inline-flex; align-items: center; gap: var(--s2); max-width: 16rem; padding: 0.2rem var(--s3);
   border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 1rem; color: #fff; font-size: 0.8rem; white-space: nowrap; }
 .conn-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

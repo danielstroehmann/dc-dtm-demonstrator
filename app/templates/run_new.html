@@ -21,22 +21,26 @@
       <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
     </div>
   </section>
-  {% if use_case_id == "uc03" %}
+  {% if use_case_id in ("uc03", "uc04") %}
   <section class="form-section">
     <header><h3>Enrollment</h3></header>
     <div class="fields">
+      {% if use_case_id == "uc03" %}
       <div class="seg-group"><span class="seg-label" id="l-protocol">Protocol</span>
         <div role="radiogroup" aria-labelledby="l-protocol" class="segmented">
           {% for key, label in protocols.items() %}<label><input type="radio" name="protocol" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ label }}</label>{% endfor %}
         </div></div>
+      {% endif %}
       <div class="seg-group"><span class="seg-label" id="l-auth">Factory authentication</span>
         <div role="radiogroup" aria-labelledby="l-auth" class="segmented">
           {% for key, label in auths.items() %}<label><input type="radio" name="auth_method" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ label }}</label>{% endfor %}
         </div></div>
+      {% if use_case_id == "uc03" %}
       <label>Number of requests
         <input type="number" name="count" class="short" value="1" min="1" max="{{ max_requests }}">
       </label>
       <small class="field-help">One after another, each timed – the basis for the extrapolation.</small>
+      {% else %}<input type="hidden" name="protocol" value="est"><input type="hidden" name="count" value="1">{% endif %}
       <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
     </div>
   </section>
@@ -75,7 +79,7 @@
           </select>
         </label>
       </div>
-      {% if use_case_id != "uc03" %}<label><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
+      {% if use_case_id not in ("uc03", "uc04") %}<label><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
     </div>
   </section>
   <div class="action-bar">
