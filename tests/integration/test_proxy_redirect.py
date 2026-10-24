@@ -64,8 +64,12 @@ def _write_cert(directory: Path) -> None:
     (directory / "key.pem").write_bytes(key.private_bytes(serialization.Encoding.PEM,
                                                           serialization.PrivateFormat.PKCS8,
                                                           serialization.NoEncryption()))
+    # Test-only files, owned by the CI user: the container's root runs without CAP_DAC_OVERRIDE, so it can
+    # read them only via the "other" bits – also on the directory, which pytest creates with 0700.
+    # (Docker Desktop on macOS maps bind-mount ownership to the container user and hides this.)
     for path in directory.iterdir():
-        path.chmod(0o644)  # the container runs without CAP_DAC_OVERRIDE
+        path.chmod(0o644)
+    directory.chmod(0o755)
 
 
 @pytest.fixture(scope="module", params=[("selfsigned", "443"), ("selfsigned", "8443"),
