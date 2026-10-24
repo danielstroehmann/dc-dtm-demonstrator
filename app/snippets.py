@@ -9,7 +9,8 @@ import shlex
 
 DIALECTS = {"curl": "curl", "wget": "wget", "powershell": "PowerShell 7"}
 # Only the variables the snippets define are tokens – other "{TEXT}" in DTM values stays as is.
-VARIABLES = ("DTM_HOST", "DTM_ACCOUNT_ID", "DIVISION_ID", "POLICY_ID", "JOB_ID", "CSR")
+VARIABLES = ("DTM_HOST", "DTM_ACCOUNT_ID", "DIVISION_ID", "POLICY_ID", "JOB_ID", "CSR",
+             "AUTH_POLICY_ID", "PROFILE_ID", "PASSCODE", "FACTORY_CERT")
 TOKEN = re.compile(r"\{(" + "|".join(VARIABLES) + r")\}")
 API_KEY_PLACEHOLDER = "<your API key>"
 

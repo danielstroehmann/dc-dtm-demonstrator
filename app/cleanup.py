@@ -1,5 +1,5 @@
 """Rollback of everything a run created. Order matters: wait for batch jobs → certificates →
-policies → division (deleting a division does not cascade, R-2)."""
+policies → authentication objects (UC-3) → division (deleting a division does not cascade, R-2)."""
 
 import asyncio
 import shutil
@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from . import evergreen
-from .dtm import DTMClient, DTMError
+from .dtm import AUTH_KINDS, DTMClient, DTMError
 from .store import Store
 
 REVOKE_PARALLEL = 16
@@ -143,9 +143,15 @@ async def wait_for_jobs(store: Store, client: DTMClient, run_id: str, log) -> No
 async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
     """Merge objects found by their exact run names into the ledger – a create may have
     succeeded in DTM although the run never recorded it (crash, lookup failure)."""
-    base = evergreen.prefix(run_id, store.get_run(run_id)["use_case"])
-    for kind, name, lookup in (("division", f"{base}-division", client.division_ids),
-                               ("policy", f"{base}-policy", client.policy_ids)):
+    run = store.get_run(run_id)
+    base = evergreen.prefix(run_id, run["use_case"])
+    lookups = [("division", f"{base}-division", client.division_ids),
+               ("policy", f"{base}-policy", client.policy_ids)]
+    if run["use_case"] == "uc03":  # the factory's credential lives in its own authentication policy
+        credential = ("auth_certificate", "factory") if run["params"].get("auth") == "certificate" else ("passcode", "passcode")
+        lookups += [(kind, f"{base}-{suffix}", lambda n, k=kind: client.auth_object_ids(k, n))
+                    for kind, suffix in (credential, ("auth_policy", "auth"))]
+    for kind, name, lookup in lookups:
         known = {o["dtm_id"] for o in store.objects(run_id, kind)}
         for dtm_id in await lookup(name):
             if dtm_id not in known:
@@ -178,6 +184,12 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                     beat.set(f"Deleting certificate policy {policy['name']} and verifying it is gone")
                     await client.delete_policy(policy["dtm_id"])
                     store.mark_removed(run_id, "policy", policy["dtm_id"])
+                for kind in AUTH_KINDS:  # credentials first, their authentication policy last
+                    for obj in store.objects(run_id, kind):
+                        log(f"Deleting {kind.replace('_', ' ')} {obj['name']}")
+                        beat.set(f"Deleting {kind.replace('_', ' ')} {obj['name']} and verifying it is gone")
+                        await client.delete_auth_object(kind, obj["dtm_id"])
+                        store.mark_removed(run_id, kind, obj["dtm_id"])
                 for division in store.objects(run_id, "division"):
                     log(f"Deleting division {division['name']}")
                     beat.set(f"Deleting division {division['name']} and verifying it is gone")

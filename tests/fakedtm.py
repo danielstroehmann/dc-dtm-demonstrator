@@ -11,6 +11,7 @@ any violation or unknown endpoint (e.g. the forbidden blueprint service) is reco
 """
 
 import asyncio
+import base64
 import email
 import io
 import json
@@ -42,6 +43,13 @@ POLICY_PATH = f"{DTM}/certificate-configuration-service/api/v2/certificate-polic
 POLICY_DELETE_PATH = f"{DTM}/certificate-configuration-service/api-ui/v1/certificate-policy"
 DIVISION_PATH = f"{DTM}/api/v4/division"
 JOBS_PATH = f"{DTM}/certificate-batch-service/api/v1/jobs"
+PROFILE_PATH = f"{DTM}/certificate-configuration-service/api/v1/certificate-profile"
+AUTH_PATH = f"{DTM}/authentication-service/api/v1"
+AUTH_COLLECTIONS = {"auth_policy": "authentication-policy", "passcode": "passcode",
+                    "auth_certificate": "authentication-certificate"}
+CLIENTAUTH_HOST = f"clientauth.{HOST}"
+EST_PATH_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/simpleenroll"
+CMP_PATH_PREFIX = f"{DTM}/certificate-issuance-service/api/v1/cmp/DIOT_"
 
 ECDSA_CA_ID = "ca-ecdsa-ica"
 RSA_CA_ID = "ca-rsa-ica"
@@ -146,7 +154,11 @@ class FakeDTM:
             self._ca("ca-other-account", "Other account ICA", "ecdsa", account=OTHER_ACCOUNT_ID),
         ]
         self.profiles = [
-            {"id": PROFILE_ID, "name": profile_name, "status": "ACTIVE"},
+            {"id": PROFILE_ID, "name": profile_name, "status": "ACTIVE", "certificate_template": {"id": "tpl-client"},
+             "body": [{"key": "subject.common_name", "optional": False, "enabled": True,
+                       "sources": ["user_supplied"], "value": None},
+                      {"key": "csr", "optional": False, "enabled": True, "sources": ["user_supplied"],
+                       "value": None}]},
             {"id": "profile-server", "name": "Basic server certificate profile", "status": "ACTIVE"},
             {"id": "profile-old", "name": "Old profile", "status": "INACTIVE"},
         ]
@@ -181,7 +193,20 @@ class FakeDTM:
         self.csr_job_steps = ["pending", "completed"]  # verified live: CSR jobs start as "pending"
         self.received_csrs: list[str] = []  # success_items reported while in_progress, per poll
         self.revoked_count_lag = 0  # revoked listings that still report nothing (eventual consistency)
+        # UC-3: authentication service (soft delete → status DELETED) and enrollment endpoints
+        self.auth_objects: dict[str, dict[str, dict]] = {kind: {} for kind in AUTH_COLLECTIONS}
+        self.created_profiles: list[dict] = []  # profile create bodies (the shared CMPv2 profile)
+        self.enroll_router = respx.Router(assert_all_called=False, assert_all_mocked=True)
+        self.enroll_requests: list[httpx.Request] = []
+        self.enroll_calls: list[tuple[str, str]] = []  # (protocol route, host)
+        self.enroll_fail: httpx.Response | Exception | None = None
+        self.tls_client_cert: str | None = None  # PEM the station loaded for mTLS (see enroll_net)
+        # The management call on the same path (UC-1 single issuance) answers with raw line breaks
+        # inside JSON strings. Off by default so the UC-3 suites test the rest of the flow;
+        # test_rest_enrollment_tolerates_raw_line_breaks covers it explicitly.
+        self.rest_raw_control_chars = False
         self._register()
+        self._register_enrollment()
 
     def _ca(self, ca_id, name, key_type, *, cert_type="intermediate", status="active", account=None):
         return {"id": ca_id, "name": name, "key_type": key_type, "cert_type": cert_type, "status": status,
@@ -219,6 +244,9 @@ class FakeDTM:
             ("division_list", "GET", rf"{DIVISION_PATH}", self._list_divisions),
             ("division_delete", "DELETE", rf"{DIVISION_PATH}/(?P<oid>[^/]+)", self._delete_division),
             ("policy_create", "POST", rf"{POLICY_PATH}", self._create_policy),
+            ("policy_get", "GET", rf"{POLICY_PATH}/(?P<oid>[^/]+)", self._get_policy),
+            ("profile_get", "GET", rf"{PROFILE_PATH}/(?P<oid>[^/]+)", self._get_profile),
+            ("profile_create", "POST", rf"{PROFILE_PATH}", self._create_profile),
             ("policy_list", "GET", rf"{POLICY_PATH}", self._list_policies),
             ("policy_delete", "DELETE", rf"{POLICY_DELETE_PATH}/(?P<oid>[^/]+)", self._delete_policy),
             ("issue", "POST", rf"{CERT_PATH}", self._issue),
@@ -230,6 +258,13 @@ class FakeDTM:
             ("result", "GET", rf"{JOBS_PATH}/(?P<oid>[^/]+)/download/result", self._result),
             ("job", "GET", rf"{JOBS_PATH}/(?P<oid>[^/]+)", self._job),
         ]
+        for kind, collection in AUTH_COLLECTIONS.items():
+            routes += [
+                (f"{kind}_create", "POST", rf"{AUTH_PATH}/{collection}", self._auth_create(kind)),
+                (f"{kind}_list", "GET", rf"{AUTH_PATH}/{collection}", self._auth_list(kind)),
+                (f"{kind}_get", "GET", rf"{AUTH_PATH}/{collection}/(?P<oid>[^/]+)", self._auth_get(kind)),
+                (f"{kind}_delete", "PUT", rf"{AUTH_PATH}/{collection}/(?P<oid>[^/]+)/delete", self._auth_delete(kind)),
+            ]
         for name, method, path, handler in routes:
             r.route(method=method, path__regex=rf"^{path}$", name=name).mock(side_effect=self._wrap(name, handler))
         r.route(name="unknown").mock(side_effect=self._unknown)
@@ -320,12 +355,205 @@ class FakeDTM:
             return _error(400, "division not found")
         if policy["ica_id"] not in {c["id"] for c in self.cas}:
             return _error(400, "ica not found")
-        for section in ("single_cert_request_parameters", "batch_request_parameters"):
-            if "encryption_certificate_source" not in policy.get(section, {}):
+        methods = policy.get("certificate_management_methods") or []
+        if not methods or not set(methods) <= {"SINGLE", "BATCH", "EST", "CMP_V2"}:
+            return _error(400, f"invalid certificate_management_methods {methods!r}")
+        sections = {"SINGLE": "single_cert_request_parameters", "BATCH": "batch_request_parameters"}
+        for method, section in sections.items():
+            if method in methods and "encryption_certificate_source" not in policy.get(section, {}):
                 return _error(400, f"{section}.encryption_certificate_source is required")
+        if "CMP_V2" in methods and "cmp_request_parameters" not in policy:
+            return _error(400, "cmp_request_parameters is required")
+        auth_policy_id = policy.get("authentication_policy_id")
+        if auth_policy_id is not None and self.auth_objects["auth_policy"].get(auth_policy_id, {}).get(
+                "status") != "ACTIVE":
+            return _error(400, "authentication policy not found")
+        if policy.get("certificate_profile_id") not in {p["id"] for p in self.profiles if p["status"] == "ACTIVE"}:
+            return _error(400, "certificate profile not found")
         policy_id = f"IOT_{uuid.uuid4()}"
-        self.policies[policy_id] = {"id": policy_id, **policy}
+        self.policies[policy_id] = {"id": policy_id, **policy, "alternative_id": uuid.uuid4().hex[:12]}
         return _json_response(201, {})
+
+    def _get_policy(self, request, oid):
+        policy = self.policies.get(oid)
+        if not policy:
+            return _error(404, "entity_not_found")
+        chain = [{"blob": base64.b64encode(c.public_bytes(serialization.Encoding.DER)).decode()}
+                 for c in (self.ica_cert, self.root_cert)]
+        return _json_response(200, {"id": oid, "name": policy["name"], "status": "ACTIVE",
+                                    "alternative_id": policy["alternative_id"], "ca_chain": chain})
+
+    # certificate profiles (UC-3: the shared CMPv2 profile is a copy that allows bare public keys)
+    def _get_profile(self, request, oid):
+        profile = next((p for p in self.profiles if p["id"] == oid), None)
+        if not profile:
+            return _error(404, "entity_not_found")
+        return _json_response(200, profile)
+
+    def _create_profile(self, request):
+        body = json.loads(request.content)
+        if body.get("account_id") != self.account_id:
+            return _error(400, "account_id in body does not match")
+        if not body.get("certificate_template_id") or not isinstance(body.get("body"), list):
+            return _error(400, "certificate_template_id and body are required")
+        if any(p["name"] == body.get("name") for p in self.profiles):
+            return _error(409, "profile name already exists")
+        csr = next((e for e in body["body"] if e.get("key") == "csr"), {})
+        profile = {"id": f"profile-{uuid.uuid4().hex[:8]}", "name": body["name"], "status": "ACTIVE",
+                   "account_id": body["account_id"],
+                   "certificate_template": {"id": body["certificate_template_id"]}, "body": body["body"],
+                   "allow_bare_public_key": "allow_bare_public_key" in (csr.get("sources") or [])}
+        self.profiles.append(profile)
+        self.created_profiles.append(body)
+        return _json_response(201, profile)
+
+    # authentication service (UC-3)
+    def _auth_create(self, kind):
+        def create(request):
+            body = json.loads(request.content)
+            if body.get("account_id") != self.account_id:
+                return _error(400, "account_id in body does not match")
+            if not body.get("name"):
+                return _error(400, "name is required")
+            record = {"id": str(uuid.uuid4()), "name": body["name"], "status": "ACTIVE", "body": body}
+            if kind != "auth_policy":
+                parent = self.auth_objects["auth_policy"].get(body.get("authentication_policy_id"))
+                if not parent or parent["status"] != "ACTIVE":
+                    return _error(400, "authentication policy not found")
+            if kind == "passcode":
+                if not 6 <= len(body.get("passcode") or "") <= 64:
+                    return _error(400, "passcode must be 6–64 characters")
+                record["alternate_id"] = f"ref-{uuid.uuid4().hex[:10]}"
+            if kind == "auth_certificate":
+                try:
+                    x509.load_pem_x509_certificate((body.get("pem") or "").encode())
+                except ValueError:
+                    return _error(400, "invalid certificate")
+            self.auth_objects[kind][record["id"]] = record
+            return _json_response(201, {k: v for k, v in record.items() if k != "body"}
+                                  | {"authentication_policy_id": body.get("authentication_policy_id")})
+        return create
+
+    def _auth_list(self, kind):
+        def list_(request):  # soft-deleted objects stay listed with status DELETED
+            return self._page(request, [{"id": o["id"], "name": o["name"], "status": o["status"]}
+                                        for o in self.auth_objects[kind].values()])
+        return list_
+
+    def _auth_get(self, kind):
+        def get(request, oid):
+            record = self.auth_objects[kind].get(oid)
+            if not record:
+                return _error(404, "entity_not_found")
+            return _json_response(200, {"id": oid, "name": record["name"], "status": record["status"]})
+        return get
+
+    def _auth_delete(self, kind):
+        def delete(request, oid):
+            record = self.auth_objects[kind].get(oid)
+            if not record:
+                return _error(404, "entity_not_found")
+            if record["status"] == "DELETED":
+                return _error(400, "already deleted")
+            record["status"] = "DELETED"
+            return httpx.Response(200)
+        return delete
+
+    def active_auth(self, kind: str) -> list[dict]:
+        return [o for o in self.auth_objects[kind].values() if o["status"] == "ACTIVE"]
+
+    # enrollment endpoints (UC-3) – authenticated by the policy's authentication policy, never by
+    # the API key; mTLS runs on clientauth.<host>
+    def enroll_transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.enroll_router.async_handler)
+
+    def _register_enrollment(self) -> None:
+        r = self.enroll_router
+        for host in (HOST, CLIENTAUTH_HOST):
+            r.route(method="POST", host=host, path__regex=rf"^{EST_PATH_RE}$").mock(
+                side_effect=self._enroll_wrap("est", self._est))
+            r.route(method="POST", host=host, path__regex=rf"^{CERT_PATH}$").mock(
+                side_effect=self._enroll_wrap("rest", self._rest))
+        r.route().mock(side_effect=self._unknown)
+
+    def _enroll_wrap(self, name, handler):
+        async def side_effect(request: httpx.Request, oid: str | None = None):
+            self.enroll_requests.append(request)
+            self.enroll_calls.append((name, request.url.host))
+            if "x-api-key" in request.headers or "account_id" in request.url.params:
+                self.violations.append(f"{name}: enrollment call carries the API key or account_id")
+            if self.enroll_fail is not None:
+                if isinstance(self.enroll_fail, Exception):
+                    raise self.enroll_fail
+                return self.enroll_fail
+            return handler(request, oid) if oid is not None else handler(request)
+        return side_effect
+
+    def _authenticate(self, request: httpx.Request, policy: dict, passcode: str | None):
+        """None if authenticated, else the error response DTM would send."""
+        auth_policy_id = policy.get("authentication_policy_id")
+        if request.url.host == CLIENTAUTH_HOST:
+            if not self.tls_client_cert:
+                return _error(401, "client certificate required")
+            if not any(o["body"]["pem"].strip() == self.tls_client_cert.strip()
+                       and o["body"]["authentication_policy_id"] == auth_policy_id
+                       for o in self.active_auth("auth_certificate")):
+                return _error(401, "client certificate not registered")
+            return None
+        if not passcode or not any(o["body"]["passcode"] == passcode
+                                   and o["body"]["authentication_policy_id"] == auth_policy_id
+                                   for o in self.active_auth("passcode")):
+            return _error(401, "invalid passcode")
+        return None
+
+    def register_certificate(self, policy_id: str, cert: x509.Certificate) -> dict:
+        """A certificate issued outside the fake's handlers (fake openssl cmp) – listed like any other."""
+        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        record = {"id": str(uuid.uuid4()), "policy_id": policy_id, "common_name": cn, "status": "ISSUED",
+                  "serial_number": format(cert.serial_number, "x")}
+        self.certificates[record["id"]] = record
+        return record
+
+    def _est(self, request, oid):
+        policy = self.policies.get(oid)
+        if not policy or "EST" not in policy["certificate_management_methods"]:
+            return _error(404, "EST is not enabled for this policy")
+        passcode = None
+        header = request.headers.get("authorization", "")
+        if header.startswith("Basic "):
+            passcode = base64.b64decode(header[6:]).decode()
+        if (denied := self._authenticate(request, policy, passcode)) is not None:
+            return denied
+        if request.headers.get("content-type") != "application/pkcs10":
+            return _error(415, "expected application/pkcs10")
+        try:
+            csr = x509.load_der_x509_csr(base64.b64decode(request.content, validate=True))
+        except ValueError:
+            return _error(400, "invalid CSR")
+        if not csr.is_signature_valid:
+            return _error(400, "CSR signature invalid")
+        cn = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        _record, cert, _key = self._new_certificate(oid, cn, csr.public_key())
+        p7 = pkcs7.serialize_certificates([cert], serialization.Encoding.DER)
+        return httpx.Response(200, content=base64.b64encode(p7),
+                              headers={"content-type": "application/pkcs7-mime; smime-type=certs-only"})
+
+    def _rest(self, request):
+        body = json.loads(request.content)
+        policy = self.policies.get(body.get("certificate_policy_id"))
+        if not policy or "SINGLE" not in policy["certificate_management_methods"]:
+            return _error(400, "certificate policy not found")
+        if (denied := self._authenticate(request, policy, request.headers.get("x-passcode"))) is not None:
+            return denied
+        cn = next(a["value"] for a in body["certificate_profile_attributes"] if a["id"] == "subject.common_name")
+        csr = self._check_csr(body.get("csr") or "", cn)
+        if isinstance(csr, httpx.Response):
+            return csr
+        record, cert, _key = self._new_certificate(policy["id"], cn, csr.public_key())
+        return _json_response(200, {"certificate_id": record["id"], "serial_number": record["serial_number"],
+                                    "status": "ISSUED", "pem": cert_pem(cert), "device": None,
+                                    "chain": cert_pem(self.ica_cert) + cert_pem(self.root_cert)},
+                              raw_control_chars=self.rest_raw_control_chars)
 
     def _list_policies(self, request):
         return self._page(request, [{"id": p["id"], "name": p["name"]} for p in self.policies.values()])

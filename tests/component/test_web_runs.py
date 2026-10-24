@@ -70,12 +70,15 @@ def test_catalog_lists_all_use_cases(configured_user, store, fake):
     response = configured_user.get("/runs/new")
     assert response.status_code == 200
     html = response.text
-    assert html.count('formaction="/runs/new/') == len(evergreen.USE_CASES) == 2
+    assert html.count('formaction="/runs/new/') == len(evergreen.USE_CASES) == 3
     for key, use_case in evergreen.USE_CASES.items():
         assert f'formaction="/runs/new/{key}"' in html and use_case.title in html
         assert use_case.summary[:40] not in html  # tiles show title and tags only (UI design v2)
         assert f'aria-label="Start {use_case.title}"' in html
-    assert html.index('formaction="/runs/new/uc01"') < html.index('formaction="/runs/new/uc02"')
+    assert (html.index('formaction="/runs/new/uc01"') < html.index('formaction="/runs/new/uc02"')
+            < html.index('formaction="/runs/new/uc03"'))
+    for tag in evergreen.USE_CASES["uc03"].tags:  # tiles show the use case's own tags
+        assert f"<li>{tag}</li>" in html
     assert '<form method="get">' in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html and "<select" not in html
@@ -90,7 +93,7 @@ def test_use_case_form_shows_title_summary_and_breadcrumb(configured_user):
     assert 'action="/runs"' in html
 
 
-@pytest.mark.parametrize("use_case", ["uc03", "UC01", "uc01x", "uc01.", "%2e%2e%2fsettings"])
+@pytest.mark.parametrize("use_case", ["uc04", "UC03", "UC01", "uc01x", "uc01.", "%2e%2e%2fsettings"])
 def test_unknown_use_case_is_404_without_dtm_call(configured_user, fake, use_case):
     assert configured_user.get(f"/runs/new/{use_case}").status_code == 404
     assert fake.requests == []
@@ -930,8 +933,9 @@ def test_cta_only_for_start_run_and_first_connection(user, store):
 
 def test_page_structure_cards(configured_user, store):
     catalog = configured_user.get("/runs/new").text
-    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 2
+    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 3
     assert re.search(r'<h3><span class="uc-id">UC-1</span>[^<]+</h3>', catalog)
+    assert re.search(r'<h3><span class="uc-id">UC-3</span>Evergreen Device IDs via Enrollment Protocols</h3>', catalog)
     assert re.search(r'<button type="submit" formaction="/runs/new/uc01" class="btn-sm btn-icon"\s+'
                      r'aria-label="Start [^"]+"><svg[^>]*>.*?</svg>Start</button>', catalog, re.S)
     settings = configured_user.get("/settings").text

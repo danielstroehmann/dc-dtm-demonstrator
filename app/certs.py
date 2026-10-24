@@ -1,9 +1,11 @@
 """Key material and certificate parsing. Private keys are never written to disk or returned to
 the UI."""
 
+import base64
 import io
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -31,14 +33,57 @@ def encryption_keypair(common_name: str) -> tuple[bytes, bytes]:
 def factory_csr(common_name: str, key_type: str) -> str:
     """CSR for a fresh key pair as the factory creates it (P_256 → ECDSA P-256, RSA_2048 → RSA 2048).
     The private key never leaves this function – the demo has no use for it."""
-    if key_type.upper().startswith("RSA"):
-        key = rsa.generate_private_key(public_exponent=65537, key_size=int(key_type.split("_")[1]))
-    else:
-        key = ec.generate_private_key(ec.SECP256R1())
+    key = new_device_key(key_type)
     csr = (x509.CertificateSigningRequestBuilder()
            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
            .sign(key, hashes.SHA256()))
     return csr.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def new_device_key(key_type: str):
+    """A device key pair as the factory creates it (P_256 → ECDSA P-256, RSA_2048 → RSA 2048)."""
+    if key_type.upper().startswith("RSA"):
+        return rsa.generate_private_key(public_exponent=65537, key_size=int(key_type.split("_")[1]))
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+def device_request(common_name: str, key_type: str) -> tuple[bytes, x509.CertificateSigningRequest]:
+    """UC-3: key (PEM, for openssl cmp – it builds the CMP request from the key) and CSR."""
+    key = new_device_key(key_type)
+    csr = (x509.CertificateSigningRequestBuilder()
+           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+           .sign(key, hashes.SHA256()))
+    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption())
+    return key_pem, csr
+
+
+def factory_certificate(common_name: str) -> tuple[str, bytes]:
+    """UC-3: the factory's own client certificate (self-signed ECDSA, clientAuth), registered in DTM
+    as an authentication certificate. Returns (certificate PEM, key PEM)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=7))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+            .sign(key, hashes.SHA256()))
+    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption())
+    return cert.public_bytes(serialization.Encoding.PEM).decode(), key_pem
+
+
+def der_b64_to_pem(blob: str) -> str:
+    """DTM returns CA certificates as base64 DER (policy ca_chain)."""
+    return x509.load_der_x509_certificate(base64.b64decode(blob)).public_bytes(serialization.Encoding.PEM).decode()
+
+
+def parse_pkcs7_certificates(der: bytes) -> list[dict]:
+    """EST answers with a certs-only PKCS#7; the end-entity certificate comes first."""
+    return [certificate_info(c) for c in pkcs7.load_der_pkcs7_certificates(der)]
 
 
 def decrypt_result(envelope: bytes, cert_pem: bytes, key_pem: bytes) -> bytes:
@@ -65,7 +110,19 @@ def certificate_info(cert: x509.Certificate) -> dict:
         "not_after": cert.not_valid_after_utc.strftime("%Y-%m-%d %H:%M UTC"),
         "issuer": issuer_cn[0].value if issuer_cn else cert.issuer.rfc4514_string(),
         "key_type": key_type,
+        "pem": cert.public_bytes(serialization.Encoding.PEM).decode(),  # moved to a file by save_certificates
     }
+
+
+def save_certificates(run_dir: Path, issued: list[dict]) -> None:
+    """Issued certificates (public, never keys) as <serial>.pem for download; the run's data keeps
+    only the parsed fields. Removed with the run directory on a full rollback."""
+    target = run_dir / "certificates"
+    target.mkdir(parents=True, exist_ok=True)
+    for info in issued:
+        pem = info.pop("pem", None)
+        if pem:
+            (target / f"{info['serial']}.pem").write_text(pem)
 
 
 def parse_pem_certificate(pem: str) -> dict:

@@ -1,5 +1,12 @@
 import asyncio
+import json
+import os
+import ssl
+import sys
 import time
+from pathlib import Path
+
+import httpx
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +15,7 @@ from app import cleanup, evergreen
 from app.auth import Auth
 from app.main import create_app
 from app.store import Store
-from tests.fakedtm import ACCOUNT_ID, API_KEY, HOST, FakeDTM
+from tests.fakedtm import ACCOUNT_ID, API_KEY, HOST, FakeDTM, cert_pem, key_pem
 
 PASSWORD = "correct horse battery staple 42!"
 SECRET = "s" * 48
@@ -129,3 +136,91 @@ def no_time_suffix_in_events(request, monkeypatch):
     monkeypatch.setattr(_Store, "add_event", add_event)
     yield
     assert not offending, offending
+
+
+# --- UC-3: the factory station's network and the openssl cmp client ---------------------------
+
+class _RecordingContext(ssl.SSLContext):
+    """A real client SSL context that also tells the fake DTM which client certificate the station
+    loaded for mTLS – the mock transport cannot see the TLS handshake."""
+    fake: FakeDTM
+
+    def load_cert_chain(self, certfile, keyfile=None, password=None):
+        super().load_cert_chain(certfile, keyfile, password)  # still fails on a cert/key mismatch
+        self.fake.tls_client_cert = Path(certfile).read_text()
+
+
+@pytest.fixture
+def enroll_net(monkeypatch, fake):
+    """Routes the station's own httpx client (enrollment calls, no API key) to the fake DTM's
+    enrollment endpoints and records the mTLS client certificate."""
+    from app import enrollment
+
+    class Httpx:
+        def __getattr__(self, name):
+            return getattr(httpx, name)
+
+        @staticmethod
+        def AsyncClient(**kwargs):  # noqa: N802 – mirrors httpx.AsyncClient
+            assert isinstance(kwargs.get("verify"), ssl.SSLContext)  # TLS verification stays on
+            return httpx.AsyncClient(transport=fake.enroll_transport(), **kwargs)
+
+    class Ssl:
+        def __getattr__(self, name):
+            return getattr(ssl, name)
+
+        @staticmethod
+        def create_default_context(cafile=None):
+            context = _RecordingContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.fake = fake
+            context.load_verify_locations(cafile=cafile)
+            return context
+
+    monkeypatch.setattr(enrollment, "httpx", Httpx())
+    monkeypatch.setattr(enrollment, "ssl", Ssl())
+    return fake
+
+
+class FakeOpenSSL:
+    def __init__(self, bin_dir: Path, fake: FakeDTM):
+        self.bin_dir, self.fake = bin_dir, fake
+        self.record = bin_dir / "calls.jsonl"
+        self.config = {"ca_cert": cert_pem(fake.ica_cert), "ca_key": key_pem(fake.ica_key),
+                       "record": str(self.record), "fail": None}
+        self._write()
+        script = bin_dir / "openssl"
+        script.write_text(f"#!{sys.executable}\n" + (Path(__file__).parent / "fake_openssl.py").read_text())
+        script.chmod(0o755)
+
+    def _write(self):
+        (self.bin_dir / "config.json").write_text(json.dumps(self.config))
+
+    def fail_with(self, message: str) -> None:
+        self.config["fail"] = message
+        self._write()
+
+    def calls(self) -> list[dict]:
+        if not self.record.exists():
+            return []
+        return [json.loads(line) for line in self.record.read_text().splitlines()]
+
+    def sync_to_dtm(self) -> None:
+        """Make the certificates openssl received known to the fake DTM (DTM lists them under the
+        policy behind DIOT_<alternative_id>), so the cleanup has something real to revoke."""
+        from cryptography import x509
+        for call in self.calls():
+            if not call["issued"]:
+                continue
+            alternative_id = call["argv"][call["argv"].index("-server") + 1].rsplit("DIOT_", 1)[1]
+            policy_id = next(p["id"] for p in self.fake.policies.values() if p["alternative_id"] == alternative_id)
+            self.fake.register_certificate(policy_id, x509.load_pem_x509_certificate(call["issued"].encode()))
+
+
+@pytest.fixture
+def cmp_openssl(tmp_path, monkeypatch, fake):
+    """A fake `openssl` first on PATH (see tests/fake_openssl.py)."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    tool = FakeOpenSSL(bin_dir, fake)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return tool

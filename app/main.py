@@ -23,7 +23,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import cleanup, evergreen, snippets
+from . import cleanup, enrollment, evergreen, snippets
 from .auth import COOKIE, Auth
 from .config import APP_VERSION, DATA_DIR
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -32,6 +32,7 @@ from .store import Store
 log = logging.getLogger("demonstrator")
 HERE = Path(__file__).parent
 RUN_ID = re.compile(r"^[a-z0-9]{1,16}$")
+SERIAL = re.compile(r"^[0-9A-F]{1,64}$")
 RUN_ID_ALPHABET = string.ascii_lowercase + string.digits
 
 
@@ -61,6 +62,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["asset_v"] = _asset_hash(HERE / "static")
     templates.env.globals["use_cases"] = USE_CASES
     templates.env.globals["snippets"] = snippets
+    templates.env.globals["protocols"] = enrollment.PROTOCOLS
+    templates.env.globals["auths"] = enrollment.AUTHS
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     limiter = Limiter(key_func=get_remote_address)
     app.state.limiter = limiter
@@ -319,16 +322,26 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return render(request, "run_new.html", use_case=USE_CASES[use_case], use_case_id=use_case, cas=cas,
                       profiles=profiles, connection=_public(conn), several=len(store.connections()) > 1,
                       max_batch=evergreen.MAX_BATCH,
+                      max_requests=enrollment.MAX_REQUESTS,
                       default_run_id=new_run_id())
 
     @app.post("/runs")
     async def create_run(request: Request, run_id: str = Form(""), variant: str = Form(...),
                          mode: str = Form(...), count: int = Form(10), ca_id: str = Form(...),
                          profile_id: str = Form(...), approval: bool = Form(False),
-                         use_case: str = Form("uc01"), connection_id: str = Form("")):
+                         use_case: str = Form("uc01"), connection_id: str = Form(""),
+                         protocol: str = Form(""), auth_method: str = Form("")):
         run_id = run_id.strip().lower() or new_run_id()
         if use_case not in USE_CASES:
             raise HTTPException(400, "Unknown use case")
+        uc03 = use_case == "uc03"
+        if uc03:  # enrollment protocols: API only, sequential single requests, no approval
+            variant, mode, approval = "api", "single", False
+            # Checked before DTM is asked for anything.
+            if protocol not in enrollment.PROTOCOLS or auth_method not in enrollment.AUTHS:
+                raise HTTPException(400, "Select an enrollment protocol and an authentication method.")
+            if not 1 <= count <= enrollment.MAX_REQUESTS:
+                raise HTTPException(400, f"Number of requests: 1–{enrollment.MAX_REQUESTS}.")
         conn = selected_connection(connection_id)
         client = client_for(connection_id=conn["id"])
         try:
@@ -362,10 +375,13 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                   "variant": variant, "mode": mode, "count": count,
                   "ca_id": ca_id, "ca_name": ca["name"], "key_type": evergreen.KEY_TYPES[ca["key_type"]],
                   "profile_id": profile_id, "approval": approval and mode == "batch" and variant == "api"}
+        if uc03:
+            params |= {"protocol": protocol, "auth": auth_method}
         # A reused run ID must not inherit files of a deleted run (e.g. an old batch.zip).
         shutil.rmtree(data_dir / "runs" / run_id, ignore_errors=True)
         store.create_run(run_id, use_case, params)
-        spawn(lambda c: evergreen.run(store, c, run_id, data_dir / "runs" / run_id), run_id)
+        engine = enrollment.run if uc03 else evergreen.run
+        spawn(lambda c: engine(store, c, run_id, data_dir / "runs" / run_id), run_id)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     def get_run_or_404(run_id: str) -> dict:
@@ -419,12 +435,23 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         page = min(max(page, 1), pages)
         first = (page - 1) * CERTIFICATES_PER_PAGE
         return {"cert_rows": certificates[first:first + CERTIFICATES_PER_PAGE], "cert_page": page,
-                "cert_pages": pages, "cert_first": first + 1}
+                "cert_pages": pages, "cert_first": first + 1,
+                "pem_available": (data_dir / "runs" / run["id"] / "certificates").is_dir()}
 
     @app.get("/runs/{run_id}/certificates")
     async def run_certificates(request: Request, run_id: str, page: int = 1):
         run = get_run_or_404(run_id)
         return render(request, "_certificates.html", run=run, **certificate_page(run, page))
+
+    @app.get("/runs/{run_id}/certificates/{serial}.pem")
+    async def run_certificate_pem(run_id: str, serial: str):
+        run = get_run_or_404(run_id)
+        info = next((c for c in (run.get("result") or {}).get("certificates") or [] if c.get("serial") == serial), None)
+        path = data_dir / "runs" / run_id / "certificates" / f"{serial}.pem"
+        # The serial must be one of the run's certificates – no path built from free input.
+        if not info or not SERIAL.fullmatch(serial) or not path.is_file():
+            raise HTTPException(404, "Certificate not found")
+        return FileResponse(path, media_type="application/x-pem-file", filename=f"{info['common_name'] or serial}.pem")
 
     @app.get("/runs/{run_id}/artifact")
     async def run_artifact(run_id: str):

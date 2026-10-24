@@ -99,12 +99,13 @@ def test_failed_later_save_stays_on_settings(configured_user, store, fake):
 def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fake):
     html = configured_user.get("/").text
     assert "<h1>Start a demo</h1>" in html and "<h1>Welcome</h1>" not in html
-    assert html.count('<article class="tile">') == len(evergreen.USE_CASES) == 2
+    assert html.count('<article class="tile">') == len(evergreen.USE_CASES) == 3
     for key, use_case in evergreen.USE_CASES.items():
         assert html.count(f'formaction="/runs/new/{key}"') == 1
         assert f'aria-label="Start {use_case.title}"' in html
     assert html.index('formaction="/runs/new/uc01"') < html.index('formaction="/runs/new/uc02"')
     assert "Server-side keys" in html and "Factory CSR" in html
+    assert "EST · CMPv2 · REST" in html and "Passcode · Factory certificate" in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html
     assert '<select name="connection"' not in html

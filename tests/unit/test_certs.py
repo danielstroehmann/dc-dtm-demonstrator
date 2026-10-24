@@ -75,8 +75,12 @@ def test_parse_batch_zip(pki):
     assert {i["issuer"] for i in infos} == {"Test ICA"}
     assert {i["key_type"] for i in infos} == {"ECDSA secp256r1"}
     assert infos[0]["serial"] == format(leaves[2][0].serial_number, "X")
+    # The public end-entity PEM rides along (moved to a file by save_certificates) – never a key,
+    # never the chain.
+    assert [i["pem"] for i in infos] == [cert_pem(c) for c, _k in reversed(leaves)]
     text = repr(infos)
-    assert "PRIVATE KEY" not in text and "BEGIN" not in text
+    assert "PRIVATE KEY" not in text
+    assert text.count("BEGIN") == len(infos) == 3
 
 
 def test_parse_batch_zip_rejects_oversized_result(monkeypatch, pki):

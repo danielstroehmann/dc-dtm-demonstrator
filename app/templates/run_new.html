@@ -21,6 +21,26 @@
       <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
     </div>
   </section>
+  {% if use_case_id == "uc03" %}
+  <section class="form-section">
+    <header><h3>Enrollment</h3></header>
+    <div class="fields">
+      <div class="seg-group"><span class="seg-label" id="l-protocol">Protocol</span>
+        <div role="radiogroup" aria-labelledby="l-protocol" class="segmented">
+          {% for key, label in protocols.items() %}<label><input type="radio" name="protocol" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ label }}</label>{% endfor %}
+        </div></div>
+      <div class="seg-group"><span class="seg-label" id="l-auth">Factory authentication</span>
+        <div role="radiogroup" aria-labelledby="l-auth" class="segmented">
+          {% for key, label in auths.items() %}<label><input type="radio" name="auth_method" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ label }}</label>{% endfor %}
+        </div></div>
+      <label>Number of requests
+        <input type="number" name="count" class="short" value="1" min="1" max="{{ max_requests }}">
+      </label>
+      <small class="field-help">One after another, each timed – the basis for the extrapolation.</small>
+      <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
+    </div>
+  </section>
+  {% else %}
   <section class="form-section">
     <header><h3>Issuance</h3></header>
     <div class="fields">
@@ -39,6 +59,7 @@
       </label>
     </div>
   </section>
+  {% endif %}
   <section class="form-section">
     <header><h3>Certificate</h3></header>
     <div class="fields">
@@ -48,13 +69,13 @@
             {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
           </select>
         </label>
-        <label>Certificate profile
+        <label {% if use_case_id == "uc03" %}data-tip="CMPv2 uses the shared profile robot-uc03-cmp-profile, created once from this one"{% endif %}>Certificate profile
           <select name="profile_id" required>
             {% for p in profiles %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
           </select>
         </label>
       </div>
-      <label><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>
+      {% if use_case_id != "uc03" %}<label><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
     </div>
   </section>
   <div class="action-bar">

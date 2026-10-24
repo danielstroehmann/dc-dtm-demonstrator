@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 
 from app import certs, cleanup, dtm, evergreen
 from tests.fakedtm import ACCOUNT_ID, ECDSA_CA_ID, HOST, PROFILE_ID, RSA_CA_ID, FakeDTM
+from tests.integration.test_uc01_flow import assert_certificate_files
 
 UC = "uc02"
 
@@ -137,8 +138,10 @@ async def test_uc02_batch(store, fake, tmp_path, captured_keys, monkeypatch):
     archive = zipfile.ZipFile(io.BytesIO((tmp_path / "runs" / "k3" / "csrs.zip").read_bytes()))
     assert archive.namelist() == [f"{n}.csr" for n in names]
     assert [archive.read(f"{n}.csr").decode() for n in names] == fake.received_csrs
-    assert sorted(p.name for p in (tmp_path / "runs" / "k3").iterdir()) == ["csrs.zip"]
+    assert sorted(p.name for p in (tmp_path / "runs" / "k3").iterdir()) == ["certificates", "csrs.zip"]
     r = run["result"]
+    assert_certificate_files(tmp_path / "runs" / "k3", r["certificates"])
+    assert "BEGIN CERTIFICATE" not in json.dumps(store.get_run("k3"))
     assert r["artifact"] == "csrs.zip" and r["certificate_total"] == 3 and r["private_keys_returned"] == 0
     assert [c["common_name"] for c in r["certificates"]] == names
     assert r["keygen_s"] is not None and r["per_certificate_s"] > 0

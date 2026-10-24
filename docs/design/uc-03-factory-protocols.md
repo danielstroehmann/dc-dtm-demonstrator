@@ -1,6 +1,6 @@
 # UC-3 – Evergreen Device IDs via Enrollment Protocols (EST, CMPv2, REST)
 
-> Status: design – P1–P3 and P5 decided 2026-10-24, live verification open. No implementation yet.
+> Status: implemented 2026-10-24 (`app/enrollment.py`). All protocol × authentication paths verified live through the app engine, one certificate each, cleanup without residue (apart from the shared CMPv2 profile).
 
 ## Requirements (from the author, 2026-10-24)
 
@@ -43,9 +43,9 @@ The EST URL is documented as "copy from the policy page" – check whether
 | P1 ✔ | Who enrolls | The demonstrator plays the factory station (like UC-1/UC-2), **no device containers** – vision option B applies to the device use cases later |
 | P2 ✔ | Auth choice | Applies to **all three protocols** (matrix above) – same story, three protocols side by side |
 | P3 ✔ | Factory certificate | Created per run by the demonstrator: key pair + self-signed certificate `robot-<runid>-uc03-factory`, uploaded as DTM **authentication certificate** (not an auth CA). Private key only in memory/run dir, deleted on cleanup |
-| P4 | Passcode | Created per run via API in the authentication policy, shown masked in the UI, never in snippets (placeholder `<passcode>`) |
+| P4 | Passcode | Created per run (random, 32 hex characters) via API in the authentication policy; **never shown, stored or logged** – it only lives in memory during the run; snippets use the placeholder `${PASSCODE}`. A certificates-only cleanup keeps it (harmless: nobody knows it) |
 | P5 ✔ | Fake batch | **Decided:** N = 1…10 requests **sequentially**, each with its own key pair and CSR; measured per request (key generation, request → certificate) |
-| P6 | Extrapolation | From the median: certificates/minute and "N devices ≈ X min" for a target count entered by the operator (default 1000), clearly marked as an estimate for **one** sequential station |
+| P6 | Extrapolation | "1,000 devices ≈ X min" from the **median per device of key generation + request**, marked as an estimate for **one** sequential station (fixed target of 1000 – no operator input, keeps the form calm) |
 | P7 | Tools | Snippets use standard tools: EST `curl` + `openssl`, CMPv2 **`openssl cmp`** (OpenSSL ≥ 3.0), REST `curl` / PowerShell. The app itself: httpx for EST/REST, CMPv2 via `openssl cmp` subprocess (no Python CMP library of good standing – NIH rule) |
 | P8 | Web UI variant | **None** – protocols are machine-to-machine; reproducible steps replace it |
 | P9 | Cleanup | Order: revoke certificates → delete device(s) (if DTM creates them) → device group → credential (passcode / auth certificate, `PUT …/delete`) → authentication policy → certificate policy → division. Same naming and ledger rules as UC-1 |
@@ -78,13 +78,13 @@ The EST URL is documented as "copy from the policy page" – check whether
 | Cleanup | auth certificate, passcode, authentication policy and certificate profile via `PUT …/{id}/delete` → status `DELETED` (soft delete, acceptable residue); policies via `api-ui` delete; division delete |
 | CMPv2 profile | needs `allow_bare_public_key`: not a field but a **body entry** `{"key": "csr", "optional": false, "enabled": true, "sources": ["user_supplied", "allow_bare_public_key"], "value": null}` – works with the public `POST …/v1/certificate-profile` (found via HAR of the portal) |
 | CMPv2 policy | `certificate_management_methods: ["CMP_V2"]` + `cmp_request_parameters: {}` (DTM fills `explicit_client_confirmation: false`) |
-| CMPv2 endpoint | `https://<host>/devicetrustmanager/certificate-issuance-service/api/v1/cmp/D<alternative_id>` – `alternative_id` of the policy prefixed with `D` (e.g. `DIOT_…`-style short ID from the portal) |
+| CMPv2 endpoint | `https://<host>/devicetrustmanager/certificate-issuance-service/api/v1/cmp/DIOT_<alternative_id>` – the policy's `alternative_id` with the prefix `DIOT_` (copied from the portal; anything else: *"Invalid enrollment profile id"*). Signature-protected answers are signed by the issuing CA → `-trusted` = the policy's `ca_chain` |
 | CMPv2 passcode | `openssl cmp -cmd ir -ref <passcode alternate_id> -secret pass:<passcode> -newkey … -subject /CN=… -implicit_confirm` – 0.86 s |
 | CMPv2 factory certificate | signature protection: `-cert factory.crt -key factory.key` **plus `-extracerts factory.crt`** (without it: *"Error while reading the certificate in the extraCert field"*); plain host, no mTLS needed – 0.66 s |
 | **Deleted policies are soft-deleted** | `GET …/certificate-policy/{id}` returns `status: DELETED`; the **name stays reserved** ("already exists") → a run ID cannot be reused after rollback (affects UC-1/UC-2 too) |
-| **Profile of a deleted policy cannot be deleted** | *"referenced by a certificate management policy"* even after the policy is deleted → the per-run CMP profile can only be **disabled** (residue: one disabled `robot-…-cmp-profile` per CMPv2 run) |
+| **Profile of a deleted policy cannot be deleted** | *"referenced by a certificate management policy"* even after the policy is deleted → the per-run CMP profile can only be **disabled** (residue: one disabled `robot-…-cmp-profile` per CMPv2 run). The portal refuses the delete with the same error (author, 2026-10-24) – DTM behaviour, to be reported to DigiCert |
 
 ## Open
 
-1. CMPv2 profile residue: per-run profile (disabled after rollback, acceptable residue?) or one shared, reused `robot-uc03-cmp-profile` per account (then not deleted on cleanup). Decision with the author.
-2. Run-ID reuse: block a run ID whose policy name already exists (also for UC-1/UC-2) – check before creating anything.
+1. CMPv2 profile residue – **implemented as recommended:** one shared `robot-uc03-cmp-profile` per account, created by the first CMPv2 run from the selected profile, found by name later, kept on full rollback (the only documented residue). Per-run profiles would leave one undeletable profile per run. The author can still decide otherwise.
+2. Run-ID reuse – **decided 2026-10-24:** no check; the default run ID is 6 random `[a-z0-9]` characters.

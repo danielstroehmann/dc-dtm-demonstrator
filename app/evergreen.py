@@ -19,6 +19,7 @@ class UseCase:
     title: str
     summary: str
     key_generation: str  # "server_side" (DTM creates the key pairs) or "client_side" (factory CSRs)
+    tags: tuple[str, ...] = ()
 
 
 USE_CASES = {
@@ -28,13 +29,19 @@ USE_CASES = {
         "line and no connection to the CA is needed during manufacturing. DTM generates the key pairs server-side "
         "and issues long-lived device certificates – individually or as a batch, via API (with time measurement) "
         "or in the DTM web UI. The demonstrator shows what DTM returns and rolls everything back afterwards.",
-        "server_side"),
+        "server_side", ("Server-side keys", "Single · Batch", "API · Web UI")),
     "uc02": UseCase(
         "Evergreen Device IDs with Factory-Generated Keys",
         "Like UC-1, but the factory generates each key pair itself and sends only a CSR – the private key never "
         "leaves the factory. DTM signs long-lived device certificates individually or as a batch, via API (with "
         "time measurement) or in the DTM web UI.",
-        "client_side"),
+        "client_side", ("Factory CSR", "Single · Batch", "API · Web UI")),
+    "uc03": UseCase(
+        "Evergreen Device IDs via Enrollment Protocols",
+        "The factory station enrolls each device itself over EST, CMPv2 or the REST API and authenticates with "
+        "a passcode or its own client certificate. Up to ten requests in a row are timed and extrapolated to a "
+        "production run.",
+        "client_side", ("EST · CMPv2 · REST", "Passcode · Factory certificate", "Up to 10 requests")),
 }
 DIVISION_DESCRIPTION = "dc-dtm-demonstrator run – safe to delete"
 # Verified up to 1000 (≈2 min issuance); every certificate consumes a license and slows cleanup.
@@ -124,6 +131,26 @@ def rates(seconds: float, count: int) -> dict:
     return {"per_certificate_s": round(seconds / count, 3), "per_minute": round(count / seconds * 60)}
 
 
+async def create_division(client: DTMClient, api: ApiCalls, store: Store, run_id: str, use_case: str,
+                          variables: dict, log) -> str:
+    """The run's own division – every DTM object of the run lives in it (shared by all use cases)."""
+    division_name = f"{prefix(run_id, use_case)}-division"
+    log(f"Creating division {division_name}")
+    rzone_id = await api.timed("Find a rendezvous zone for the division", "GET", RZONE_PATH,
+                               client.rendezvous_zone(), spec={"method": "GET", "path": RZONE_PATH}, phase="setup")
+    division_id = await api.timed(
+        "Create a division for this run (the response has no ID)", "POST", DIVISION_PATH,
+        client.create_division(division_name, DIVISION_DESCRIPTION, rzone_id),
+        spec={"method": "POST", "path": DIVISION_PATH, "body_file": "division.json",
+              "json": dtm.division_body(division_name, DIVISION_DESCRIPTION, "{DTM_ACCOUNT_ID}", rzone_id)},
+        phase="setup")
+    api.add("Look up the division ID by its name", "GET", DIVISION_PATH, None,
+            spec={"method": "GET", "path": DIVISION_PATH}, phase="setup")
+    variables["DIVISION_ID"] = division_id
+    store.add_object(run_id, "division", division_id, division_name)
+    return division_id
+
+
 async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> None:
     run_ = store.get_run(run_id)
     p = run_["params"] | {"use_case": run_["use_case"],
@@ -135,20 +162,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     result: dict = {"api_calls": api.calls, "api_variables": variables}
     store.update_run(run_id, status="running")
     try:
-        division_name = f"{prefix(run_id, p['use_case'])}-division"
-        log(f"Creating division {division_name}")
-        rzone_id = await api.timed("Find a rendezvous zone for the division", "GET", RZONE_PATH,
-                                   client.rendezvous_zone(), spec={"method": "GET", "path": RZONE_PATH}, phase="setup")
-        division_id = await api.timed(
-            "Create a division for this run (the response has no ID)", "POST", DIVISION_PATH,
-            client.create_division(division_name, DIVISION_DESCRIPTION, rzone_id),
-            spec={"method": "POST", "path": DIVISION_PATH, "body_file": "division.json",
-                  "json": dtm.division_body(division_name, DIVISION_DESCRIPTION, "{DTM_ACCOUNT_ID}", rzone_id)},
-            phase="setup")
-        api.add("Look up the division ID by its name", "GET", DIVISION_PATH, None,
-                spec={"method": "GET", "path": DIVISION_PATH}, phase="setup")
-        variables["DIVISION_ID"] = division_id
-        store.add_object(run_id, "division", division_id, division_name)
+        division_id = await create_division(client, api, store, run_id, p["use_case"], variables, log)
 
         policy_name = f"{prefix(run_id, p['use_case'])}-policy"
         log(f"Creating certificate policy {policy_name} ({p['key_type']}, issuing CA {p['ca_name']})")
@@ -167,7 +181,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
         store.add_object(run_id, "policy", policy_id, policy_name)
         log("DTM is configured for this run", "success")
 
-        result |= {"division": division_name, "policy": policy_name}
+        result |= {"division": f"{prefix(run_id, p['use_case'])}-division", "policy": policy_name}
         if p["variant"] == "webui":
             result |= await _prepare_portal(run_id, p, run_dir, log)
             store.update_run(run_id, status="waiting", result=result)
@@ -177,6 +191,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             result |= await _single(client, api, store, run_id, policy_id, p, log)
         else:
             result |= await _batch(client, api, store, run_id, policy_id, p, run_dir, variables, log)
+        certs.save_certificates(run_dir, result.get("certificates") or [])
         store.update_run(run_id, status="completed", result=result, progress=None, finished_at=now())
         log("Run completed", "success")
     except (DTMError, ValueError) as exc:

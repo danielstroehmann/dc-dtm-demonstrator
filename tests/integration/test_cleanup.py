@@ -39,10 +39,13 @@ async def test_full_cleanup_order_and_result(store, fake, tmp_path):
 async def test_certificates_mode_keeps_policy_division_and_artifact(store, fake, tmp_path):
     await start(store, fake, "c2", tmp_path, mode="single")
     run_dir = tmp_path / "runs" / "c2"
-    run_dir.mkdir(parents=True)
+    serial = store.get_run("c2")["result"]["certificates"][0]["serial"]
+    pem_file = run_dir / "certificates" / f"{serial}.pem"
+    assert pem_file.is_file()  # the run saved the issued certificate for download
     (run_dir / "batch.zip").write_bytes(b"artifact")
     run = await do_cleanup(store, fake, "c2", "certificates", tmp_path)
     assert run["cleanup_status"] == "done" and run["cleanup_mode"] == "certificates"
+    assert pem_file.is_file()  # certificates-only cleanup keeps the downloads (the run's result stays)
     assert fake.issued() == []
     assert len(fake.policies) == 1 and len(fake.divisions) == 1
     assert "policy_delete" not in fake.route_order() and "division_delete" not in fake.route_order()

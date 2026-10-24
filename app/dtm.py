@@ -20,6 +20,13 @@ DEFAULT_TIMEOUT = 60.0
 LOOKUP_RETRIES = 3
 DIVISIONS = "/devicetrustmanager/api/v4/division"
 POLICIES = "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"
+PROFILES = "/devicetrustmanager/certificate-configuration-service/api/v1/certificate-profile"
+AUTH = "/devicetrustmanager/authentication-service/api/v1"
+# Ledger kind → authentication-service collection (UC-3). Deleted objects stay as status DELETED.
+AUTH_KINDS = {"auth_certificate": "authentication-certificate", "passcode": "passcode",
+              "auth_policy": "authentication-policy"}
+# Enrollment protocol (UC-3) → certificate management method of the policy.
+ENROLLMENT_METHODS = {"est": "EST", "cmpv2": "CMP_V2", "rest": "SINGLE"}
 
 
 class DTMError(RuntimeError):
@@ -58,6 +65,36 @@ def policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, ke
                                      "input_type": "csv" if key_generation == "server_side" else "csr",
                                      "output_format": "zip", "report_format": "csv"},
     }}
+
+
+def enrollment_policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, key_type: str,
+                           auth_policy_id: str, protocol: str) -> dict:
+    """UC-3: one enrollment protocol, client-side keys, authenticated by an authentication policy
+    (passcode or factory certificate) – no device group, so the Essentials license is enough."""
+    method = ENROLLMENT_METHODS[protocol]
+    body = {"name": name, "division_id": division_id, "certificate_profile_id": profile_id, "ica_id": ica_id,
+            "certificate_management_methods": [method], "authentication_policy_id": auth_policy_id,
+            "key_generation_option": "client_side", "key_generation_type": key_type,
+            "require_device_group_for_enroll": False, "require_approval_for_enroll": False,
+            "require_approval_for_renew": False}
+    if method == "CMP_V2":
+        body["cmp_request_parameters"] = {}  # required; DTM fills in its defaults
+    if method == "SINGLE":
+        body["single_cert_request_parameters"] = {
+            "key_generation_option": "client_side", "key_type": key_type.lower(), "private_key_format": "pem",
+            "encryption_certificate_source": "provided", "include_chain_option": "include_ica_and_root",
+            "response_with_certificate_only": False, "split_certificate_response": True}
+    return {"certificate_policy": body}
+
+
+def bare_key_profile_body(base: dict, name: str, account_id: str) -> dict:
+    """Copy of a profile that accepts a bare public key – what CMPv2 sends instead of a CSR. The
+    flag is not a field but a source of the `csr` body entry (found via the portal, not in the spec)."""
+    body = [e for e in base["body"] if e["key"] != "csr"]
+    body.append({"key": "csr", "optional": False, "enabled": True,
+                 "sources": ["user_supplied", "allow_bare_public_key"], "value": None})
+    return {"name": name, "account_id": account_id, "certificate_template_id": base["certificate_template"]["id"],
+            "body": body, "divisions": [], "certificate_type": "end_entity", "ca_connector_type": "digicert_one"}
 
 
 def single_body(policy_id: str, common_name: str, csr: str | None = None) -> dict:
@@ -219,6 +256,68 @@ class DTMClient:
             raise DTMError("policy delete endpoint returned 404 without entity_not_found – api-ui path changed? (R-1)")
         if policy_id in [r["id"] for r in await self._list(POLICIES)]:
             raise DTMError(f"policy {policy_id} still exists after delete")
+
+    async def get_policy(self, policy_id: str) -> dict:
+        return _json(await self._request("GET", f"{POLICIES}/{policy_id}"))
+
+    async def create_enrollment_policy(self, **kwargs) -> str:
+        await self._request("POST", POLICIES, expect=(200, 201), json=enrollment_policy_body(**kwargs))
+        return await self._find_id(POLICIES, kwargs["name"])
+
+    # UC-3: authentication policy with one credential (passcode or factory certificate)
+    async def create_auth_policy(self, name: str) -> str:
+        data = _json(await self._request("POST", f"{AUTH}/authentication-policy", expect=(200, 201),
+                                         json={"name": name, "account_id": self.config.account_id}))
+        return data["id"]
+
+    async def create_passcode(self, name: str, auth_policy_id: str, passcode: str) -> dict:
+        """Returns id and alternate_id – the reference CMPv2 sends as sender KID."""
+        data = _json(await self._request("POST", f"{AUTH}/passcode", expect=(200, 201), json={
+            "name": name, "account_id": self.config.account_id, "authentication_policy_id": auth_policy_id,
+            "enable_username_for_passcode": False, "passcode": passcode}))
+        return {"id": data["id"], "alternate_id": data.get("alternate_id")}
+
+    async def create_auth_certificate(self, name: str, auth_policy_id: str, pem: str) -> str:
+        data = _json(await self._request("POST", f"{AUTH}/authentication-certificate", expect=(200, 201), json={
+            "name": name, "account_id": self.config.account_id, "authentication_policy_id": auth_policy_id,
+            "pem": pem, "use_passcode": False}))
+        return data["id"]
+
+    async def auth_object_ids(self, kind: str, name: str) -> list[str]:
+        """Live objects only – soft-deleted ones keep their name (e.g. of an earlier run with this ID)."""
+        return [r["id"] for r in await self._list(f"{AUTH}/{AUTH_KINDS[kind]}")
+                if r.get("name") == name and r.get("status") != "DELETED"]
+
+    async def delete_auth_object(self, kind: str, object_id: str) -> None:
+        """Soft delete: the object stays with status DELETED (verified live)."""
+        path = f"{AUTH}/{AUTH_KINDS[kind]}/{object_id}"
+        response = await self._request("PUT", f"{path}/delete", json={}, expect=(200, 204, 400, 404))
+        # 400/404 are fine only if the object is gone or already deleted – a vanished route must fail.
+        check = await self._request("GET", path, expect=(200, 404))
+        if check.status_code == 404:
+            if "entity_not_found" not in check.text:
+                raise DTMError(f"{kind} {object_id}: unexpected 404 without entity_not_found")
+            return
+        if _json(check).get("status") != "DELETED":
+            raise DTMError(f"{kind} {object_id} still {_json(check).get('status')} after delete "
+                           f"({response.status_code})")
+
+    async def bare_key_profile(self, name: str, base_profile_id: str) -> tuple[str, bool]:
+        """The account's shared CMPv2 profile: found by name, else created from the base profile.
+        It is never deleted – DTM refuses to delete a profile a (deleted) policy referenced.
+        Returns (id, created)."""
+        for record in await self._list(PROFILES):
+            if record.get("name") == name and record.get("status") == "ACTIVE":
+                if record.get("account_id") != self.config.account_id or not record.get("allow_bare_public_key"):
+                    raise DTMError(f"profile {name} exists but does not allow bare public keys in this account – "
+                                   "fix or rename it in the DTM portal")
+                return record["id"], False
+        base = _json(await self._request("GET", f"{PROFILES}/{base_profile_id}"))
+        data = _json(await self._request("POST", PROFILES, expect=(200, 201),
+                                         json=bare_key_profile_body(base, name, self.config.account_id)))
+        if not data.get("allow_bare_public_key"):
+            raise DTMError("DTM did not enable bare public keys on the CMPv2 profile")
+        return data["id"], True
 
     # issuance
     async def issue_single(self, policy_id: str, common_name: str, csr: str | None = None) -> dict:

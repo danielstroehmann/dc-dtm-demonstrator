@@ -10,7 +10,7 @@
 <nav aria-label="breadcrumb"><ul><li><a href="/">Runs</a></li><li>{{ run.id }}</li></ul></nav>
 <div class="page-head">
   <div><h1>Run {{ run.id }} {{ pill(run.status) }}</h1>
-  <p>{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {{ p.mode | capitalize }} ({{ p.count }}) · {{ "via API" if p.variant == "api" else "in the DTM web UI" }}{% if p.connection_name %} · {{ p.connection_name }}{% endif %}</p></div>
+  <p>{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {% if p.protocol %}{{ protocols[p.protocol] }} · {{ auths[p.auth] }} · {{ p.count }} request{{ "s" if p.count != 1 }}{% else %}{{ p.mode | capitalize }} ({{ p.count }}) · {{ "via API" if p.variant == "api" else "in the DTM web UI" }}{% endif %}{% if p.connection_name %} · {{ p.connection_name }}{% endif %}</p></div>
 </div>
 <ol class="stepper" aria-label="Run phases">
   {% for label in ("Run", "Result", "Clean up") %}

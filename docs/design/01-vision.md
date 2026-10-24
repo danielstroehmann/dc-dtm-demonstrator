@@ -61,7 +61,7 @@ orchestrator. DTM **blueprints are not used** (decided 2026-10-23, see `CLAUDE.m
 | 9 | Zero touch with TrustEdge + OTA | Device | EST + MQTT | Agent, inventory, update rollout |
 | 10 | Cloud onboarding | Device | Cloud platform policy | Device appears in AWS/Azure IoT |
 
-Implemented in v0.1: **1 and 2** (server-side vs. factory-generated keys, side by side). Revocation
+Implemented in v0.1: **1 and 2** (server-side vs. factory-generated keys, side by side) and **UC-3** (EST, CMPv2 and REST enrollment from the factory, passcode or factory certificate – replaces rows 3 and the CMPv2 part of 8). Revocation
 is covered by every run's cleanup.
 
 ## 5. Key question: what may a device do?

@@ -33,6 +33,21 @@ def assert_clean_protocol(fake: FakeDTM):
     assert not any("blueprint" in str(r.url) for r in fake.requests)
 
 
+def assert_certificate_files(run_dir, certificates: list[dict]) -> None:
+    """<run_dir>/certificates holds exactly one <serial>.pem per issued certificate, each the
+    public certificate with that serial and common name – no key, no extra file."""
+    from cryptography import x509
+    files = sorted(p.name for p in (run_dir / "certificates").iterdir())
+    assert files == sorted(f"{c['serial']}.pem" for c in certificates)
+    for c in certificates:
+        assert "pem" not in c
+        text = (run_dir / "certificates" / f"{c['serial']}.pem").read_text()
+        assert "PRIVATE KEY" not in text and text.count("BEGIN CERTIFICATE") == 1
+        cert = x509.load_pem_x509_certificate(text.encode())
+        assert format(cert.serial_number, "X") == c["serial"]
+        assert cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value == c["common_name"]
+
+
 def db_text(store, run_id) -> str:
     run = store.get_run(run_id)
     return json.dumps(run) + json.dumps(store.events(run_id))
@@ -50,7 +65,8 @@ async def test_single_api(store, fake, tmp_path):
     assert r["private_keys_returned"] == 1 and "private_key_returned" not in r
     assert set(r["response"]) <= {"certificate_id", "status", "serial_number", "valid_from", "valid_to"}
     assert "private_key" not in r["response"] and "pem" not in r["response"]
-    assert "PRIVATE KEY" not in db_text(store, "s1")
+    assert "PRIVATE KEY" not in db_text(store, "s1") and "BEGIN CERTIFICATE" not in db_text(store, "s1")
+    assert_certificate_files(tmp_path / "runs" / "s1", r["certificates"])
     # ledger: division and policy for the cleanup, both inside the run prefix
     ledger = {(o["kind"], o["name"]) for o in store.objects("s1")}
     assert ledger == {("division", "robot-s1-uc01-division"), ("policy", "robot-s1-uc01-policy")}
@@ -77,9 +93,12 @@ async def test_batch_api_without_approval(store, fake, tmp_path):
     assert fake.names("approve") == []
     assert [o["kind"] for o in store.objects("b1", "batch_job")] == ["batch_job"]
     assert "PRIVATE KEY" not in db_text(store, "b1")
-    # only the upload ZIP (CSV of CNs) is kept for replaying the call – never key material
+    assert "BEGIN CERTIFICATE" not in db_text(store, "b1")  # PEMs live in files only
+    # the upload ZIP (CSV of CNs) for replaying the call and the public certificates for
+    # download – never key material
     run_dir = tmp_path / "runs" / "b1"
-    assert sorted(f.name for f in run_dir.iterdir()) == ["batch.zip"]
+    assert sorted(f.name for f in run_dir.iterdir()) == ["batch.zip", "certificates"]
+    assert_certificate_files(run_dir, r["certificates"])
     assert job["csv"] == zipfile.ZipFile(io.BytesIO((run_dir / "batch.zip").read_bytes())).read(
         "batch.csv").decode().splitlines()
     assert run["result"]["artifact"] == "batch.zip"
