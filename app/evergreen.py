@@ -38,10 +38,9 @@ USE_CASES = {
         "client_side", ("Factory CSR", "Single · Batch", "API · Web UI")),
     "uc03": UseCase(
         "Evergreen Device IDs via Enrollment Protocols",
-        "The factory station enrolls each device itself over EST, CMPv2 or the REST API and authenticates with "
-        "a passcode or its own client certificate. Up to ten requests in a row are timed and extrapolated to a "
-        "production run.",
-        "client_side", ("EST · CMPv2 · REST", "Passcode · Factory certificate", "Up to 10 requests")),
+        "The factory station enrolls a device itself over EST, CMPv2, SCEP or the REST API and authenticates "
+        "with a passcode or its own client certificate. The request is timed and extrapolated to a production run.",
+        "client_side", ("EST · CMPv2 · SCEP · REST", "Passcode · Factory certificate", "Single device")),
     "uc04": UseCase(
         "Evergreen Device ID with Renewal in the Field",
         "One device is enrolled in the factory via EST and later renews its certificate in the field with a "
@@ -49,6 +48,26 @@ USE_CASES = {
         "is enough.",
         "client_side", ("EST", "Single device", "Renewal per click")),
 }
+# The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.
+GUIDE = UseCase(
+    "Evergreen Device IDs",
+    "Long-lived device certificates for the factory – answer a few questions and the run shows the matching "
+    "flow end to end.",
+    "client_side", ("Server-side or factory keys", "Batch · Single", "REST · EST · CMPv2 · SCEP"))
+CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"]}
+
+
+def resolve_guide(key_location: str, mode: str, protocol: str, auth: str) -> tuple[str, str, str]:
+    """Guide answers → (use case, protocol, auth). Single always means one certificate."""
+    if mode == "batch":
+        return ("uc01" if key_location == "server" else "uc02"), "", ""
+    if key_location == "server":
+        return "uc01", "", ""
+    if protocol == "rest" and auth == "apikey":  # the factory calls the management API itself
+        return "uc02", "", ""
+    return "uc03", protocol, auth
+
+
 DIVISION_DESCRIPTION = "dc-dtm-demonstrator run – safe to delete"
 # Verified up to 1000 (≈2 min issuance); every certificate consumes a license and slows cleanup.
 MAX_BATCH = 2_000
@@ -157,6 +176,18 @@ async def create_division(client: DTMClient, api: ApiCalls, store: Store, run_id
     return division_id
 
 
+async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.ProfileSpec, variables: dict, log) -> str:
+    """The purpose's shared profile (validity etc.) – created by the first run, reused afterwards."""
+    validity = f"{spec.value} {spec.unit}"
+    profile_id, how = await api.timed(
+        f"Find the shared profile {spec.name} ({validity}) – created once, reused by every run", "GET",
+        dtm.PROFILES, client.shared_profile(spec), spec={"method": "GET", "path": dtm.PROFILES}, phase="setup")
+    log({"created": "Created", "enabled": "Enabled again"}.get(how, "Using")
+        + f" the shared certificate profile {spec.name} ({validity}) – DTM keeps it permanently")
+    variables["PROFILE_ID"] = profile_id
+    return profile_id
+
+
 async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> None:
     run_ = store.get_run(run_id)
     p = run_["params"] | {"use_case": run_["use_case"],
@@ -170,16 +201,18 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     try:
         division_id = await create_division(client, api, store, run_id, p["use_case"], variables, log)
 
+        profile_id = await use_shared_profile(client, api, dtm.PROFILE_EVERGREEN, variables, log)
         policy_name = f"{prefix(run_id, p['use_case'])}-policy"
         log(f"Creating certificate policy {policy_name} ({p['key_type']}, issuing CA {p['ca_name']})")
-        policy_args = {"profile_id": p["profile_id"], "ica_id": p["ca_id"], "key_type": p["key_type"],
+        policy_args = {"profile_id": profile_id, "ica_id": p["ca_id"], "key_type": p["key_type"],
                        "require_approval": bool(p.get("approval")), "key_generation": p["key_generation"]}
         keys_by = "server-side keys" if p["key_generation"] == "server_side" else "client-side keys (CSR)"
         policy_id = await api.timed(
             f"Create the certificate policy (single + batch, {keys_by})", "POST", POLICY_PATH,
             client.create_policy(name=policy_name, division_id=division_id, **policy_args),
             spec={"method": "POST", "path": POLICY_PATH, "body_file": "policy.json",
-                  "json": dtm.policy_body(name=policy_name, division_id="{DIVISION_ID}", **policy_args)},
+                  "json": dtm.policy_body(name=policy_name, division_id="{DIVISION_ID}", **policy_args
+                                          | {"profile_id": "{PROFILE_ID}"})},
             phase="setup")
         api.add("Look up the policy ID by its name", "GET", POLICY_PATH, None,
                 spec={"method": "GET", "path": POLICY_PATH}, phase="setup")

@@ -130,15 +130,20 @@ def _error(status: int, message: str) -> httpx.Response:
     return _json_response(status, {"errors": [{"code": "error", "message": message}]})
 
 
-def _profile(profile_id: str, name: str, template: str, renew_valid_cert: str | None) -> dict:
+def _profile(profile_id: str, name: str, template: str, renew_valid_cert: str | None,
+             account_id: str = ACCOUNT_ID) -> dict:
     body = [{"key": "subject.common_name", "optional": False, "enabled": True, "sources": ["user_supplied"],
              "value": None},
-            {"key": "csr", "optional": False, "enabled": True, "sources": ["user_supplied"], "value": None}]
+            {"key": "csr", "optional": False, "enabled": True, "sources": ["user_supplied"], "value": None},
+            {"key": "validity.duration_unit", "optional": False, "enabled": True, "sources": ["fixed_value"],
+             "value": "years"},
+            {"key": "validity.duration_value", "optional": False, "enabled": True, "sources": ["fixed_value"],
+             "value": 1}]
     if renew_valid_cert is not None:
         body.append({"key": "renewal_settings.renew_valid_cert", "optional": False, "enabled": True,
                      "sources": ["default"], "value": renew_valid_cert})
     return {"id": profile_id, "name": name, "status": "ACTIVE", "certificate_template": {"id": template},
-            "body": body}
+            "body": body, "account_id": account_id}
 
 
 def renews_anytime(profile: dict) -> bool:
@@ -175,13 +180,16 @@ class FakeDTM:
         ]
         # Profile list records carry the profile body (verified live). renewal_settings.renew_valid_cert:
         # "anytime" (live), "dont_allow" or a window before expiry (docs); the legacy one has no entry.
+        # The list spans every account the API key sees – the client must filter by account_id.
         self.profiles = [
-            _profile(PROFILE_ID, profile_name, "tpl-client", "anytime"),
-            _profile("profile-server", "Basic server certificate profile", "tpl-server", "dont_allow"),
-            _profile("profile-window", "Renew within 30 days profile", "tpl-client", "30"),
-            _profile("profile-legacy", "Legacy device profile", "tpl-client", None),
-            {"id": "profile-old", "name": "Old profile", "status": "INACTIVE"},
+            _profile(PROFILE_ID, profile_name, "tpl-client", "anytime", account_id),
+            _profile("profile-server", "Basic server certificate profile", "tpl-server", "dont_allow", account_id),
+            _profile("profile-window", "Renew within 30 days profile", "tpl-client", "30", account_id),
+            _profile("profile-legacy", "Legacy device profile", "tpl-client", None, account_id),
+            {"id": "profile-old", "name": "Old profile", "status": "INACTIVE", "account_id": account_id},
+            _profile("profile-foreign", "Other account client profile", "tpl-foreign", "anytime", OTHER_ACCOUNT_ID),
         ]
+        self.template_validity_cap: dict[str, tuple[str, int]] = {}  # template id → what DTM applies instead
         self.zones = [
             {"id": "rz-b", "name": "b-zone", "status": "ENABLED"},
             {"id": "rz-a", "name": "a-zone", "status": "ENABLED"},
@@ -272,6 +280,9 @@ class FakeDTM:
             ("policy_get", "GET", rf"{POLICY_PATH}/(?P<oid>[^/]+)", self._get_policy),
             ("profile_get", "GET", rf"{PROFILE_PATH}/(?P<oid>[^/]+)", self._get_profile),
             ("profile_create", "POST", rf"{PROFILE_PATH}", self._create_profile),
+            ("profile_enable", "PUT", rf"{PROFILE_PATH}/(?P<oid>[^/]+)/enable", self._set_profile_status("ACTIVE")),
+            ("profile_disable", "PUT", rf"{PROFILE_PATH}/(?P<oid>[^/]+)/disable",
+             self._set_profile_status("DISABLED")),
             ("policy_list", "GET", rf"{POLICY_PATH}", self._list_policies),
             ("policy_delete", "DELETE", rf"{POLICY_DELETE_PATH}/(?P<oid>[^/]+)", self._delete_policy),
             ("issue", "POST", rf"{CERT_PATH}", self._issue),
@@ -381,7 +392,7 @@ class FakeDTM:
         if policy["ica_id"] not in {c["id"] for c in self.cas}:
             return _error(400, "ica not found")
         methods = policy.get("certificate_management_methods") or []
-        if not methods or not set(methods) <= {"SINGLE", "BATCH", "EST", "CMP_V2"}:
+        if not methods or not set(methods) <= {"SINGLE", "BATCH", "EST", "CMP_V2", "SCEP"}:
             return _error(400, f"invalid certificate_management_methods {methods!r}")
         sections = {"SINGLE": "single_cert_request_parameters", "BATCH": "batch_request_parameters"}
         for method, section in sections.items():
@@ -389,6 +400,8 @@ class FakeDTM:
                 return _error(400, f"{section}.encryption_certificate_source is required")
         if "CMP_V2" in methods and "cmp_request_parameters" not in policy:
             return _error(400, "cmp_request_parameters is required")
+        if "SCEP" in methods and not any(c["id"] == policy["ica_id"] and c["key_type"] == "rsa" for c in self.cas):
+            return _error(400, "SCEP needs an RSA issuing CA")  # SCEP encrypts to the CA with RSA
         auth_policy_id = policy.get("authentication_policy_id")
         if auth_policy_id is not None and self.auth_objects["auth_policy"].get(auth_policy_id, {}).get(
                 "status") != "ACTIVE":
@@ -421,16 +434,38 @@ class FakeDTM:
             return _error(400, "account_id in body does not match")
         if not body.get("certificate_template_id") or not isinstance(body.get("body"), list):
             return _error(400, "certificate_template_id and body are required")
-        if any(p["name"] == body.get("name") for p in self.profiles):
-            return _error(409, "profile name already exists")
-        csr = next((e for e in body["body"] if e.get("key") == "csr"), {})
+        # unique per account; assumption: a DELETED profile's name is free again (unverified)
+        if any(p["name"] == body.get("name") and p.get("account_id") == self.account_id
+               and p.get("status") != "DELETED" for p in self.profiles):
+            return _error(400, "certificate profile name already exists")  # unique per account
+        entries = [dict(e) for e in body["body"]]
+        cap = self.template_validity_cap.get(body["certificate_template_id"])
+        if cap:  # the template limits the validity – DTM applies its own values silently
+            for entry in entries:
+                if entry["key"] == "validity.duration_unit":
+                    entry["value"] = cap[0]
+                if entry["key"] == "validity.duration_value":
+                    entry["value"] = cap[1]
+        csr = next((e for e in entries if e.get("key") == "csr"), {})
         profile = {"id": f"profile-{uuid.uuid4().hex[:8]}", "name": body["name"], "status": "ACTIVE",
                    "account_id": body["account_id"],
-                   "certificate_template": {"id": body["certificate_template_id"]}, "body": body["body"],
+                   "certificate_template": {"id": body["certificate_template_id"]}, "body": entries,
                    "allow_bare_public_key": "allow_bare_public_key" in (csr.get("sources") or [])}
         self.profiles.append(profile)
         self.created_profiles.append(body)
         return _json_response(201, profile)
+
+    def _set_profile_status(self, status):
+        def handler(request, oid):
+            profile = next((p for p in self.profiles if p["id"] == oid), None)
+            if not profile or profile.get("account_id") != self.account_id:
+                return _error(404, "entity_not_found")
+            profile["status"] = status
+            return httpx.Response(204)
+        return handler
+
+    def profile(self, name: str) -> dict | None:
+        return next((p for p in self.profiles if p["name"] == name and p.get("account_id") == self.account_id), None)
 
     # authentication service (UC-3)
     def _auth_create(self, kind):

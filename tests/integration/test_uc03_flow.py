@@ -14,17 +14,24 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 from app import certs, cleanup, dtm, enrollment, evergreen, snippets
-from tests.fakedtm import (ACCOUNT_ID, CLIENTAUTH_HOST, ECDSA_CA_ID, HOST, PROFILE_ID, RSA_CA_ID, FakeDTM,
+from tests.fakedtm import (ACCOUNT_ID, CLIENTAUTH_HOST, ECDSA_CA_ID, HOST, RSA_CA_ID, FakeDTM,
                            _error, cert_pem)
 from tests.integration.test_uc01_flow import assert_certificate_files
 
 UC = "uc03"
-COMBOS = [(protocol, auth) for protocol in enrollment.PROTOCOLS for auth in enrollment.AUTHS]
+# SCEP authenticates with a passcode (challenge password) only.
+COMBOS = [(protocol, auth) for protocol in enrollment.PROTOCOLS for auth in enrollment.AUTHS
+          if not (protocol == "scep" and auth == "certificate")]
+RSA = {"ca_id": RSA_CA_ID, "ca_name": "Fake RSA ICA", "key_type": "RSA_2048"}  # SCEP needs RSA
+
+
+def protocol_params(protocol: str) -> dict:
+    return RSA if protocol == "scep" else {}
 
 
 def params(**overrides) -> dict:
     return {"dtm_host": HOST, "account_id": ACCOUNT_ID, "variant": "api", "mode": "single", "count": 2,
-            "ca_id": ECDSA_CA_ID, "ca_name": "Fake ECDSA ICA", "key_type": "P_256", "profile_id": PROFILE_ID,
+            "ca_id": ECDSA_CA_ID, "ca_name": "Fake ECDSA ICA", "key_type": "P_256",
             "approval": False, "protocol": "est", "auth": "passcode"} | overrides
 
 
@@ -104,15 +111,15 @@ def key_body(pem: str) -> str:
     return "".join(line for line in pem.splitlines() if not line.startswith("-----"))[:40]
 
 
-# --- happy paths: 3 protocols × 2 authentication methods ---------------------------------------
+# --- happy paths: 4 protocols × 2 authentication methods (SCEP: passcode only) ---------------------
 
 @pytest.mark.parametrize("protocol,auth", COMBOS)
-async def test_enrollment_happy_path(store, enroll_net, cmp_openssl, secrets_seen, tmp_path, monkeypatch,
-                                     protocol, auth):
+async def test_enrollment_happy_path(store, enroll_net, cmp_openssl, scep_client, secrets_seen, tmp_path,
+                                     monkeypatch, protocol, auth):
     fake = enroll_net
     monkeypatch.setenv("CANARY_PARENT_ENV", "must-not-reach-openssl-in-passcode-mode")
     run_id = f"{protocol[:3]}{auth[:4]}"
-    run = await start(store, fake, run_id, tmp_path, protocol=protocol, auth=auth)
+    run = await start(store, fake, run_id, tmp_path, protocol=protocol, auth=auth, **protocol_params(protocol))
     assert run["status"] == "completed", run["error"]
     r = run["result"]
     names = evergreen.common_names(run_id, protocol, 2, UC)
@@ -132,9 +139,9 @@ async def test_enrollment_happy_path(store, enroll_net, cmp_openssl, secrets_see
     assert policy["certificate_management_methods"] == [dtm.ENROLLMENT_METHODS[protocol]]
     assert policy["authentication_policy_id"] == auth_policy["id"] == store.objects(run_id, "auth_policy")[0]["dtm_id"]
     assert policy["key_generation_option"] == "client_side" and policy["require_device_group_for_enroll"] is False
-    assert policy["certificate_profile_id"] == (PROFILE_ID if protocol != "cmpv2" else
-                                                 next(p["id"] for p in fake.profiles
-                                                      if p["name"] == enrollment.CMP_PROFILE))
+    spec = dtm.PROFILE_EVERGREEN_CMP if protocol == "cmpv2" else dtm.PROFILE_EVERGREEN
+    assert policy["certificate_profile_id"] == fake.profile(spec.name)["id"]
+    assert [b["name"] for b in fake.created_profiles] == [spec.name]  # only the one this run needs
     passcode = fake.active_auth("passcode")[0]["body"]["passcode"] if auth == "passcode" else None
     factory = fake.active_auth("auth_certificate")[0]["body"]["pem"] if auth == "certificate" else None
     assert (passcode is None) == (auth != "passcode") and (factory is None) == (auth != "certificate")
@@ -171,8 +178,30 @@ async def test_enrollment_happy_path(store, enroll_net, cmp_openssl, secrets_see
                 assert call["files"]["-cert"] == factory
                 assert call["files"]["-trusted"] == cert_pem(fake.ica_cert) + cert_pem(fake.root_cert)
                 assert call["cmp_secret"] is None and "-ref" not in argv and "-secret" not in argv
+        assert scep_client.calls() == []
+    elif protocol == "scep":
+        assert fake.enroll_calls == [] and fake.tls_client_cert is None and cmp_openssl.calls() == []
+        calls = scep_client.calls()
+        assert len(calls) == 2
+        for call, cn in zip(calls, names):
+            argv = call["argv"]
+
+            def opt(flag):
+                return argv[argv.index(flag) + 1]
+            assert opt("-server-url") == f"https://{HOST}" + enrollment.SCEP_PATH.format(
+                alternative_id=policy["alternative_id"])
+            assert opt("-challenge") == passcode  # scepclient takes it only as an argument
+            assert (opt("-cn"), opt("-organization"), opt("-ou")) == (cn, *enrollment.SCEP_SUBJECT)
+            assert "BEGIN RSA PRIVATE KEY" in call["key_file"]  # PKCS#1 for the client
+            device_key = serialization.load_pem_private_key(call["key_file"].encode(), None)
+            issued = x509.load_pem_x509_certificate(call["issued"].encode())
+            assert issued.public_key().public_numbers() == device_key.public_key().public_numbers()
+            assert not Path(opt("-private-key")).exists()
+            assert set(call["env_keys"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"} == {"PATH", "SSL_CERT_FILE"}
+            import certifi
+            assert call["ssl_cert_file"] == certifi.where()
     else:
-        assert cmp_openssl.calls() == []
+        assert cmp_openssl.calls() == [] and scep_client.calls() == []
         host = CLIENTAUTH_HOST if auth == "certificate" else HOST
         assert fake.enroll_calls == [(protocol, host)] * 2
         for request in fake.enroll_requests:
@@ -269,50 +298,19 @@ async def test_metrics_and_extrapolation(store, enroll_net, tmp_path, monkeypatc
     assert (convert["seconds"], convert["count"]) == (None, 1)
 
 
-# --- shared CMPv2 profile ----------------------------------------------------------------------
+# --- shared profiles (details in test_shared_profiles.py) ----------------------------------------
 
-async def test_shared_cmp_profile_created_once_reused_and_never_deleted(store, enroll_net, cmp_openssl, tmp_path):
+async def test_cmp_uses_the_bare_key_profile_and_others_the_plain_one(store, enroll_net, cmp_openssl, tmp_path):
     fake = enroll_net
-    first = await start(store, fake, "p1", tmp_path, protocol="cmpv2", auth="passcode", count=1)
-    assert first["status"] == "completed", store.events("p1")
-    (body,) = fake.created_profiles
-    assert body["name"] == enrollment.CMP_PROFILE and body["account_id"] == ACCOUNT_ID
-    assert body["certificate_template_id"] == "tpl-client"
-    csr_entries = [e for e in body["body"] if e["key"] == "csr"]
-    assert csr_entries == [{"key": "csr", "optional": False, "enabled": True,
-                            "sources": ["user_supplied", "allow_bare_public_key"], "value": None}]
-    assert any(e["key"] == "subject.common_name" for e in body["body"])  # rest of the base profile kept
-    shared_id = next(p["id"] for p in fake.profiles if p["name"] == enrollment.CMP_PROFILE)
-    assert any("Created the shared CMPv2 profile" in e["message"] for e in store.events("p1"))
-
-    second = await start(store, fake, "p2", tmp_path, protocol="cmpv2", auth="certificate", count=1,
-                         profile_id="profile-server")
-    assert second["status"] == "completed", store.events("p2")
-    assert len(fake.created_profiles) == 1 and fake.names("profile_get") == [PROFILE_ID]
-    assert {p["certificate_profile_id"] for p in fake.policies.values()} == {shared_id}
-    assert any("Using the shared CMPv2 profile" in e["message"] for e in store.events("p2"))
-
-    cmp_openssl.sync_to_dtm()
-    for run_id in ("p1", "p2"):
-        assert (await do_cleanup(store, fake, run_id, "full", tmp_path))["cleanup_status"] == "done"
-    assert fake.issued() == [] and fake.policies == {} and fake.divisions == {}
-    shared = next(p for p in fake.profiles if p["id"] == shared_id)
-    assert shared["status"] == "ACTIVE"
-    assert fake.violations == []  # any profile delete/disable would hit an unmodelled endpoint
-
-
-@pytest.mark.parametrize("protocol", ["est", "rest"])
-async def test_non_cmp_protocols_do_not_touch_profiles(store, enroll_net, tmp_path, protocol):
-    await start(store, enroll_net, "np1", tmp_path, protocol=protocol, count=1)
-    assert enroll_net.created_profiles == [] and enroll_net.names("profile_get") == []
-
-
-async def test_profile_without_bare_key_fails_the_run(store, enroll_net, cmp_openssl, tmp_path):
-    enroll_net.fail["profile_create"] = lambda request: httpx.Response(
-        201, json={"id": "profile-x", "allow_bare_public_key": False})
-    run = await start(store, enroll_net, "pb1", tmp_path, protocol="cmpv2", count=1)
-    assert run["status"] == "failed" and "bare public keys" in run["error"]
-    assert enroll_net.policies == {} and cmp_openssl.calls() == []
+    for run_id, protocol in (("p1", "cmpv2"), ("p2", "est"), ("p3", "rest"), ("p4", "cmpv2")):
+        run = await start(store, fake, run_id, tmp_path, protocol=protocol, count=1)
+        assert run["status"] == "completed", run["error"]
+    assert [b["name"] for b in fake.created_profiles] == [dtm.PROFILE_EVERGREEN_CMP.name, dtm.PROFILE_EVERGREEN.name]
+    cmp_profile, plain = fake.profile(dtm.PROFILE_EVERGREEN_CMP.name), fake.profile(dtm.PROFILE_EVERGREEN.name)
+    assert cmp_profile["allow_bare_public_key"] is True and plain["allow_bare_public_key"] is False
+    by_run = {store.objects(r, "policy")[0]["dtm_id"]: r for r in ("p1", "p2", "p3", "p4")}
+    profiles = {by_run[pid]: pol["certificate_profile_id"] for pid, pol in fake.policies.items()}
+    assert profiles == {"p1": cmp_profile["id"], "p2": plain["id"], "p3": plain["id"], "p4": cmp_profile["id"]}
 
 
 # --- error cases -------------------------------------------------------------------------------
@@ -383,6 +381,67 @@ async def test_cmp_rejection_reports_the_cmp_error(store, enroll_net, cmp_openss
     assert not (tmp_path / "runs" / "cr1" / "certificates").exists()
 
 
+@pytest.mark.parametrize("protocol", ["cmpv2", "scep"])
+async def test_tool_error_never_reveals_the_passcode(store, enroll_net, cmp_openssl, scep_client, tmp_path,
+                                                     protocol):
+    tool = scep_client if protocol == "scep" else cmp_openssl
+    tool.fail_with("challenge {challenge} rejected" if protocol == "scep" else "MAC check failed for {secret}")
+    run = await start(store, enroll_net, "tp1", tmp_path, protocol=protocol, **protocol_params(protocol))
+    passcode = enroll_net.active_auth("passcode")[0]["body"]["passcode"]
+    assert run["status"] == "failed"
+    label = "SCEP" if protocol == "scep" else "CMPv2"
+    assert run["error"].startswith(f"{label} request rejected: ") and "<passcode>" in run["error"]
+    assert passcode not in db_text(store, "tp1")
+
+
+LONG_URL = f"https://{HOST}" + enrollment.SCEP_PATH.format(alternative_id="a" * 150) + "?operation=GetCACert"
+
+
+@pytest.mark.parametrize("cause,expected", [
+    ("Get \"https://dtm.test/x?operation=GetCACert\": EOF", "Get \"https://dtm.test/x?operation=GetCACert\": EOF"),
+    (f'Get "{LONG_URL}": dial tcp: lookup {HOST}: no such host',
+     "…" + f'Get "{LONG_URL}": dial tcp: lookup {HOST}: no such host'[-200:]),
+])
+async def test_scep_error_reason_is_the_bare_cause(store, enroll_net, scep_client, tmp_path, cause, expected):
+    """scepclient prints a logfmt line, then the bare Go error: the run shows the last line, and a
+    long one keeps its end (where the cause is)."""
+    scep_client.fail_with(cause)
+    run = await start(store, enroll_net, "se1", tmp_path, protocol="scep", **RSA)
+    assert run["status"] == "failed"
+    assert run["error"] == "SCEP request rejected: " + expected
+    assert "level=info" not in run["error"] and "op=GetCACert" not in run["error"]
+
+
+async def test_cmp_error_reason_is_the_last_cmp_error_line_and_keeps_its_end(store, enroll_net, cmp_openssl,
+                                                                             tmp_path):
+    cause = "transfer error: " + "x" * 250 + " – certificate rejected"
+    cmp_openssl.fail_with(cause)
+    run = await start(store, enroll_net, "ce1", tmp_path, protocol="cmpv2")
+    # the trailing generic line is skipped: the reason is the "CMP error" line, cut to its last 200 chars
+    assert run["error"] == "CMPv2 request rejected: …" + f"CMP error: {cause}"[-200:]
+    assert run["error"].endswith("certificate rejected")
+
+
+async def test_scep_stale_client_files_are_removed_before_each_request(store, enroll_net, scep_client, tmp_path):
+    run = await start(store, enroll_net, "ss1", tmp_path, protocol="scep", count=2, **RSA)
+    assert run["status"] == "completed", run["error"]
+    calls = scep_client.calls()
+    assert len(calls) == 2 and [c["stale"] for c in calls] == [[], []]  # the client left them after call 1
+
+
+async def test_scepclient_missing(store, enroll_net, tmp_path, monkeypatch):
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    run = await start(store, enroll_net, "sm1", tmp_path, protocol="scep", **RSA)
+    assert run["status"] == "failed" and run["error"] == "scepclient is not installed – SCEP needs it"
+
+
+async def test_scep_with_factory_certificate_is_refused(store, enroll_net, scep_client, tmp_path):
+    run = await start(store, enroll_net, "sf1", tmp_path, protocol="scep", auth="certificate", **RSA)
+    assert run["status"] == "failed" and scep_client.calls() == []
+
+
 async def test_openssl_missing(store, enroll_net, tmp_path, monkeypatch):
     empty = tmp_path / "empty-bin"
     empty.mkdir()
@@ -408,15 +467,6 @@ async def test_cmp_passcode_without_reference_is_refused(store, enroll_net, cmp_
     enroll_net.fail["passcode_create"] = no_reference
     run = await start(store, enroll_net, "nr1", tmp_path, protocol="cmpv2")
     assert run["status"] == "failed" and "passcode reference" in run["error"] and cmp_openssl.calls() == []
-
-
-@pytest.mark.parametrize("record", [{"account_id": "0a1b2c3d-0000-4000-8000-00000000b002", "allow_bare_public_key": True},
-                                    {"account_id": ACCOUNT_ID, "allow_bare_public_key": False}])
-async def test_unusable_existing_cmp_profile_is_not_used_or_changed(store, enroll_net, cmp_openssl, tmp_path, record):
-    enroll_net.profiles.append({"id": "profile-taken", "name": enrollment.CMP_PROFILE, "status": "ACTIVE"} | record)
-    run = await start(store, enroll_net, "up1", tmp_path, protocol="cmpv2")
-    assert run["status"] == "failed" and "fix or rename it in the DTM portal" in run["error"]
-    assert enroll_net.created_profiles == [] and enroll_net.policies == {} and cmp_openssl.calls() == []
 
 
 async def test_concurrent_cmp_runs_create_the_shared_profile_once(store, enroll_net, cmp_openssl, tmp_path):
@@ -577,9 +627,10 @@ async def test_auth_delete_tolerates_already_gone_objects(store, enroll_net, tmp
 # --- copyable commands -------------------------------------------------------------------------
 
 @pytest.mark.parametrize("protocol,auth", COMBOS)
-async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, cmp_openssl, secrets_seen,
-                                                             tmp_path, protocol, auth):
-    run = await start(store, enroll_net, "sn1", tmp_path, protocol=protocol, auth=auth, count=1)
+async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, cmp_openssl, scep_client,
+                                                             secrets_seen, tmp_path, protocol, auth):
+    run = await start(store, enroll_net, "sn1", tmp_path, protocol=protocol, auth=auth, count=1,
+                      **protocol_params(protocol))
     assert run["status"] == "completed", store.events("sn1")
     text = all_snippets(run)
     for key in secrets_seen:
@@ -593,7 +644,11 @@ async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, 
         ps = dialect == "powershell"
         assert command == enroll["spec"]["command"]["powershell" if ps else "bash"]
         assert "x-api-key" not in command.lower() and "account_id" not in command
-        if protocol == "cmpv2":
+        if protocol == "scep":
+            assert "clientauth." not in command and "/scep/DIOT_" in command
+            assert ('-challenge $env:PASSCODE' if ps else '-challenge "${PASSCODE}"') in command
+            assert "-cn robot-sn1-uc03-" in command
+        elif protocol == "cmpv2":
             assert "/CN=robot-sn1-uc03-" in command
             assert "clientauth." not in command and "DIOT_" in command
             assert ("-secret env:PASSCODE" in command) == (auth == "passcode")
@@ -653,13 +708,13 @@ async def test_station_cmp_argv_is_accepted_by_real_openssl(store, enroll_net, c
 
 
 @pytest.mark.parametrize("protocol,auth", COMBOS)
-async def test_enrollment_steps_are_separate_api_call_entries(store, enroll_net, cmp_openssl, tmp_path,
+async def test_enrollment_steps_are_separate_api_call_entries(store, enroll_net, cmp_openssl, scep_client, tmp_path,
                                                               protocol, auth):
-    run = await start(store, enroll_net, "st1", tmp_path, protocol=protocol, auth=auth)
+    run = await start(store, enroll_net, "st1", tmp_path, protocol=protocol, auth=auth, **protocol_params(protocol))
     assert run["status"] == "completed", run["error"]
     calls = run["result"]["api_calls"]
     names = evergreen.common_names("st1", protocol, 2, UC)
-    steps = enrollment.enroll_steps(protocol, auth, names[0], "P_256")
+    steps = enrollment.enroll_steps(protocol, auth, names[0], run["params"]["key_type"])
     recorded = enroll_entries(run)
     # one entry per step, in order, with the step's own label, command and phase
     assert [(c["purpose"], c["method"], c["path"], c["spec"], c["phase"]) for c in recorded] == [

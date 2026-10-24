@@ -182,14 +182,17 @@ def enroll_net(monkeypatch, fake):
 
 
 class FakeOpenSSL:
+    TOOL, SCRIPT = "openssl", "fake_openssl.py"
+
     def __init__(self, bin_dir: Path, fake: FakeDTM):
+        bin_dir.mkdir(exist_ok=True)
         self.bin_dir, self.fake = bin_dir, fake
-        self.record = bin_dir / "calls.jsonl"
+        self.record = bin_dir / f"{self.TOOL}-calls.jsonl"
         self.config = {"ca_cert": cert_pem(fake.ica_cert), "ca_key": key_pem(fake.ica_key),
                        "record": str(self.record), "fail": None}
         self._write()
-        script = bin_dir / "openssl"
-        script.write_text(f"#!{sys.executable}\n" + (Path(__file__).parent / "fake_openssl.py").read_text())
+        script = bin_dir / self.TOOL
+        script.write_text(f"#!{sys.executable}\n" + (Path(__file__).parent / self.SCRIPT).read_text())
         script.chmod(0o755)
 
     def _write(self):
@@ -228,4 +231,27 @@ def cmp_openssl(tmp_path, monkeypatch, fake):
     bin_dir.mkdir()
     tool = FakeOpenSSL(bin_dir, fake)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return tool
+
+
+class FakeScepClient(FakeOpenSSL):
+    TOOL, SCRIPT = "scepclient", "fake_scepclient.py"
+
+    def sync_to_dtm(self) -> None:
+        """Make the certificates the client received known to the fake DTM under the policy behind
+        DIOT_<alternative_id>, so the cleanup has something real to revoke."""
+        from cryptography import x509
+        for call in self.calls():
+            if call["issued"]:
+                url = call["argv"][call["argv"].index("-server-url") + 1]
+                alternative_id = url.rsplit("DIOT_", 1)[1]
+                policy_id = next(p["id"] for p in self.fake.policies.values() if p["alternative_id"] == alternative_id)
+                self.fake.register_certificate(policy_id, x509.load_pem_x509_certificate(call["issued"].encode()))
+
+
+@pytest.fixture
+def scep_client(tmp_path, monkeypatch, fake):
+    """A fake `scepclient` first on PATH (see tests/fake_scepclient.py) – its own bin dir."""
+    tool = FakeScepClient(tmp_path / "fake-scep-bin", fake)
+    monkeypatch.setenv("PATH", f"{tool.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     return tool

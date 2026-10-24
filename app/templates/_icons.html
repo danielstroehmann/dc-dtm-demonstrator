@@ -13,6 +13,6 @@
 {%- endif %}</svg>
 {%- endmacro %}
 {% macro pill(status) -%}
-{%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "renewing": "run"}.get(status, "") -%}
+{%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "renewing": "run", "active": "ok"}.get(status, "") -%}
 <span class="pill {{ kind }}">{{ status }}</span>
 {%- endmacro %}

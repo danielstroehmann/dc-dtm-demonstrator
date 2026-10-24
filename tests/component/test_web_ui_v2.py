@@ -99,13 +99,12 @@ def test_failed_later_save_stays_on_settings(configured_user, store, fake):
 def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fake):
     html = configured_user.get("/").text
     assert "<h1>Start a demo</h1>" in html and "<h1>Welcome</h1>" not in html
-    assert html.count('<article class="tile">') == len(evergreen.USE_CASES) == 4
-    for key, use_case in evergreen.USE_CASES.items():
+    assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 2
+    for key, use_case in evergreen.CATALOG.items():
         assert html.count(f'formaction="/runs/new/{key}"') == 1
         assert f'aria-label="Start {use_case.title}"' in html
-    assert html.index('formaction="/runs/new/uc01"') < html.index('formaction="/runs/new/uc02"')
-    assert "Server-side keys" in html and "Factory CSR" in html
-    assert "EST · CMPv2 · REST" in html and "Passcode · Factory certificate" in html
+    assert html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
+    assert "Server-side or factory keys" in html and "Renewal per click" in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html
     assert '<select name="connection"' not in html
@@ -286,7 +285,8 @@ def test_connection_name_is_escaped_in_chip_select_and_run_pages(user, store):
 def test_use_case_title_is_escaped_in_tiles_and_tooltips(configured_store, user, store, monkeypatch):
     from app import main
     hostile = 'T" onmouseover="alert(1)'
-    monkeypatch.setitem(main.USE_CASES, "uc01", evergreen.UseCase(hostile, "S", "server_side"))
+    monkeypatch.setitem(main.USE_CASES, "uc01", evergreen.UseCase(hostile, "S", "server_side"))  # runs table
+    monkeypatch.setitem(evergreen.CATALOG, "evergreen", evergreen.UseCase(hostile, "S", "server_side"))  # tile
     store.create_run("t1", "uc01", BASE_PARAMS)
     html = user.get("/").text
     assert hostile not in html and 'onmouseover="alert(1)' not in html

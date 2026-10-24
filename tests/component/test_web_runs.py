@@ -18,8 +18,7 @@ SCRIPT = "<script>alert('x')</script>"
 
 
 def form(**overrides) -> dict:
-    return {"run_id": "r1", "variant": "api", "mode": "single", "count": "1", "ca_id": ECDSA_CA_ID,
-            "profile_id": PROFILE_ID} | overrides
+    return {"run_id": "r1", "variant": "api", "mode": "single", "count": "1", "ca_id": ECDSA_CA_ID} | overrides
 
 
 def finished(store, run_id):
@@ -42,12 +41,12 @@ def test_new_run_requires_configuration(user):
     assert "formaction" not in index and "Recent runs" not in index
 
 
-def test_new_run_lists_only_usable_cas_and_active_profiles(configured_user, fake):
-    html = configured_user.get("/runs/new/uc01").text
+def test_new_run_lists_only_usable_cas(configured_user, fake):
+    html = configured_user.get("/runs/new/evergreen").text
     assert f'value="{ECDSA_CA_ID}"' in html and f'value="{RSA_CA_ID}"' in html
-    for hidden in ("ca-root", "ca-disabled", "ca-other-account", "profile-old"):
+    for hidden in ("ca-root", "ca-disabled", "ca-other-account"):
         assert f'value="{hidden}"' not in html
-    assert f'<option value="{PROFILE_ID}" selected>' in html  # client profile preselected
+    assert 'name="profile_id"' not in html and PROFILE_ID not in html  # shared profiles, nothing to choose
     assert f'max="{evergreen.MAX_BATCH}"' in html
     assert fake.violations == []
 
@@ -66,20 +65,18 @@ def test_catalog_without_connection(user, fake):
     assert '<form method="post" action="/settings/connections">' in html and "formaction" not in html
 
 
-def test_catalog_lists_all_use_cases(configured_user, store, fake):
+def test_catalog_lists_the_guide_and_uc04(configured_user, store, fake):
     response = configured_user.get("/runs/new")
     assert response.status_code == 200
     html = response.text
-    assert html.count('formaction="/runs/new/') == len(evergreen.USE_CASES) == 4
-    for key, use_case in evergreen.USE_CASES.items():
+    assert html.count('formaction="/runs/new/') == len(evergreen.CATALOG) == 2
+    for key, use_case in evergreen.CATALOG.items():
         assert f'formaction="/runs/new/{key}"' in html and use_case.title in html
         assert use_case.summary[:40] not in html  # tiles show title and tags only (UI design v2)
         assert f'aria-label="Start {use_case.title}"' in html
-    assert (html.index('formaction="/runs/new/uc01"') < html.index('formaction="/runs/new/uc02"')
-            < html.index('formaction="/runs/new/uc03"') < html.index('formaction="/runs/new/uc04"'))
-    for key in ("uc03", "uc04"):  # tiles show the use case's own tags
-        for tag in evergreen.USE_CASES[key].tags:
+        for tag in use_case.tags:
             assert f"<li>{tag}</li>" in html
+    assert html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
     assert '<form method="get">' in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html and "<select" not in html
@@ -87,11 +84,13 @@ def test_catalog_lists_all_use_cases(configured_user, store, fake):
 
 
 def test_use_case_form_shows_title_summary_and_breadcrumb(configured_user):
-    html = configured_user.get("/runs/new/uc01").text
-    assert f"<h1>{evergreen.USE_CASES["uc01"].title}</h1>" in html or f"<h2>{evergreen.USE_CASES["uc01"].title}</h2>" in html
-    assert re.search(r'href="/runs/new\?connection=\d+">Use cases</a>', html)
-    assert evergreen.USE_CASES["uc01"].summary[:40] in html
-    assert 'action="/runs"' in html
+    for key in ("evergreen", "uc04"):
+        use_case = evergreen.CATALOG[key]
+        html = configured_user.get(f"/runs/new/{key}").text
+        assert f"<h1>{use_case.title}</h1>" in html
+        assert re.search(r'href="/runs/new\?connection=\d+">Use cases</a>', html)
+        assert use_case.summary[:40] in html
+        assert 'action="/runs"' in html
 
 
 @pytest.mark.parametrize("use_case", ["uc05", "uc00", "UC04", "UC03", "UC01", "uc01x", "uc01.", "%2e%2e%2fsettings"])
@@ -100,19 +99,18 @@ def test_unknown_use_case_is_404_without_dtm_call(configured_user, fake, use_cas
     assert fake.requests == []
 
 
-@pytest.mark.parametrize("path", ["/runs/new", "/runs/new/uc01", "/runs/new/uc02"])
+@pytest.mark.parametrize("path", ["/runs/new", "/runs/new/evergreen", "/runs/new/uc01", "/runs/new/uc04"])
 def test_catalog_requires_login(web, path):
     response = web.get(path, follow_redirects=False)
     assert response.status_code == 303 and response.headers["location"] == "/login"
 
 
 def test_catalog_and_form_escape_use_case_texts(configured_user, monkeypatch):
-    from app import main
-    monkeypatch.setitem(main.USE_CASES, "uc01", evergreen.UseCase(f"T {SCRIPT}", f"S {SCRIPT}", "server_side"))
-    for path in ("/runs/new", "/", "/runs/new/uc01"):
+    monkeypatch.setitem(evergreen.CATALOG, "evergreen", evergreen.UseCase(f"T {SCRIPT}", f"S {SCRIPT}", "server_side"))
+    for path in ("/runs/new", "/", "/runs/new/evergreen"):
         html = configured_user.get(path).text
         assert SCRIPT not in html and "T &lt;script&gt;" in html, path
-    assert "S &lt;script&gt;" in configured_user.get("/runs/new/uc01").text  # the summary is on the form only
+    assert "S &lt;script&gt;" in configured_user.get("/runs/new/evergreen").text  # the summary is on the form only
 
 
 # --- run creation validation -----------------------------------------------------------------
@@ -130,8 +128,6 @@ def test_catalog_and_form_escape_use_case_texts(configured_user, monkeypatch):
     ({"ca_id": "ca-other-account"}, "Select an issuing CA of this account."),
     ({"ca_id": "ca-root"}, "Select an issuing CA of this account."),
     ({"ca_id": "ca-disabled"}, "Select an issuing CA of this account."),
-    ({"profile_id": "profile-old"}, "Select a certificate profile."),
-    ({"profile_id": "nope"}, "Select a certificate profile."),
 ])
 def test_create_run_validation(configured_user, store, overrides, message):
     response = configured_user.post("/runs", data=form(**overrides), follow_redirects=False)
@@ -236,29 +232,31 @@ def test_approval_only_for_api_batch(configured_user, store, variant, mode, appr
     assert run["params"]["approval"] is approval
 
 
-@pytest.mark.parametrize("count", ["0", "-1", str(evergreen.MAX_BATCH + 1), "999999"])
-def test_single_count_is_validated(configured_user, store, count):
-    response = configured_user.post("/runs", data=form(count=count))
-    assert response.status_code == 400 and "Number of certificates" in response.text
-    assert store.list_runs() == []
+def test_single_ignores_the_count(configured_user, store, fake):
+    """A single device is exactly one certificate, whatever count is posted."""
+    for i, count in enumerate(("0", "-1", str(evergreen.MAX_BATCH + 1), "999999")):
+        response = configured_user.post("/runs", data=form(run_id=f"s{i}", count=count), follow_redirects=False)
+        assert response.status_code == 303
+        assert finished(store, f"s{i}")["params"]["count"] == 1
+    assert len(fake.issued()) == 4
 
 
 def test_single_count_is_stored_and_account_bound(configured_user, store):
     configured_user.post("/runs", data=form(count="3"))
     params = finished(store, "r1")["params"]
-    assert params["count"] == 3 and params["mode"] == "single"
+    assert params["count"] == 1 and params["mode"] == "single"
     assert (params["dtm_host"], params["account_id"]) == (HOST, ACCOUNT_ID)
     assert params["key_type"] == "P_256" and params["ca_name"] == "Fake ECDSA ICA"
     assert API_KEY not in json.dumps(params)
     index = configured_user.get("/").text
-    assert "single (3)" in index
+    assert "single (1)" in index
     page = configured_user.get("/runs/r1").text
     assert "<small>All requests</small>" in page and "Upload done" not in page
-    assert page.count("robot-r1-uc01-single-000") >= 3
+    assert "robot-r1-uc01-single-0001" in page and "robot-r1-uc01-single-0002" not in page
 
 
 def test_create_run_dtm_error_is_502_and_creates_nothing(configured_user, store, fake):
-    fake.fail["profiles"] = httpx.ConnectError("down")
+    fake.fail["cas"] = httpx.ConnectError("down")
     response = configured_user.post("/runs", data=form())
     assert response.status_code == 502 and store.list_runs() == []
 
@@ -773,7 +771,7 @@ def test_steps_grouped_by_phase(configured_user, store):
     configured_user.post("/runs", data=form(mode="batch", count="2", approval="true"))
     run = finished(store, "r1")
     calls = run["result"]["api_calls"]
-    assert [c["phase"] for c in calls] == ["setup"] * 5 + ["recurring"] * 6
+    assert [c["phase"] for c in calls] == ["setup"] * 6 + ["recurring"] * 6  # incl. the shared profile lookup
     html = configured_user.get("/runs/r1").text
     setup, recurring = section(html, "setup"), section(html, "recurring")
     assert "<summary>One-Time Setup</summary>" in setup
@@ -789,7 +787,7 @@ def test_steps_grouped_by_phase(configured_user, store):
     assert positions == sorted(positions)  # order preserved
     assert all(purpose(p) not in recurring for p in setup_purposes)
     assert all(purpose(p) not in setup for p in recurring_purposes)
-    assert 'id="pre-setup-1"' in setup and 'id="pre-setup-5"' in setup and 'id="pre-setup-6"' not in html
+    assert 'id="pre-setup-1"' in setup and 'id="pre-setup-6"' in setup and 'id="pre-setup-7"' not in html
     assert 'id="pre-recurring-1"' in recurring and 'id="pre-recurring-6"' in recurring
     assert 'data-copy="script-setup-curl"' in setup and 'data-copy="script-recurring-curl"' in recurring
     s_setup, s_rec, s_all = (hidden_script(html, f"script-{n}-curl") for n in ("setup", "recurring", "all"))
@@ -934,11 +932,10 @@ def test_cta_only_for_start_run_and_first_connection(user, store):
 
 def test_page_structure_cards(configured_user, store):
     catalog = configured_user.get("/runs/new").text
-    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 4
-    assert re.search(r'<h3><span class="uc-id">UC-1</span>[^<]+</h3>', catalog)
-    assert re.search(r'<h3><span class="uc-id">UC-3</span>Evergreen Device IDs via Enrollment Protocols</h3>', catalog)
-    assert re.search(r'<h3><span class="uc-id">UC-4</span>Evergreen Device ID with Renewal in the Field</h3>', catalog)
-    assert re.search(r'<button type="submit" formaction="/runs/new/uc01" class="btn-sm btn-icon"\s+'
+    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 2
+    assert "<h3>Evergreen Device IDs</h3>" in catalog and 'class="uc-id"' not in catalog
+    assert "<h3>Evergreen Device ID with Renewal in the Field</h3>" in catalog
+    assert re.search(r'<button type="submit" formaction="/runs/new/evergreen" class="btn-sm btn-icon"\s+'
                      r'aria-label="Start [^"]+"><svg[^>]*>.*?</svg>Start</button>', catalog, re.S)
     settings = configured_user.get("/settings").text
     assert "<h1>Settings</h1>" in settings and "<h2>DTM connections</h2>" in settings
@@ -947,11 +944,13 @@ def test_page_structure_cards(configured_user, store):
     index = configured_user.get("/").text
     assert "<h1>Start a demo</h1>" in index and "<h2>Recent runs</h2>" in index
     assert "Every object a run creates" not in index
-    new = configured_user.get("/runs/new/uc01").text
+    new = configured_user.get("/runs/new/evergreen").text
     assert "a–z, 0–9, max. 16" in new and "Require approval (auto-approved)" in new
-    assert '<span class="seg-label" id="l-variant">Variant</span>' in new
-    assert '<span class="seg-label" id="l-mode">Mode</span>' in new  # not "Issuance" twice (section title)
-    assert new.count('role="radiogroup"') == 2
+    assert '<span class="seg-label" id="l-key_location">Where is the key pair generated?</span>' in new
+    assert '<span class="seg-label" id="l-mode">How many devices at once?</span>' in new
+    assert '<span class="seg-label" id="l-variant">Run it</span>' in new
+    # key location, mode, protocol, authentication, variant
+    assert new.count('role="radiogroup"') == 5
     error = configured_user.get("/nope").text
     assert '<div class="card-head"><h2>Something went wrong</h2></div>' in error
 
@@ -991,7 +990,8 @@ def test_only_get_and_post_routes():
     assert posts == ["/login", "/logout", "/runs", "/runs/{run_id}/cleanup", "/runs/{run_id}/delete",
                      "/runs/{run_id}/renew",
                      "/settings/connections", "/settings/connections/{connection_id}/default",
-                     "/settings/connections/{connection_id}/delete"]
+                     "/settings/connections/{connection_id}/delete",
+                     "/settings/connections/{connection_id}/profiles/retire"]
 
 
 def test_no_get_route_changes_state(configured_user, store, fake, data_dir):
@@ -1103,9 +1103,8 @@ def test_uc01_has_no_key_generation_tile_and_first_response_summary(configured_u
 # --- UC-2 through the web UI ------------------------------------------------------------------
 
 def test_uc02_form_and_run(configured_user, store, fake):
-    page = configured_user.get("/runs/new/uc02").text
-    assert '<input type="hidden" name="use_case" value="uc02">' in page
-    assert evergreen.USE_CASES["uc02"].title in page
+    response = configured_user.get("/runs/new/uc02", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/new/evergreen"
     configured_user.post("/runs", data=form(use_case="uc02", mode="batch", count="3"))
     run = finished(store, "r1")
     assert run["status"] == "completed", store.events("r1")
@@ -1130,7 +1129,7 @@ def test_uc02_single_overview(configured_user, store):
     assert run["status"] == "completed" and run["result"]["private_keys_returned"] == 0
     html = configured_user.get("/runs/r1").text
     assert "Key generation</small>" in html and "Approved after" not in html
-    assert '<p class="metric">2</p>' in html
+    assert '<small>Certificates</small><p class="metric">1</p>' in html  # single = one certificate
 
 
 @pytest.mark.parametrize("use_case", ["uc03", "UC02", "", "../uc01"])

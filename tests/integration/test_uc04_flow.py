@@ -7,9 +7,9 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from app import certs, cleanup, enrollment, snippets
+from app import certs, cleanup, dtm, enrollment, snippets
 from app.store import Store
-from tests.fakedtm import ACCOUNT_ID, CLIENTAUTH_HOST, ECDSA_CA_ID, HOST, PROFILE_ID, FakeDTM
+from tests.fakedtm import ACCOUNT_ID, CLIENTAUTH_HOST, ECDSA_CA_ID, HOST, FakeDTM
 from tests.integration.test_uc01_flow import assert_certificate_files
 from tests.integration.test_uc03_flow import all_snippets, key_body, secrets_seen  # noqa: F401 – fixture
 
@@ -18,7 +18,7 @@ UC = "uc04"
 
 def params(**overrides) -> dict:
     return {"dtm_host": HOST, "account_id": ACCOUNT_ID, "variant": "api", "mode": "single", "count": 1,
-            "ca_id": ECDSA_CA_ID, "ca_name": "Fake ECDSA ICA", "key_type": "P_256", "profile_id": PROFILE_ID,
+            "ca_id": ECDSA_CA_ID, "ca_name": "Fake ECDSA ICA", "key_type": "P_256",
             "approval": False, "protocol": "est", "auth": "passcode"} | overrides
 
 
@@ -332,11 +332,12 @@ def test_renewal_block_renders_in_every_dialect(store):
             assert requests_in(snippets.render({"command": s["command"]}, dialect)) == (s["method"] != "LOCAL")
 
 
-@pytest.mark.parametrize("profile_id", ["profile-server", "profile-window", "profile-legacy"])
-async def test_renewal_disabled_by_the_profile(store, enroll_net, tmp_path, fast_timing, profile_id):
-    """Engine level (the form would refuse these profiles): DTM answers 400 "Renewal is disabled";
-    the error explains it, nothing is retried or changed."""
-    await start(store, enroll_net, "rd1", tmp_path, profile_id=profile_id)
+async def test_renewal_disabled_by_the_profile(store, enroll_net, tmp_path, fast_timing):
+    """Someone changed the shared renewal profile in DTM after the run: DTM answers 400 "Renewal is
+    disabled"; the error explains it, nothing is retried or changed."""
+    await start(store, enroll_net, "rd1", tmp_path)
+    profile = enroll_net.profile(dtm.PROFILE_RENEWAL.name)
+    next(e for e in profile["body"] if e["key"] == "renewal_settings.renew_valid_cert")["value"] = "dont_allow"
     before, files = store.get_run("rd1"), device_file(tmp_path, "rd1")
     fast_timing.clear()
     run = await renew(store, "rd1", tmp_path)
@@ -346,6 +347,17 @@ async def test_renewal_disabled_by_the_profile(store, enroll_net, tmp_path, fast
     (error,) = [e["message"] for e in store.events("rd1") if e["level"] == "error"]
     assert error.startswith("Renewal failed: EST simplereenroll returned 400:") and "Renewal is disabled" in error
     assert error.endswith(" – the certificate profile does not allow renewing a valid certificate")
+
+
+async def test_uc04_uses_the_renewal_profile(store, enroll_net, tmp_path):
+    await start(store, enroll_net, "rp1", tmp_path)
+    (policy,) = enroll_net.policies.values()
+    profile = enroll_net.profile(dtm.PROFILE_RENEWAL.name)
+    assert policy["certificate_profile_id"] == profile["id"]
+    entries = {e["key"]: e["value"] for e in profile["body"]}
+    assert (entries["validity.duration_unit"], entries["validity.duration_value"]) == ("months", 6)
+    assert entries["renewal_settings.renew_valid_cert"] == "anytime"
+    assert [b["name"] for b in enroll_net.created_profiles] == [dtm.PROFILE_RENEWAL.name]
 
 
 async def test_other_400_errors_get_no_renewal_hint(store, enroll_net, tmp_path):

@@ -65,3 +65,52 @@ for (const [on, off] of [["mouseover", "mouseout"], ["focusin", "focusout"]]) {
   document.addEventListener(off, hideTip);
 }
 document.addEventListener("scroll", hideTip, { passive: true });
+
+// Guided form (New run → Evergreen Device IDs): a question is shown only while its data-when
+// applies ("name=value name=value | …" – all of a group, any group). Hidden questions are disabled,
+// so they are not submitted; a hidden option never stays selected. The server checks again.
+function showQuestions(form) {
+  // Answers can hide questions that hide others – repeat until nothing changes. Values are read
+  // from the inputs themselves (FormData skips disabled ones, i.e. answers hidden a moment ago).
+  for (let pass = 0; pass < 5; pass++) {
+    const values = {};
+    form.querySelectorAll("input:checked, input[type=number], select").forEach((input) => {
+      if (!input.closest("[data-when][hidden]")) values[input.name] = input.value;
+    });
+    const before = [...form.querySelectorAll("[data-when]")].map((el) => el.hidden).join();
+    form.querySelectorAll("[data-when]").forEach((el) => {
+      const parent = el.parentElement.closest("[data-when]");
+      const show = !(parent && parent.hidden) && el.dataset.when.split("|").some((group) =>
+        group.trim().split(/\s+/).every((cond) => {
+          const [name, value] = cond.split("=");
+          return values[name] === value;
+        }));
+      el.hidden = !show;
+      el.querySelectorAll("input, select").forEach((input) => { input.disabled = !show; });
+    });
+    if ([...form.querySelectorAll("[data-when]")].map((el) => el.hidden).join() === before) return;
+  }
+}
+
+function applyGuide(form) {
+  showQuestions(form);
+  // Only once the questions are settled: a hidden option must not stay selected.
+  for (let pass = 0; pass < 5; pass++) {
+    let moved = false;
+    form.querySelectorAll('[role="radiogroup"]').forEach((group) => {
+      const inputs = [...group.querySelectorAll("input")];
+      const checked = inputs.find((i) => i.checked);
+      const first = inputs.find((i) => !i.disabled);
+      if (checked && checked.disabled && first) {
+        first.checked = true;
+        moved = true;
+      }
+    });
+    if (!moved) return;
+    showQuestions(form);
+  }
+}
+document.querySelectorAll("form[data-guide]").forEach((form) => {
+  form.addEventListener("change", () => applyGuide(form));
+  applyGuide(form);
+});

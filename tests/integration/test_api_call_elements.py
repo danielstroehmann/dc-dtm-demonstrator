@@ -10,7 +10,8 @@ from app import evergreen, snippets
 from tests.integration import test_uc01_flow, test_uc02_flow, test_uc03_flow, test_uc04_flow
 
 # A request is one invocation of a network client. Comment lines are ignored (they may mention curl).
-REQUEST = re.compile(r"(?<![\w.$/-])(?:curl(?:\.exe)?|wget|Invoke-RestMethod)(?=\s)|(?<![\w.-])openssl cmp(?=\s)")
+REQUEST = re.compile(r"(?<![\w.$/-])(?:curl(?:\.exe)?|wget|Invoke-RestMethod|scepclient(?:\.exe)?)(?=\s)"
+                     r"|(?<![\w.-])openssl cmp(?=\s)")
 WGET_MULTIPART = "# wget cannot send multipart/form-data"
 
 
@@ -42,6 +43,8 @@ def test_counter_detects_merged_calls():
     assert requests_in("openssl cmp -cmd ir -server x") == 1 and requests_in("openssl req -new") == 0
     assert requests_in('Invoke-RestMethod -Method Get -Uri "x"\ncurl.exe -sS -X POST "x"') == 2
     assert requests_in('$(printf %s "${PASSCODE}" | openssl base64 -A)') == 0
+    assert requests_in("scepclient -server-url x -challenge y") == 1
+    assert requests_in("sleep 10\nStart-Sleep 10") == 0  # waiting is not a request
 
 
 @pytest.mark.parametrize("mode,count", [("single", 1), ("batch", 2)])
@@ -60,8 +63,9 @@ async def test_uc02_elements(store, fake, tmp_path, monkeypatch, mode, count):
 
 
 @pytest.mark.parametrize("protocol,auth", test_uc03_flow.COMBOS)
-async def test_uc03_elements(store, enroll_net, cmp_openssl, tmp_path, protocol, auth):
-    run = await test_uc03_flow.start(store, enroll_net, "e3", tmp_path, protocol=protocol, auth=auth)
+async def test_uc03_elements(store, enroll_net, cmp_openssl, scep_client, tmp_path, protocol, auth):
+    run = await test_uc03_flow.start(store, enroll_net, "e3", tmp_path, protocol=protocol, auth=auth,
+                                     **test_uc03_flow.protocol_params(protocol))
     assert run["status"] == "completed", run["error"]
     assert_one_request_per_element(run)
     # and exactly one of them is the enrollment request

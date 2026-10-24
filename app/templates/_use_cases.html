@@ -1,6 +1,6 @@
 {% from "_icons.html" import icon %}
 {# Use-case tiles: GET form so the selected connection travels along with the chosen use case. #}
-{% set icons = {"uc01": "key", "uc02": "factory", "uc03": "exchange", "uc04": "refresh"} %}
+{% set icons = {"evergreen": "key", "uc04": "refresh"} %}
 <form method="get">
   {% if connections | length > 1 %}
   <label class="conn-select">Connection
@@ -10,10 +10,10 @@
   </label>
   {% elif selected %}<input type="hidden" name="connection" value="{{ selected }}">{% endif %}
   <div class="tiles">
-    {% for key, uc in use_cases.items() %}
+    {% for key, uc in catalog.items() %}
     <article class="tile">
       <div class="tile-top"><span class="tile-icon">{{ icon(icons.get(key, "key")) }}</span>
-        <h3><span class="uc-id">UC-{{ key[2:] | int }}</span>{{ uc.title }}</h3></div>
+        <h3>{{ uc.title }}</h3></div>
       <ul class="tags">{% for tag in uc.tags %}<li>{{ tag }}</li>{% endfor %}</ul>
       <div class="tile-foot"><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"
         aria-label="Start {{ uc.title }}">{{ icon("play") }}Start</button></div>

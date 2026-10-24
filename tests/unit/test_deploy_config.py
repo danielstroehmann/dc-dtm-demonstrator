@@ -106,3 +106,17 @@ def test_entrypoint_https_suffix_carries_non_default_port(run_entrypoint):
     assert out["HTTPS_SUFFIX"] == ":8443"
     # The container always listens on 443 internally; only the published port changes.
     assert out["SITE_ADDRESSES"] == "https://demo.local:443"
+
+
+def test_dockerfile_installs_scepclient_in_its_own_cached_layer():
+    """apt in its own RUN before the requirements (a requirements change keeps the apt layer cached);
+    only the client – the bundled SCEP server is removed from the image."""
+    text = (DEPLOY.parent / "Dockerfile").read_text()
+    lines = [line.strip() for line in text.splitlines()]
+    apt = next(i for i, line in enumerate(lines) if line.startswith("RUN apt-get update"))
+    copy_req = lines.index("COPY requirements.txt .")
+    assert apt < copy_req
+    assert "apt-get install -y --no-install-recommends scep" in lines[apt]
+    assert "rm -rf /var/lib/apt/lists/*" in lines[apt]
+    apt_block = " ".join(lines[apt:copy_req])
+    assert "rm -f /usr/bin/scepserver" in apt_block and "pip install" not in apt_block

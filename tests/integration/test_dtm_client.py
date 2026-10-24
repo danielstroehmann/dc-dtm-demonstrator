@@ -168,16 +168,6 @@ async def test_issuing_cas_only_active_intermediates_of_this_account(router, cli
     assert [c["id"] for c in await client.issuing_cas()] == ["good", "rsa"]
 
 
-async def test_certificate_profiles_only_active(router, client):
-    renew = {"key": "renewal_settings.renew_valid_cert", "enabled": True, "value": "anytime"}
-    router.get(f"{DTM}/certificate-configuration-service/api/v1/certificate-profile").mock(return_value=page([
-        {"id": "a", "name": "A", "status": "ACTIVE", "body": [renew]},
-        {"id": "b", "name": "B", "status": "INACTIVE", "body": [renew]},
-        {"id": "c", "name": "C", "status": "ACTIVE"}]))
-    assert await client.certificate_profiles() == [{"id": "a", "name": "A", "renew_anytime": True},
-                                                   {"id": "c", "name": "C", "renew_anytime": False}]
-
-
 @pytest.mark.parametrize("body,expected", [
     (None, False),                                                                     # no body at all
     ([], False),                                                                       # no entry

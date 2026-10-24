@@ -8,7 +8,7 @@ import sqlite3
 import string
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +61,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     # Cache busting: static URLs carry a hash of the files, so a new build is never hidden by the cache.
     templates.env.globals["asset_v"] = _asset_hash(HERE / "static")
     templates.env.globals["use_cases"] = USE_CASES
+    templates.env.globals["catalog"] = evergreen.CATALOG
     templates.env.globals["snippets"] = snippets
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
     templates.env.globals["auths"] = enrollment.AUTHS
@@ -294,6 +295,40 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         store.set_default_connection(connection_id)
         return RedirectResponse("/settings", status_code=303)
 
+    @app.get("/settings/connections/{connection_id}/profiles")
+    async def shared_profiles(request: Request, connection_id: int):
+        """Loaded lazily per connection: which shared profiles exist in that account (read only)."""
+        conn = connection_or_404(connection_id)
+        client = client_for(connection_id=conn["id"])
+        try:
+            status, error = await client.shared_profile_status(), None
+        except DTMError as exc:
+            status, error = {}, str(exc)
+        finally:
+            await client.aclose()
+        return render(request, "_shared_profiles.html", connection=_public(conn), status=status, error=error,
+                      busy=account_in_use(conn))
+
+    def account_in_use(conn: dict) -> bool:
+        """Shared profiles belong to the account – any connection to it with open runs counts."""
+        return any(in_use(c["id"]) for c in store.connections()
+                   if (c["host"], c["account_id"]) == (conn["host"], conn["account_id"]))
+
+    @app.post("/settings/connections/{connection_id}/profiles/retire")
+    async def retire_profiles(request: Request, connection_id: int):
+        conn = connection_or_404(connection_id)
+        if account_in_use(conn):  # its runs may still issue or renew with these profiles
+            raise HTTPException(409, "Roll back the runs of this connection before retiring its shared profiles")
+        client = client_for(connection_id=conn["id"])
+        try:
+            status, error = await client.retire_shared_profiles(), None
+            log.info("retired shared profiles in connection %s", conn["name"])
+        except DTMError as exc:
+            status, error = {}, f"Retiring failed: {exc}"
+        finally:
+            await client.aclose()
+        return render(request, "_shared_profiles.html", connection=_public(conn), status=status, error=error, busy=False)
+
     @app.post("/settings/connections/{connection_id}/delete")
     async def delete_connection(connection_id: int):
         conn = connection_or_404(connection_id)
@@ -306,36 +341,44 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     async def use_case_catalog(request: Request, connection: str | None = None):
         connections = store.connections()
         selected = selected_connection(connection)["id"] if connections else None
-        return render(request, "run_catalog.html", use_cases=USE_CASES, connections=[_public(c) for c in connections],
+        return render(request, "run_catalog.html", connections=[_public(c) for c in connections],
                       selected=selected)
 
     @app.get("/runs/new/{use_case}")
     async def new_run(request: Request, use_case: str, connection: str | None = None):
-        if use_case not in USE_CASES:
+        if use_case in ("uc01", "uc02", "uc03"):  # old links: these are answers of the guide now
+            query = f"?{urlencode({'connection': connection})}" if connection else ""
+            return RedirectResponse(f"/runs/new/evergreen{query}", status_code=303)
+        if use_case not in evergreen.CATALOG:
             raise HTTPException(404, "Unknown use case")
         conn = selected_connection(connection)
         client = client_for(connection_id=conn["id"])
         try:
-            cas, profiles = await client.issuing_cas(), await client.certificate_profiles()
+            cas, profile_status = await client.issuing_cas(), await client.shared_profile_status()
         except DTMError as exc:
             return render(request, "error.html", 502, message=f"Could not load data from DTM: {exc}")
         finally:
             await client.aclose()
-        return render(request, "run_new.html", use_case=USE_CASES[use_case], use_case_id=use_case, cas=cas,
-                      profiles=profiles, connection=_public(conn), several=len(store.connections()) > 1,
+        return render(request, "run_new.html", use_case=evergreen.CATALOG[use_case], use_case_id=use_case, cas=cas,
+                      profile_status=profile_status, connection=_public(conn), several=len(store.connections()) > 1,
                       max_batch=evergreen.MAX_BATCH,
-                      max_requests=enrollment.MAX_REQUESTS,
                       default_run_id=new_run_id())
 
     @app.post("/runs")
-    async def create_run(request: Request, run_id: str = Form(""), variant: str = Form(...),
+    async def create_run(request: Request, run_id: str = Form(""), variant: str = Form("api"),
                          mode: str = Form(...), count: int = Form(10), ca_id: str = Form(...),
-                         profile_id: str = Form(...), approval: bool = Form(False),
+                         approval: bool = Form(False),
                          use_case: str = Form("uc01"), connection_id: str = Form(""),
-                         protocol: str = Form(""), auth_method: str = Form("")):
+                         protocol: str = Form(""), auth_method: str = Form(""), key_location: str = Form("")):
         run_id = run_id.strip().lower() or new_run_id()
+        if use_case == "evergreen":
+            if key_location not in ("server", "factory") or mode not in ("single", "batch"):
+                raise HTTPException(400, "Answer where the key is generated and how many devices.")
+            use_case, protocol, auth_method = evergreen.resolve_guide(key_location, mode, protocol, auth_method)
         if use_case not in USE_CASES:
             raise HTTPException(400, "Unknown use case")
+        if mode == "single":  # a single device is exactly one certificate
+            count = 1
         enrolled = use_case in ("uc03", "uc04")  # both run on the enrollment engine
         if use_case == "uc04":  # one device via EST; renewal later per click
             protocol, count = "est", 1
@@ -343,14 +386,15 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             variant, mode, approval = "api", "single", False
             # Checked before DTM is asked for anything.
             if protocol not in enrollment.PROTOCOLS or auth_method not in enrollment.AUTHS:
-                raise HTTPException(400, "Select an enrollment protocol and an authentication method.")
-            if not 1 <= count <= enrollment.MAX_REQUESTS:
-                raise HTTPException(400, f"Number of requests: 1–{enrollment.MAX_REQUESTS}.")
+                raise HTTPException(400, "An API key works only with the REST API." if auth_method == "apikey"
+                                    else "Select an enrollment protocol and an authentication method.")
+            if protocol == "scep" and auth_method != "passcode":
+                raise HTTPException(400, "SCEP authenticates with a passcode (challenge password).")
+            count = 1
         conn = selected_connection(connection_id)
         client = client_for(connection_id=conn["id"])
         try:
             cas = {c["id"]: c for c in await client.issuing_cas()}
-            profiles = {p["id"]: p for p in await client.certificate_profiles()}
         except DTMError as exc:
             raise HTTPException(502, f"Could not load data from DTM: {exc}") from exc
         finally:
@@ -366,11 +410,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             error = f"Number of certificates: 1–{evergreen.MAX_BATCH}."
         elif ca_id not in cas or cas[ca_id]["key_type"] not in evergreen.KEY_TYPES:
             error = "Select an issuing CA of this account."
-        elif profile_id not in profiles:
-            error = "Select a certificate profile."
-        elif use_case == "uc04" and not profiles[profile_id]["renew_anytime"]:
-            error = ("This certificate profile does not allow renewing a valid certificate at any time – "
-                     "choose one with 'Renew valid certificate: anytime'.")
+        elif protocol == "scep" and cas[ca_id]["key_type"] != "rsa":
+            error = "SCEP needs an RSA issuing CA (with 'Allow CA to decrypt and sign SCEP packets')."
         if error:
             raise HTTPException(400, error)
         ca = cas[ca_id]
@@ -381,7 +422,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                   "dtm_host": conn["host"], "account_id": conn["account_id"],
                   "variant": variant, "mode": mode, "count": count,
                   "ca_id": ca_id, "ca_name": ca["name"], "key_type": evergreen.KEY_TYPES[ca["key_type"]],
-                  "profile_id": profile_id, "approval": approval and mode == "batch" and variant == "api"}
+                  "approval": approval and mode == "batch" and variant == "api"}
         if enrolled:
             params |= {"protocol": protocol, "auth": auth_method}
         # A reused run ID must not inherit files of a deleted run (e.g. an old batch.zip).

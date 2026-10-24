@@ -343,6 +343,11 @@ article.card.focus { border-top: 3px solid var(--dc-blue); }
 input.medium { display: block; max-width: 20rem; }
 input[type="number"].short { display: block; max-width: 9rem; margin-top: var(--s1); }
 .seg-label { display: block; margin-bottom: var(--s1); }
+[data-when][hidden] { display: none !important; }
+.shared-profiles-toggle { margin: var(--s1) 0 0; }
+.shared-profiles-toggle > summary { cursor: pointer; }
+ul.plain { list-style: none; padding: 0; margin: var(--s1) 0 var(--s2); font-size: 0.82rem; }
+ul.plain li { list-style: none; margin: 0 0 var(--s1); }
 .seg-group { margin-bottom: var(--s3); }
 
 /* ---- Phase stepper (run page, onboarding) ---- */

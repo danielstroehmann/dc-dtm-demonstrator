@@ -82,8 +82,9 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - Design phase 2026-10-23; **implementation of v0.1 started 2026-10-23** (UC-1, UC-2, installer,
   login, cleanup). Further use cases stay in design until the author starts them.
 - UC-1 and UC-2 share `app/evergreen.py`; `uc01`/`uc02` stay the IDs in run data and object names.
-- UC-3 (`uc03`, enrollment protocols EST/CMPv2/REST) lives in `app/enrollment.py`; CMPv2 uses `openssl cmp`
-  and one shared `robot-uc03-cmp-profile` per account that is never deleted (DTM refuses it).
+- UC-3 (`uc03`, enrollment protocols EST/CMPv2/REST) lives in `app/enrollment.py`; CMPv2 uses `openssl cmp`.
+- UC-1..UC-3 are offered as one guided entry (`evergreen.resolve_guide`). Certificate profiles are shared per
+  account and never deleted (DTM refuses it) – see `docs/design/05-guide-and-shared-profiles.md`.
 - UC-4 (`uc04`, one device: EST enrollment + renewal in the field per click) also runs on
   `app/enrollment.py` (`renew`); the simulated device's key lives in the run dir until the rollback.
 

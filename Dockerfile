@@ -2,6 +2,9 @@ FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data
 WORKDIR /srv
+# scep: scepclient (micromdm) for SCEP enrollment – no Python SCEP client of good standing exists.
+RUN apt-get update && apt-get install -y --no-install-recommends scep && rm -rf /var/lib/apt/lists/* \
+ && rm -f /usr/bin/scepserver
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
  && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin app \

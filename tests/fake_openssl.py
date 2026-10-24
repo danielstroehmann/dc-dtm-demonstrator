@@ -38,6 +38,7 @@ def fail(message: str) -> None:
     save()
     print("Warning: fake openssl warning line", file=sys.stderr)
     print(f"CMP error: {message}", file=sys.stderr)
+    print("cmp_main: error while running the CMP client", file=sys.stderr)  # a trailing generic line
     sys.exit(1)
 
 
@@ -64,8 +65,8 @@ def main() -> None:
 
     if argv[:1] != ["cmp"] or options.get("-cmd") != "ir":
         fail("only 'cmp -cmd ir' is modelled")
-    if config.get("fail"):
-        fail(config["fail"])
+    if config.get("fail"):  # "{secret}" echoes the MAC secret, as a careless server message might
+        fail(config["fail"].replace("{secret}", os.environ.get("CMP_SECRET", "")))
     secret = options.get("-secret", "")
     mac = "-ref" in options and secret.startswith("env:") and os.environ.get(secret[4:])
     signature = "-cert" in files and "-key" in files

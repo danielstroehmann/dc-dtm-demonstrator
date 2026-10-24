@@ -102,17 +102,60 @@ def test_enrollment_policy_body(protocol, method):
     assert "batch_request_parameters" not in policy
 
 
-def test_bare_key_profile_body_replaces_only_the_csr_entry():
-    base = {"certificate_template": {"id": "tpl"}, "name": "Base", "id": "p1",
-            "body": [{"key": "subject.common_name", "sources": ["user_supplied"]},
-                     {"key": "csr", "sources": ["user_supplied"], "optional": True}]}
-    body = dtm.bare_key_profile_body(base, "robot-uc03-cmp-profile", "acc")
-    assert body["name"] == "robot-uc03-cmp-profile" and body["account_id"] == "acc"
+BASE_PROFILE = {"certificate_template": {"id": "tpl"}, "name": "Base", "id": "p1", "body": [
+    {"key": "subject.common_name", "sources": ["user_supplied"]},
+    {"key": "csr", "sources": ["user_supplied"], "optional": True},
+    {"key": "validity.duration_unit", "value": "years", "enabled": False},
+    {"key": "validity.duration_value", "value": 1, "enabled": False}]}
+
+
+def test_shared_profile_body_sets_validity_and_keeps_the_rest():
+    body = dtm.shared_profile_body(BASE_PROFILE, dtm.PROFILE_EVERGREEN, "acc")
+    assert body["name"] == "robot-evergreen-5y-profile" and body["account_id"] == "acc"
     assert body["certificate_template_id"] == "tpl" and body["divisions"] == []
-    assert body["body"] == [{"key": "subject.common_name", "sources": ["user_supplied"]},
-                            {"key": "csr", "optional": False, "enabled": True,
-                             "sources": ["user_supplied", "allow_bare_public_key"], "value": None}]
-    assert base["body"][1] == {"key": "csr", "sources": ["user_supplied"], "optional": True}  # base untouched
+    entries = {e["key"]: e for e in body["body"]}
+    assert entries["validity.duration_unit"] == {"key": "validity.duration_unit", "value": "years", "enabled": True}
+    assert entries["validity.duration_value"]["value"] == 5 and entries["validity.duration_value"]["enabled"] is True
+    assert entries["subject.common_name"] == {"key": "subject.common_name", "sources": ["user_supplied"]}
+    assert "csr" not in entries  # only the CMPv2 profile carries a (bare-key) csr entry
+    assert "renewal_settings.renew_valid_cert" not in entries
+    assert BASE_PROFILE["body"][2]["value"] == "years" and BASE_PROFILE["body"][3]["value"] == 1  # base untouched
+
+
+def test_shared_profile_body_for_cmp_and_renewal():
+    cmp_body = {e["key"]: e for e in dtm.shared_profile_body(BASE_PROFILE, dtm.PROFILE_EVERGREEN_CMP, "a")["body"]}
+    assert cmp_body["csr"] == {"key": "csr", "optional": False, "enabled": True,
+                               "sources": ["user_supplied", "allow_bare_public_key"], "value": None}
+    renewal = {e["key"]: e for e in dtm.shared_profile_body(BASE_PROFILE, dtm.PROFILE_RENEWAL, "a")["body"]}
+    assert (renewal["validity.duration_unit"]["value"], renewal["validity.duration_value"]["value"]) == ("months", 6)
+    # an entry the base did not have is added as a fixed value
+    assert renewal["renewal_settings.renew_valid_cert"] == {"key": "renewal_settings.renew_valid_cert",
+                                                            "optional": False, "enabled": True,
+                                                            "sources": ["fixed_value"], "value": "anytime"}
+    bare = {"certificate_template": {"id": "t"}, "body": []}  # validity entries missing entirely
+    added = {e["key"]: e["value"] for e in dtm.shared_profile_body(bare, dtm.PROFILE_EVERGREEN, "a")["body"]}
+    assert added == {"validity.duration_unit": "years", "validity.duration_value": 5}
+
+
+@pytest.mark.parametrize("unit,value,bare,renew,spec,expected", [
+    ("years", 5, False, None, dtm.PROFILE_EVERGREEN, True),
+    ("Years", "5", False, None, dtm.PROFILE_EVERGREEN, True),          # DTM may send strings / capitals
+    ("years", 1, False, None, dtm.PROFILE_EVERGREEN, False),           # e.g. capped by the template
+    ("months", 5, False, None, dtm.PROFILE_EVERGREEN, False),
+    (None, None, False, None, dtm.PROFILE_EVERGREEN, False),           # no validity at all
+    ("years", 5, False, None, dtm.PROFILE_EVERGREEN_CMP, False),       # bare key missing
+    ("years", 5, True, None, dtm.PROFILE_EVERGREEN_CMP, True),
+    ("months", 6, False, "dont_allow", dtm.PROFILE_RENEWAL, False),
+    ("months", 6, False, "anytime", dtm.PROFILE_RENEWAL, True),
+    ("months", 6, True, "anytime", dtm.PROFILE_EVERGREEN, False),      # other purpose
+])
+def test_profile_matches(unit, value, bare, renew, spec, expected):
+    body = []
+    if unit is not None:
+        body += [{"key": "validity.duration_unit", "value": unit}, {"key": "validity.duration_value", "value": value}]
+    if renew is not None:
+        body.append({"key": "renewal_settings.renew_valid_cert", "value": renew})
+    assert dtm._profile_matches({"body": body, "allow_bare_public_key": bare}, spec) is expected
 
 
 # --- station input checks ----------------------------------------------------------------------
@@ -161,7 +204,7 @@ async def test_station_hosts_and_files(tmp_path):
 
 # --- copyable commands: string level -----------------------------------------------------------
 
-COMBOS = [(p, a) for p in enrollment.PROTOCOLS for a in enrollment.AUTHS]
+COMBOS = [(p, a) for p in enrollment.PROTOCOLS for a in enrollment.AUTHS if not (p == "scep" and a == "certificate")]
 
 
 def steps_of(protocol, auth, cn="robot-x1-uc03-dev-0001", key_type="P_256"):
@@ -182,7 +225,8 @@ def test_enroll_steps_structure(protocol, auth):
     call = steps[setup + 1]
     assert call["path"] == {"rest": enrollment.REST_PATH,
                             "est": "/.well-known/est/devicetrustmanager/{POLICY_ID}/simpleenroll",
-                            "cmpv2": enrollment.CMP_PATH.format(alternative_id="{CMP_ID}")}[protocol]
+                            "cmpv2": enrollment.CMP_PATH.format(alternative_id="{CMP_ID}"),
+                            "scep": enrollment.SCEP_PATH.format(alternative_id="{CMP_ID}")}[protocol]
     if setup:
         setup_bash = steps[0]["command"]["bash"]
         if protocol == "cmpv2":
@@ -204,7 +248,12 @@ def test_enroll_steps_carry_no_secret_and_the_right_auth(protocol, auth):
         ps = shell == "powershell"
         if auth == "passcode":  # always a variable the user sets
             assert ("$env:PASSCODE" if ps else "${PASSCODE") in text
-        if protocol == "cmpv2":
+        if protocol == "scep":
+            assert [line for line in text.splitlines() if not line.startswith("#")][0].startswith("scepclient ")
+            assert "clientauth." not in text and "/scep/DIOT_" in text and "-certificate device.crt" in text
+            assert ("-challenge $env:PASSCODE" if ps else '-challenge "${PASSCODE}"') in text
+            assert '-organization "dc-dtm-demonstrator" -ou "Factory"' in text
+        elif protocol == "cmpv2":
             assert "clientauth." not in text and "DIOT_" in text and "-certout device.crt" in text
             assert ("-ref " in text and "-secret env:PASSCODE" in text) == (auth == "passcode")
             assert ("-extracerts factory.crt -trusted ca-chain.pem" in text) == (auth == "certificate")
@@ -223,10 +272,15 @@ def test_enroll_steps_carry_no_secret_and_the_right_auth(protocol, auth):
 
 @pytest.mark.parametrize("key_type,expected,other", [("P_256", "P-256", "rsa"), ("RSA_2048", "rsa", "P-256")])
 def test_enroll_steps_key_type(key_type, expected, other):
-    for protocol in enrollment.PROTOCOLS:
+    for protocol in ("est", "cmpv2", "rest"):  # SCEP always uses RSA (see test_scep_keygen_is_rsa_pkcs1)
         keygen = next(s for s in steps_of(protocol, "passcode", key_type=key_type) if s["kind"] == "keygen")
         bash = keygen["command"]["bash"]
         assert expected in bash and other not in bash
+
+
+def test_scep_keygen_is_rsa_pkcs1():
+    keygen = next(s for s in steps_of("scep", "passcode", key_type="RSA_2048") if s["kind"] == "keygen")
+    assert keygen["command"]["bash"] == "openssl genrsa -traditional -out device.key 2048"
 
 
 # --- copyable commands: executed in bash -------------------------------------------------------

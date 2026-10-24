@@ -8,68 +8,57 @@ from cryptography import x509
 
 from app import enrollment
 from tests.component.test_web_runs import cleaned, finished, form
-from tests.fakedtm import ECDSA_CA_ID, PROFILE_ID
+from tests.fakedtm import ECDSA_CA_ID, RSA_CA_ID
 
 
 def uc03_form(**overrides) -> dict:
-    return {"run_id": "e1", "use_case": "uc03", "protocol": "est", "auth_method": "passcode", "count": "2",
-            "variant": "api", "mode": "single", "ca_id": ECDSA_CA_ID, "profile_id": PROFILE_ID} | overrides
+    """A direct UC-3 post (old clients / tests); the guide resolves to the same parameters."""
+    return {"run_id": "e1", "use_case": "uc03", "protocol": "est", "auth_method": "passcode", "count": "1",
+            "variant": "api", "mode": "single", "ca_id": ECDSA_CA_ID} | overrides
 
 
 def management_writes(fake) -> list[str]:
     return [name for name in fake.route_order() if name not in ("cas", "profiles")]
 
 
-# --- form --------------------------------------------------------------------------------------
+# --- form (UC-3 lives in the guide now: tests/component/test_web_guide.py) -----------------------
 
-def test_uc03_form(configured_user, fake):
-    html = configured_user.get("/runs/new/uc03").text
-    assert "<h3>Enrollment</h3>" in html and "<h3>Issuance</h3>" not in html
-    radios = re.findall(r'<input type="radio" name="protocol" value="([^"]+)" ?(checked)?', html)
-    assert radios == [("est", "checked"), ("cmpv2", ""), ("rest", "")]
-    auths = re.findall(r'<input type="radio" name="auth_method" value="([^"]+)" ?(checked)?', html)
-    assert auths == [("passcode", "checked"), ("certificate", "")]
-    assert '<input type="number" name="count" class="short" value="1" min="1" max="10">' in html
-    assert '<input type="hidden" name="variant" value="api">' in html
-    assert '<input type="hidden" name="mode" value="single">' in html
-    assert 'name="approval"' not in html
-    assert f'data-tip="CMPv2 uses the shared profile {enrollment.CMP_PROFILE}' in html
+def test_uc03_link_goes_to_the_guide(configured_user, fake):
+    response = configured_user.get("/runs/new/uc03", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/new/evergreen"
     assert management_writes(fake) == []
-
-
-def test_other_forms_have_no_enrollment_section(configured_user):
-    for use_case in ("uc01", "uc02"):
-        html = configured_user.get(f"/runs/new/{use_case}").text
-        assert 'name="protocol"' not in html and 'name="auth_method"' not in html and 'name="approval"' in html
 
 
 # --- run creation ------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("overrides,message", [
-    ({"count": "0"}, "Number of requests: 1–10."),
-    ({"count": "11"}, "Number of requests: 1–10."),
-    ({"count": "-1"}, "Number of requests: 1–10."),
-    ({"protocol": "scep"}, "Select an enrollment protocol and an authentication method."),
     ({"protocol": ""}, "Select an enrollment protocol and an authentication method."),
     ({"protocol": "EST"}, "Select an enrollment protocol and an authentication method."),
+    ({"protocol": "acme"}, "Select an enrollment protocol and an authentication method."),
     ({"auth_method": "basic"}, "Select an enrollment protocol and an authentication method."),
     ({"auth_method": ""}, "Select an enrollment protocol and an authentication method."),
+    ({"auth_method": "apikey"}, "An API key works only with the REST API."),
+    ({"protocol": "scep"}, "SCEP needs an RSA issuing CA"),
+    ({"protocol": "scep", "auth_method": "certificate", "ca_id": RSA_CA_ID},
+     "SCEP authenticates with a passcode (challenge password)."),
 ])
 def test_uc03_validation(configured_user, store, fake, overrides, message):
     response = configured_user.post("/runs", data=uc03_form(**overrides), follow_redirects=False)
     assert response.status_code == 400 and message in response.text
     assert store.list_runs() == []
-    assert management_writes(fake) == []  # only the read-only CA/profile lookups ran
+    assert management_writes(fake) == []  # at most the read-only CA lookup ran
 
 
-def test_uc03_count_limit_is_not_the_batch_limit(configured_user, store):
-    """UC-3 caps at 10 requests – a value valid for UC-1 batches is refused."""
-    response = configured_user.post("/runs", data=uc03_form(count="500"), follow_redirects=False)
-    assert response.status_code == 400 and store.list_runs() == []
+def test_uc03_count_is_always_one(configured_user, store, enroll_net):
+    for i, count in enumerate(("0", "11", "500")):
+        assert configured_user.post("/runs", data=uc03_form(run_id=f"n{i}", count=count),
+                                    follow_redirects=False).status_code == 303
+        assert finished(store, f"n{i}")["params"]["count"] == 1
+    assert len(enroll_net.issued()) == 3
 
 
 def test_uc03_run_through_the_web(configured_user, store, enroll_net):
-    # variant/mode/approval from the form are ignored: UC-3 is API-only, sequential, no approval
+    # variant/mode/approval from the form are ignored: UC-3 is API-only, one device, no approval
     data = uc03_form(variant="webui", mode="batch", approval="true", protocol="rest", auth_method="certificate")
     response = configured_user.post("/runs", data=data, follow_redirects=False)
     assert response.status_code == 303 and response.headers["location"] == "/runs/e1"
@@ -78,13 +67,24 @@ def test_uc03_run_through_the_web(configured_user, store, enroll_net):
     assert run["use_case"] == "uc03"
     p = run["params"]
     assert (p["variant"], p["mode"], p["approval"], p["protocol"], p["auth"], p["count"]) == (
-        "api", "single", False, "rest", "certificate", 2)
-    assert len(enroll_net.issued()) == 2 and enroll_net.violations == []
+        "api", "single", False, "rest", "certificate", 1)
+    assert len(enroll_net.issued()) == 1 and enroll_net.violations == []
     html = configured_user.get("/runs/e1").text
-    assert "REST API · Factory certificate · 2 requests" in html
+    assert "REST API · Factory certificate · 1 request ·" in html
     assert "1,000 devices ≈" in html and f'{run["result"]["estimate_min"]} min' in html
     assert "<summary>First enrollment</summary>" in html
     assert "Upload done" not in html
+
+
+def test_uc03_scep_through_the_web(configured_user, store, enroll_net, scep_client):
+    response = configured_user.post("/runs", data=uc03_form(protocol="scep", ca_id=RSA_CA_ID), follow_redirects=False)
+    assert response.status_code == 303
+    run = finished(store, "e1")
+    assert run["status"] == "completed", run["error"]
+    assert "SCEP · Passcode · 1 request ·" in configured_user.get("/runs/e1").text
+    passcode = enroll_net.active_auth("passcode")[0]["body"]["passcode"]
+    for path in ("/runs/e1", "/runs/e1/timeline", "/runs/e1/api?dialect=curl", "/runs/e1/api?dialect=powershell"):
+        assert passcode not in configured_user.get(path).text
 
 
 def test_uc03_single_request_wording(configured_user, store, enroll_net):
@@ -107,8 +107,10 @@ def test_uc03_failed_run_page_shows_the_error_without_secret(configured_user, st
 
 
 @pytest.mark.parametrize("protocol", list(enrollment.PROTOCOLS))
-def test_uc03_api_tab_renders_for_every_protocol(configured_user, store, enroll_net, cmp_openssl, protocol):
-    configured_user.post("/runs", data=uc03_form(protocol=protocol, count="1"))
+def test_uc03_api_tab_renders_for_every_protocol(configured_user, store, enroll_net, cmp_openssl, scep_client,
+                                                 protocol):
+    extra = {"ca_id": RSA_CA_ID} if protocol == "scep" else {}
+    configured_user.post("/runs", data=uc03_form(protocol=protocol, **extra))
     assert finished(store, "e1")["status"] == "completed"
     for dialect in ("curl", "wget", "powershell"):
         response = configured_user.get(f"/runs/e1/api?dialect={dialect}")
@@ -156,7 +158,7 @@ def test_pem_download_happy_path(configured_user, store, data_dir):
 def test_pem_download_for_uc03(configured_user, store, enroll_net):
     configured_user.post("/runs", data=uc03_form())
     run = finished(store, "e1")
-    (link, _second) = pem_links(configured_user.get("/runs/e1").text)
+    (link,) = pem_links(configured_user.get("/runs/e1").text)
     response = configured_user.get(link)
     assert response.status_code == 200
     assert x509.load_pem_x509_certificate(response.content).serial_number == int(

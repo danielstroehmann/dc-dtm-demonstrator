@@ -25,8 +25,9 @@ AUTH = "/devicetrustmanager/authentication-service/api/v1"
 # Ledger kind → authentication-service collection (UC-3). Deleted objects stay as status DELETED.
 AUTH_KINDS = {"auth_certificate": "authentication-certificate", "passcode": "passcode",
               "auth_policy": "authentication-policy"}
+_profile_lock = asyncio.Lock()
 # Enrollment protocol (UC-3) → certificate management method of the policy.
-ENROLLMENT_METHODS = {"est": "EST", "cmpv2": "CMP_V2", "rest": "SINGLE"}
+ENROLLMENT_METHODS = {"est": "EST", "cmpv2": "CMP_V2", "scep": "SCEP", "rest": "SINGLE"}
 
 
 class DTMError(RuntimeError):
@@ -87,14 +88,59 @@ def enrollment_policy_body(*, name: str, division_id: str, profile_id: str, ica_
     return {"certificate_policy": body}
 
 
-def bare_key_profile_body(base: dict, name: str, account_id: str) -> dict:
-    """Copy of a profile that accepts a bare public key – what CMPv2 sends instead of a CSR. The
-    flag is not a field but a source of the `csr` body entry (found via the portal, not in the spec)."""
-    body = [e for e in base["body"] if e["key"] != "csr"]
-    body.append({"key": "csr", "optional": False, "enabled": True,
-                 "sources": ["user_supplied", "allow_bare_public_key"], "value": None})
-    return {"name": name, "account_id": account_id, "certificate_template_id": base["certificate_template"]["id"],
+@dataclass(frozen=True)
+class ProfileSpec:
+    """A shared, reused certificate profile per account and purpose. DTM refuses to delete a profile
+    that a (deleted) policy referenced, so per-run profiles would pile up – these are created once,
+    found by name later and never deleted (the only accepted residue)."""
+    name: str
+    unit: str  # validity.duration_unit, e.g. "years", "months"
+    value: int
+    bare_key: bool = False  # CMPv2 sends a bare public key instead of a CSR
+    renew_anytime: bool = False  # UC-4 renews a fresh certificate on click
+
+
+# The validity is part of the name: a release that changes it creates a new profile instead of
+# altering one that other installations may rely on.
+PROFILE_EVERGREEN = ProfileSpec("robot-evergreen-5y-profile", "years", 5)
+PROFILE_EVERGREEN_CMP = ProfileSpec("robot-evergreen-cmp-5y-profile", "years", 5, bare_key=True)
+PROFILE_RENEWAL = ProfileSpec("robot-renewal-6m-profile", "months", 6, renew_anytime=True)
+SHARED_PROFILES = (PROFILE_EVERGREEN, PROFILE_EVERGREEN_CMP, PROFILE_RENEWAL)
+
+
+def shared_profile_body(base: dict, spec: ProfileSpec, account_id: str) -> dict:
+    """Copy of a base profile with the purpose's validity. The bare-key flag is not a field but a
+    source of the `csr` body entry (found via the portal, not in the spec)."""
+    values = {"validity.duration_unit": spec.unit, "validity.duration_value": spec.value}
+    if spec.renew_anytime:
+        values["renewal_settings.renew_valid_cert"] = "anytime"
+    body = []
+    for entry in base["body"]:
+        if entry["key"] == "csr":
+            continue
+        entry = dict(entry)
+        if entry["key"] in values:
+            entry |= {"value": values.pop(entry["key"]), "enabled": True}
+        body.append(entry)
+    body += [{"key": key, "optional": False, "enabled": True, "sources": ["fixed_value"], "value": value}
+             for key, value in values.items()]  # entries the base profile did not have
+    if spec.bare_key:
+        body.append({"key": "csr", "optional": False, "enabled": True,
+                     "sources": ["user_supplied", "allow_bare_public_key"], "value": None})
+    return {"name": spec.name, "account_id": account_id, "certificate_template_id": base["certificate_template"]["id"],
             "body": body, "divisions": [], "certificate_type": "end_entity", "ca_connector_type": "digicert_one"}
+
+
+LEGACY_PROFILES = ("robot-uc03-cmp-profile",)  # names of earlier releases – retired with the shared ones
+INACTIVE = ("DISABLED", "INACTIVE")
+
+
+def _profile_matches(profile: dict, spec: ProfileSpec) -> bool:
+    body = {e.get("key"): e.get("value") for e in profile.get("body") or [] if isinstance(e, dict)}
+    return (str(body.get("validity.duration_unit", "")).lower() == spec.unit
+            and str(body.get("validity.duration_value")) == str(spec.value)
+            and (not spec.bare_key or bool(profile.get("allow_bare_public_key")))
+            and (not spec.renew_anytime or _renew_anytime(profile)))
 
 
 def single_body(policy_id: str, common_name: str, csr: str | None = None) -> dict:
@@ -205,11 +251,6 @@ class DTMClient:
             and any(a.get("id") == self.config.account_id for a in ca.get("account_assignments", []))
         ]
 
-    async def certificate_profiles(self) -> list[dict]:
-        items = await self._list("/devicetrustmanager/certificate-configuration-service/api/v1/certificate-profile")
-        return [{"id": p["id"], "name": p["name"], "renew_anytime": _renew_anytime(p)}
-                for p in items if p.get("status") == "ACTIVE"]
-
     async def rendezvous_zone(self) -> str:
         zones = await self._list("/devicetrustmanager/api/v4/rendezvous-zone")
         enabled = sorted((z for z in zones if z.get("status") == "ENABLED"), key=lambda z: z["name"])
@@ -312,22 +353,74 @@ class DTMClient:
             raise DTMError(f"{kind} {object_id} still {_json(check).get('status')} after delete "
                            f"({response.status_code})")
 
-    async def bare_key_profile(self, name: str, base_profile_id: str) -> tuple[str, bool]:
-        """The account's shared CMPv2 profile: found by name, else created from the base profile.
-        It is never deleted – DTM refuses to delete a profile a (deleted) policy referenced.
-        Returns (id, created)."""
-        for record in await self._list(PROFILES):
-            if record.get("name") == name and record.get("status") == "ACTIVE":
-                if record.get("account_id") != self.config.account_id or not record.get("allow_bare_public_key"):
-                    raise DTMError(f"profile {name} exists but does not allow bare public keys in this account – "
-                                   "fix or rename it in the DTM portal")
-                return record["id"], False
-        base = _json(await self._request("GET", f"{PROFILES}/{base_profile_id}"))
-        data = _json(await self._request("POST", PROFILES, expect=(200, 201),
-                                         json=bare_key_profile_body(base, name, self.config.account_id)))
-        if not data.get("allow_bare_public_key"):
-            raise DTMError("DTM did not enable bare public keys on the CMPv2 profile")
-        return data["id"], True
+    async def _profiles(self) -> list[dict]:
+        return [r for r in await self._list(PROFILES) if isinstance(r, dict)]
+
+    def _ours(self, records: list[dict], name: str) -> dict | None:
+        """Our record of that name in this account – ACTIVE before inactive, deleted ones ignored."""
+        mine = [r for r in records if r.get("name") == name and r.get("account_id") == self.config.account_id
+                and (r.get("status") == "ACTIVE" or r.get("status") in INACTIVE)]
+        return next((r for r in mine if r.get("status") == "ACTIVE"), mine[0] if mine else None)
+
+    async def shared_profile_status(self) -> dict[str, str]:
+        """Read only: status of each shared profile in this account ("ACTIVE", "DISABLED" or "missing")."""
+        records = await self._profiles()
+        names = [spec.name for spec in SHARED_PROFILES]
+        names += [n for n in LEGACY_PROFILES if (self._ours(records, n) or {}).get("status") == "ACTIVE"]  # shown only while active
+        return {name: (lambda r: "missing" if not r else "ACTIVE" if r["status"] == "ACTIVE" else "DISABLED")(
+            self._ours(records, name)) for name in names}
+
+    async def retire_shared_profiles(self) -> dict[str, str]:
+        """Disable the shared (and legacy) profiles of this account – DTM does not allow deleting used
+        profiles; a later run that needs one enables it again. Returns the new status."""
+        async with _profile_lock:
+            records = await self._profiles()
+            for name in [s.name for s in SHARED_PROFILES] + list(LEGACY_PROFILES):
+                record = self._ours(records, name)
+                if record and record["status"] == "ACTIVE":
+                    await self._request("PUT", f"{PROFILES}/{record['id']}/disable", json={}, expect=(200, 204))
+                    record["status"] = "DISABLED"
+            return {spec.name: "DISABLED" if self._ours(records, spec.name) else "missing" for spec in SHARED_PROFILES}
+
+    async def shared_profile(self, spec: ProfileSpec) -> tuple[str, str]:
+        """The account's profile for this purpose: found by name (enabled again if it was retired),
+        else copied once from a base profile of the account (preferably the basic client profile).
+        Returns (id, "used" | "enabled" | "created")."""
+        async with _profile_lock:  # two runs at once must not both create it – it can never be deleted
+            for attempt in (1, 2):
+                records = await self._profiles()
+                found = self._ours(records, spec.name)
+                if found:
+                    if not _profile_matches(found, spec):
+                        raise DTMError(f"profile {spec.name} exists with other settings – fix or rename it in the "
+                                       "DTM portal")
+                    if found["status"] != "ACTIVE":
+                        await self._request("PUT", f"{PROFILES}/{found['id']}/enable", json={}, expect=(200, 204))
+                        return found["id"], "enabled"
+                    return found["id"], "used"
+                if attempt == 2:
+                    break
+                bases = [r for r in records if r.get("status") == "ACTIVE" and r.get("id") and r.get("account_id")
+                         in (None, self.config.account_id) and not str(r.get("name", "")).startswith("robot-")]
+                if not bases:
+                    raise DTMError("the account has no active certificate profile to copy")
+                base = next((r for r in bases if "client" in str(r.get("name", "")).lower()), bases[0])
+                detail = _json(await self._request("GET", f"{PROFILES}/{base['id']}"))
+                if not isinstance(detail.get("certificate_template"), dict) or not isinstance(detail.get("body"), list):
+                    raise DTMError(f"profile {base.get('name')} cannot be copied (no template or body)")
+                response = await self._request("POST", PROFILES, expect=(200, 201, 400, 409),
+                                               json=shared_profile_body(detail, spec, self.config.account_id))
+                if response.status_code in (400, 409):
+                    clash = _error_text(response)
+                    continue  # another installation may have created it meanwhile – look once more
+                data = _json(response)
+                if not _profile_matches(data, spec):
+                    # e.g. the base profile's template caps the validity – never leave a wrong profile active
+                    await self._request("PUT", f"{PROFILES}/{data['id']}/disable", json={}, expect=(200, 204))
+                    raise DTMError(f"DTM did not accept the settings of {spec.name} ({spec.value} {spec.unit}) – the "
+                                   f"template of {base.get('name')} may limit them; the profile was disabled")
+                return data["id"], "created"
+        raise DTMError(f"could not create profile {spec.name}: {clash}")
 
     # issuance
     async def issue_single(self, policy_id: str, common_name: str, csr: str | None = None) -> dict:

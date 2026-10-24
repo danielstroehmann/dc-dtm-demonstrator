@@ -84,6 +84,18 @@ The EST URL is documented as "copy from the policy page" – check whether
 | **Deleted policies are soft-deleted** | `GET …/certificate-policy/{id}` returns `status: DELETED`; the **name stays reserved** ("already exists") → a run ID cannot be reused after rollback (affects UC-1/UC-2 too) |
 | **Profile of a deleted policy cannot be deleted** | *"referenced by a certificate management policy"* even after the policy is deleted → the per-run CMP profile can only be **disabled** (residue: one disabled `robot-…-cmp-profile` per CMPv2 run). The portal refuses the delete with the same error (author, 2026-10-24) – DTM behaviour, to be reported to DigiCert |
 
+## SCEP (verified live 2026-10-24)
+
+- Policy method `SCEP`; the issuing CA must be **RSA** with "Allow CA to decrypt and sign SCEP packets"
+  (the ECDSA ICA is refused: *"Selected ICA cannot be used for enrollment with SCEP method"*).
+- Endpoint `https://<host>/devicetrustmanager/certificate-issuance-service/api/v1/scep/DIOT_<alternative_id>`.
+- Client: `scepclient` (micromdm, Debian package `scep`, in the image); the passcode is the challenge
+  password – argv only, so visible to the container and, via `ps`, to users of the host for about a second
+  (random per run, void after the rollback); RSA device key in PKCS#1. 1.5 s per request.
+- Not yet used: `-ca-fingerprint` (pin the CA returned by GetCACert) – needs one live check which
+  certificate DTM returns; TLS to DTM is verified either way.
+- Factory-certificate authentication for SCEP is not verified – the guide offers the passcode only.
+
 ## Renewal in the field – Essentials (verified live 2026-10-24)
 
 EST policy without device group (Essentials), authentication policy with a passcode only: enrollment with

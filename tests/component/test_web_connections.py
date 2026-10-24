@@ -54,13 +54,14 @@ def test_unknown_connection_is_404(two, value):
 
 
 def test_form_loads_data_from_the_selected_connection(two, fakes):
-    html = two.get(f"/runs/new/uc01?connection={two.ids['NL']}").text
-    assert "NL ECDSA ICA" in html and "Fake ECDSA ICA" not in html and "NL client profile" in html
+    html = two.get(f"/runs/new/evergreen?connection={two.ids['NL']}").text
+    assert "NL ECDSA ICA" in html and "Fake ECDSA ICA" not in html
+    assert fakes[OTHER_ACCOUNT_ID].names("profiles")  # the profile hints come from the selected account
     assert "Connection: <strong>NL</strong>" in html
     assert f'<input type="hidden" name="connection_id" value="{two.ids["NL"]}">' in html
     assert f'href="/runs/new?connection={two.ids["NL"]}">' in html  # breadcrumb keeps the choice
     assert fakes[ACCOUNT_ID].requests == []
-    default = two.get("/runs/new/uc01").text
+    default = two.get("/runs/new/evergreen").text
     assert "Fake ECDSA ICA" in default and "Connection: <strong>US</strong>" in default
 
 
@@ -148,15 +149,15 @@ def test_old_runs_without_connection_id_are_matched_by_account(two, store, fakes
 
 def test_connection_changed_between_form_and_insert_is_409(two, store, fakes, monkeypatch):
     """create_run loads CAs from the connection, then re-checks it right before inserting the run."""
-    original = fakes[OTHER_ACCOUNT_ID]._list_profiles
+    original = fakes[OTHER_ACCOUNT_ID]._list_cas
 
     def change_meanwhile(request):
         conn = store.connection(two.ids["NL"])
         store.save_connection(conn["id"], conn["name"], "eu.example.com", conn["account_id"], conn["api_key"])
         return original(request)
 
-    fakes[OTHER_ACCOUNT_ID].router.routes["profiles"].side_effect = fakes[OTHER_ACCOUNT_ID]._wrap(
-        "profiles", change_meanwhile)
+    fakes[OTHER_ACCOUNT_ID].router.routes["cas"].side_effect = fakes[OTHER_ACCOUNT_ID]._wrap(
+        "cas", change_meanwhile)
     response = two.post("/runs", data=form(connection_id=str(two.ids["NL"])))
     assert response.status_code == 409 and "changed meanwhile" in response.text
     assert store.list_runs() == []

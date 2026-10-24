@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
 {% block title %}New run · DTM Demonstrator{% endblock %}
+{% macro choice(name, label, options, checked) -%}
+<div class="seg-group"><span class="seg-label" id="l-{{ name }}">{{ label }}</span>
+  <div role="radiogroup" aria-labelledby="l-{{ name }}" class="segmented">
+    {% for value, text, when in options %}<label {% if when %}data-when="{{ when }}"{% endif %}><input type="radio" name="{{ name }}" value="{{ value }}" {% if value == checked %}checked{% endif %}> {{ text }}</label>{% endfor %}
+  </div></div>
+{%- endmacro %}
 {% block content %}
+{% set guide = use_case_id == "evergreen" %}
 <nav aria-label="breadcrumb"><ul><li><a href="/runs/new?connection={{ connection.id }}">Use cases</a></li><li>{{ use_case.title }}</li></ul></nav>
 <div class="page-head">
   <div><h1>{{ use_case.title }}</h1>
@@ -9,58 +16,48 @@
   {% if several %}<p>Connection: <strong>{{ connection.name }}</strong> – {{ connection.host }}</p>{% endif %}</div>
 </div>
 <article class="card">
-<form method="post" action="/runs">
+{# The guide shows each question only when it applies (data-when, see app.js); the server resolves
+   the answers to UC-1, UC-2 or UC-3 and checks them again. #}
+<form method="post" action="/runs" {% if guide %}data-guide{% endif %}>
   <input type="hidden" name="use_case" value="{{ use_case_id }}">
   <input type="hidden" name="connection_id" value="{{ connection.id }}">
+  {% if guide %}
   <section class="form-section">
-    <header><h3>Run</h3></header>
+    <header><h3>Keys</h3></header>
     <div class="fields">
-      <label>Run ID
-        <input name="run_id" class="medium" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16" aria-describedby="run-id-help">
-      </label>
-      <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
+      {{ choice("key_location", "Where is the key pair generated?",
+                [("server", "In DTM (server-side)", ""), ("factory", "In the factory", "")], "server") }}
     </div>
   </section>
-  {% if use_case_id in ("uc03", "uc04") %}
   <section class="form-section">
-    <header><h3>Enrollment</h3></header>
+    <header><h3>Issuance</h3></header>
     <div class="fields">
-      {% if use_case_id == "uc03" %}
-      <div class="seg-group"><span class="seg-label" id="l-protocol">Protocol</span>
-        <div role="radiogroup" aria-labelledby="l-protocol" class="segmented">
-          {% for key, label in protocols.items() %}<label><input type="radio" name="protocol" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ label }}</label>{% endfor %}
-        </div></div>
-      {% endif %}
-      <div class="seg-group"><span class="seg-label" id="l-auth">Factory authentication</span>
-        <div role="radiogroup" aria-labelledby="l-auth" class="segmented">
-          {% for key, label in auths.items() %}<label><input type="radio" name="auth_method" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ label }}</label>{% endfor %}
-        </div></div>
-      {% if use_case_id == "uc03" %}
-      <label>Number of requests
-        <input type="number" name="count" class="short" value="1" min="1" max="{{ max_requests }}">
-      </label>
-      <small class="field-help">One after another, each timed – the basis for the extrapolation.</small>
-      {% else %}<input type="hidden" name="protocol" value="est"><input type="hidden" name="count" value="1">{% endif %}
-      <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
+      {{ choice("mode", "How many devices at once?", [("batch", "Batch", ""), ("single", "Single device", "")], "batch") }}
+      <div data-when="mode=batch">
+        <label>Number of certificates
+          <input type="number" name="count" class="short" value="10" min="1" max="{{ max_batch }}">
+        </label>
+      </div>
+      <div data-when="mode=single key_location=factory">
+        {{ choice("protocol", "Protocol", [("rest", "REST API", ""), ("est", "EST", ""), ("cmpv2", "CMPv2", ""),
+                                           ("scep", "SCEP", "")], "rest") }}
+        {{ choice("auth_method", "How does the factory authenticate?",
+                  [("apikey", "API key", "protocol=rest"), ("passcode", "Passcode", ""),
+                   ("certificate", "Factory certificate", "protocol=rest | protocol=est | protocol=cmpv2")], "apikey") }}
+      </div>
+      <div data-when="mode=batch | key_location=server | auth_method=apikey">
+        {{ choice("variant", "Run it", [("api", "Via API (measured)", ""), ("webui", "In the DTM web UI", "")], "api") }}
+      </div>
     </div>
   </section>
   {% else %}
   <section class="form-section">
-    <header><h3>Issuance</h3></header>
+    <header><h3>Enrollment</h3></header>
     <div class="fields">
-      <div class="seg-group"><span class="seg-label" id="l-variant">Variant</span>
-        <div role="radiogroup" aria-labelledby="l-variant" class="segmented">
-          <label><input type="radio" name="variant" value="api" checked> Via API (measured)</label>
-          <label><input type="radio" name="variant" value="webui"> In the DTM web UI</label>
-        </div></div>
-      <div class="seg-group"><span class="seg-label" id="l-mode">Mode</span>
-        <div role="radiogroup" aria-labelledby="l-mode" class="segmented">
-          <label><input type="radio" name="mode" value="batch" checked> Batch</label>
-          <label><input type="radio" name="mode" value="single"> Single certificate</label>
-        </div></div>
-      <label>Number of certificates
-        <input type="number" name="count" class="short" value="10" min="1" max="{{ max_batch }}">
-      </label>
+      {{ choice("auth_method", "How does the factory authenticate?",
+                [("passcode", "Passcode", ""), ("certificate", "Factory certificate", "")], "passcode") }}
+      <input type="hidden" name="protocol" value="est"><input type="hidden" name="count" value="1">
+      <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
     </div>
   </section>
   {% endif %}
@@ -73,14 +70,25 @@
             {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
           </select>
         </label>
-        <label {% if use_case_id == "uc03" %}data-tip="CMPv2 uses the shared profile robot-uc03-cmp-profile, created once from this one"{% elif use_case_id == "uc04" %}data-tip="Only profiles that allow renewing a valid certificate at any time"{% endif %}>Certificate profile
-          <select name="profile_id" required>
-            {% for p in profiles if use_case_id != "uc04" or p.renew_anytime %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
-            {% if use_case_id == "uc04" and not (profiles | selectattr("renew_anytime") | list) %}<option value="" disabled selected>No profile allows renewal at any time</option>{% endif %}
-          </select>
-        </label>
+        {% macro profile_line(name, validity, when="") -%}
+        <p class="field-help" {% if when %}data-when="{{ when }}"{% endif %} data-tip="Shared per account and reused by every run – DTM does not allow deleting used profiles">Profile <span class="mono">{{ name }}</span> ({{ validity }}){% if profile_status.get(name) == "missing" %} – created once by this run, DTM keeps it{% elif profile_status.get(name) == "DISABLED" %} – retired, this run enables it again{% endif %}</p>
+        {%- endmacro %}
+        {% if guide %}
+        {{ profile_line("robot-evergreen-5y-profile", "5 years", "mode=batch | key_location=server | protocol=rest | protocol=est | protocol=scep") }}
+        <p class="field-help" data-when="mode=single key_location=factory protocol=scep">SCEP needs an RSA issuing CA</p>
+        {{ profile_line("robot-evergreen-cmp-5y-profile", "5 years, bare public key", "mode=single key_location=factory protocol=cmpv2") }}
+        {% else %}{{ profile_line("robot-renewal-6m-profile", "6 months, renewable any time") }}{% endif %}
       </div>
-      {% if use_case_id not in ("uc03", "uc04") %}<label><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
+      {% if guide %}<label data-when="mode=batch variant=api"><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
+    </div>
+  </section>
+  <section class="form-section">
+    <header><h3>Run</h3></header>
+    <div class="fields">
+      <label>Run ID
+        <input name="run_id" class="medium" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16" aria-describedby="run-id-help">
+      </label>
+      <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
     </div>
   </section>
   <div class="action-bar">

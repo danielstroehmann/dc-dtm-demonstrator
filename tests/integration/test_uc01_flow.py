@@ -9,12 +9,12 @@ import httpx
 import pytest
 
 from app import cleanup, dtm, evergreen
-from tests.fakedtm import ACCOUNT_ID, ECDSA_CA_ID, HOST, PROFILE_ID, FakeDTM
+from tests.fakedtm import ACCOUNT_ID, ECDSA_CA_ID, HOST, FakeDTM
 
 
 def params(**overrides) -> dict:
     return {"dtm_host": HOST, "account_id": ACCOUNT_ID, "variant": "api", "mode": "single", "count": 1,
-            "ca_id": ECDSA_CA_ID, "ca_name": "Fake ECDSA ICA", "key_type": "P_256", "profile_id": PROFILE_ID,
+            "ca_id": ECDSA_CA_ID, "ca_name": "Fake ECDSA ICA", "key_type": "P_256",
             "approval": False} | overrides
 
 
@@ -215,6 +215,7 @@ def substitute(value, variables: dict):
 SETUP = [("GET", "/devicetrustmanager/api/v4/rendezvous-zone"),
          ("POST", "/devicetrustmanager/api/v4/division"),
          ("GET", "/devicetrustmanager/api/v4/division"),
+         ("GET", dtm.PROFILES),  # the shared profile (found or created once)
          ("POST", "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"),
          ("GET", "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy")]
 
@@ -227,19 +228,22 @@ async def test_single_records_api_calls(store, fake, tmp_path):
     assert [(c["method"], c["path"]) for c in calls] == SETUP + [
         ("POST", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate")]
     assert all(c["outcome"] == "ok" and c["count"] == 1 for c in calls)
-    assert [c["seconds"] is None for c in calls] == [False, False, True, False, True, False]  # lookups untimed
-    assert calls[5]["seconds"] >= 0.05
+    assert [c["seconds"] is None for c in calls] == [False, False, True, False, False, True, False]  # lookups untimed
+    assert calls[6]["seconds"] >= 0.05
     variables = r["api_variables"]
     division_id, policy_id = next(iter(fake.divisions)), next(iter(fake.policies))
+    profile_id = fake.profile(dtm.PROFILE_EVERGREEN.name)["id"]
     assert variables == {"DTM_HOST": HOST, "DTM_ACCOUNT_ID": ACCOUNT_ID, "DIVISION_ID": division_id,
-                         "POLICY_ID": policy_id}
+                         "POLICY_ID": policy_id, "PROFILE_ID": profile_id}
+    assert calls[3]["spec"] == {"method": "GET", "path": dtm.PROFILES} and calls[3]["phase"] == "setup"
     # The copyable JSON bodies are exactly what the client sent, once the variables are filled in.
     assert substitute(calls[1]["spec"]["json"], variables) == sent_json(fake, "division_create")
-    assert substitute(calls[3]["spec"]["json"], variables) == sent_json(fake, "policy_create")
-    assert substitute(calls[5]["spec"]["json"], variables) == sent_json(fake, "issue")
-    assert calls[5]["spec"]["json"]["certificate_policy_id"] == "{POLICY_ID}"  # a token, not a literal ID
+    assert substitute(calls[4]["spec"]["json"], variables) == sent_json(fake, "policy_create")
+    assert calls[4]["spec"]["json"]["certificate_policy"]["certificate_profile_id"] == "{PROFILE_ID}"  # a token
+    assert substitute(calls[6]["spec"]["json"], variables) == sent_json(fake, "issue")
+    assert calls[6]["spec"]["json"]["certificate_policy_id"] == "{POLICY_ID}"  # a token, not a literal ID
     assert calls[1]["spec"]["json"]["account_id"] == "{DTM_ACCOUNT_ID}"
-    assert r["duration_s"] >= 0.05 and calls[5]["count"] == 1
+    assert r["duration_s"] >= 0.05 and calls[6]["count"] == 1
     assert run["progress"] is None
 
 
@@ -248,9 +252,9 @@ async def test_batch_records_api_calls_without_secrets(store, fake, tmp_path):
     run = await start(store, fake, "a2", tmp_path, mode="batch", count=3, approval=True)
     assert run["status"] == "completed"
     calls = run["result"]["api_calls"]
-    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "POST", "GET", "LOCAL", "POST", "PUT", "GET",
+    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "POST", "PUT", "GET",
                                             "GET", "LOCAL"]
-    enc, upload, approve, poll, download, decrypt = calls[5:]
+    enc, upload, approve, poll, download, decrypt = calls[6:]
     assert enc["spec"]["command"].startswith("openssl req -x509 -newkey rsa:3072") and enc["seconds"] is None
     assert upload["path"].endswith("/jobs/certificate-enroll")
     assert upload["spec"]["form"] == dtm.batch_fields("robot-a2-uc01-batch", "{POLICY_ID}", "P_256")

@@ -1,6 +1,6 @@
 """UC-3 – evergreen device IDs via an enrollment protocol (EST, CMPv2 or REST). The factory
 station generates each key pair, authenticates with a passcode or its own client certificate and
-enrolls up to MAX_REQUESTS devices one after another; the timings are extrapolated.
+enrolls one device; the timing is extrapolated to a production run.
 
 Enrollment calls never carry the API key: DTM authenticates them through the run's
 authentication policy. Verified live 2026-10-24 (docs/design/uc-03-factory-protocols.md)."""
@@ -25,20 +25,14 @@ from cryptography.hazmat.primitives import serialization
 from . import certs, dtm
 from .apicalls import ApiCalls
 from .dtm import DTMClient, DTMError
-from .evergreen import common_names, create_division, prefix, rates
+from .evergreen import common_names, create_division, prefix, rates, use_shared_profile
 from .store import Store, now
 
-PROTOCOLS = {"est": "EST", "cmpv2": "CMPv2", "rest": "REST API"}
+PROTOCOLS = {"est": "EST", "cmpv2": "CMPv2", "scep": "SCEP", "rest": "REST API"}
 AUTHS = {"passcode": "Passcode", "certificate": "Factory certificate"}
-MAX_REQUESTS = 10
 ESTIMATE_DEVICES = 1000
-# One shared, reused profile per account: DTM refuses to delete a profile that a (deleted)
-# policy referenced, so per-run profiles would pile up (accepted residue, see the UC-3 design).
-CMP_PROFILE = "robot-uc03-cmp-profile"
 REQUEST_TIMEOUT = 30.0
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # DTM IDs that end up in openssl argv / URLs
-# Two CMPv2 runs at once must not both create the shared profile (it can never be deleted).
-_cmp_profile_lock = asyncio.Lock()
 
 AUTH_POLICY_PATH = f"{dtm.AUTH}/authentication-policy"
 PASSCODE_PATH = f"{dtm.AUTH}/passcode"
@@ -47,6 +41,10 @@ POLICY_PATH = dtm.POLICIES
 REST_PATH = "/devicetrustmanager/certificate-issuance-service/api/v2/certificate"
 EST_PATH = "/.well-known/est/devicetrustmanager/{policy_id}/simpleenroll"
 CMP_PATH = "/devicetrustmanager/certificate-issuance-service/api/v1/cmp/DIOT_{alternative_id}"
+SCEP_PATH = "/devicetrustmanager/certificate-issuance-service/api/v1/scep/DIOT_{alternative_id}"
+# Subject fields the SCEP client always sends (its own defaults would be "scep-client" / "MDM"; its
+# default C=US is dropped by DTM because the shared profile has no country field).
+SCEP_SUBJECT = ("dc-dtm-demonstrator", "Factory")
 RENEW_PATH = "/.well-known/est/devicetrustmanager/{policy_id}/simplereenroll"
 # DTM accepts a just-issued certificate for renewal only after a few seconds (401 est_unauthorized
 # right after issuance, verified live) – a renewal clicked immediately retries a little.
@@ -70,6 +68,8 @@ class Station:
                 raise EnrollmentError(f"unexpected ID from DTM: {value[:40]!r}")
         if protocol == "cmpv2" and (not cmp_id or (auth == "passcode" and not passcode_ref)):
             raise EnrollmentError("DTM returned no CMPv2 endpoint ID or passcode reference")
+        if protocol == "scep" and (not cmp_id or auth != "passcode"):
+            raise EnrollmentError("SCEP needs the endpoint ID and a passcode (challenge password)")
         self.protocol, self.auth, self.policy_id, self.cmp_id = protocol, auth, policy_id, cmp_id
         self.passcode, self.passcode_ref, self.workdir = passcode, passcode_ref, workdir
         # mTLS for REST/EST goes to the clientauth host; CMPv2 signs the message instead.
@@ -96,6 +96,8 @@ class Station:
             return await self._rest(cn, csr)
         if self.protocol == "est":
             return await self._est(csr)
+        if self.protocol == "scep":
+            return await self._scep(cn, key_pem)
         return await self._cmp(cn, key_pem)
 
     async def _post(self, path: str, **kwargs) -> httpx.Response:
@@ -151,14 +153,39 @@ class Station:
         else:  # signature protection; DTM needs the signer certificate in extraCerts (verified)
             args += ["-cert", str(self.workdir / "factory.crt"), "-key", str(self.workdir / "factory.key"),
                      "-extracerts", str(self.workdir / "factory.crt"), "-trusted", str(self.workdir / "ca-chain.pem")]
-        # openssl cmp reports on stdout and stderr – read both for the error reason.
+        return await self._tool("CMPv2", args, env, key_file, cert_file, "CMP error")
+
+    async def _scep(self, cn: str, key_pem: bytes) -> dict:
+        """scepclient (micromdm, Debian package `scep`) – an established SCEP client; the passcode is the
+        challenge password. SCEP encrypts to the CA with RSA, so the device key is RSA (PKCS#1 for the client)."""
+        tool = shutil.which("scepclient")
+        if not tool:
+            raise EnrollmentError("scepclient is not installed – SCEP needs it")
+        key = serialization.load_pem_private_key(key_pem, password=None)
+        key_file, cert_file = self.workdir / "device.key", self.workdir / "device.crt"
+        key_file.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                               serialization.NoEncryption()))
+        key_file.chmod(0o600)
+        for stale in (cert_file, self.workdir / "csr.pem", self.workdir / "self.pem"):  # scepclient reuses its own files
+            stale.unlink(missing_ok=True)
+        # scepclient takes the challenge only as an argument – visible to the container and, via ps, to users
+        # of the host for about a second; the passcode is random per run and void after the rollback.
+        args = [tool, "-server-url", f"https://{self.host}{SCEP_PATH.format(alternative_id=self.cmp_id)}",
+                "-challenge", self.passcode, "-cn", cn, "-organization", SCEP_SUBJECT[0], "-ou", SCEP_SUBJECT[1],
+                "-private-key", str(key_file), "-certificate", str(cert_file)]
+        return await self._tool("SCEP", args, {"PATH": "/usr/bin:/bin", "SSL_CERT_FILE": certifi.where()},
+                                key_file, cert_file, "")
+
+    async def _tool(self, label: str, args: list[str], env: dict, key_file: Path, cert_file: Path, marker: str) -> dict:
+        """Run an enrollment CLI with a timeout; the device key file is removed whatever happens."""
+        # The tools report on stdout and stderr – read both for the error reason.
         process = await asyncio.create_subprocess_exec(*args, env=env, stdin=asyncio.subprocess.DEVNULL,
                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         try:
             err, _ = await asyncio.wait_for(process.communicate(), REQUEST_TIMEOUT + 5)
         except TimeoutError as exc:
-            raise EnrollmentError("CMPv2 request timed out") from exc
-        finally:  # also on cancellation (app shutdown): never leave openssl running
+            raise EnrollmentError(f"{label} request timed out") from exc
+        finally:  # also on cancellation (app shutdown): never leave the tool running
             if process.returncode is None:
                 process.kill()
                 await process.wait()
@@ -166,9 +193,14 @@ class Station:
         if process.returncode != 0 or not cert_file.exists():
             lines = [line for line in err.decode(errors="replace").splitlines()
                      if line.strip() and not line.startswith("Warning:")]
-            reason = [line for line in lines if "CMP error" in line] or lines
-            raise EnrollmentError("CMPv2 request rejected: " + (reason[-1][:200] if reason else "openssl failed"))
+            # openssl cmp: the last "CMP error" line; scepclient: its last line is the bare cause.
+            reason = ([line for line in lines if marker in line] if marker else []) or lines
+            text = reason[-1] if reason else "the client failed"
+            if self.passcode:
+                text = text.replace(self.passcode, "<passcode>")
+            raise EnrollmentError(f"{label} request rejected: " + (text if len(text) <= 200 else "…" + text[-200:]))
         return certs.parse_pem_certificate(cert_file.read_text())
+
 
 
 async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> None:
@@ -230,16 +262,10 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                                    "use_passcode": False}},
                     phase="setup")
 
-            profile_id = p["profile_id"]
-            if protocol == "cmpv2":  # CMPv2 sends a bare public key – needs a profile that allows it
-                async with _cmp_profile_lock:
-                    profile_id, created = await api.timed(
-                        f"Find the shared CMPv2 profile {CMP_PROFILE} – created once from the selected profile, "
-                        "its csr entry allows a bare public key", "GET",
-                        dtm.PROFILES, client.bare_key_profile(CMP_PROFILE, p["profile_id"]),
-                        spec={"method": "GET", "path": dtm.PROFILES}, phase="setup")
-                log(f"{'Created' if created else 'Using'} the shared CMPv2 profile {CMP_PROFILE}")
-            variables["PROFILE_ID"] = profile_id
+            # UC-4 renews: 6 months, renewable at any time; CMPv2 sends a bare public key.
+            spec = (dtm.PROFILE_RENEWAL if p["use_case"] == "uc04" else
+                    dtm.PROFILE_EVERGREEN_CMP if protocol == "cmpv2" else dtm.PROFILE_EVERGREEN)
+            profile_id = await use_shared_profile(client, api, spec, variables, log)
 
             policy_name = f"{base}-policy"
             log(f"Creating certificate policy {policy_name} ({PROTOCOLS[protocol]}, {p['key_type']}, {p['ca_name']})")
@@ -256,14 +282,14 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             store.add_object(run_id, "policy", policy_id, policy_name)
             variables["POLICY_ID"] = policy_id
             cmp_id, ca_chain_pem = None, ""
-            if protocol == "cmpv2":  # the endpoint uses the policy's short ID; ca_chain signs the answers
-                detail = await api.timed("Read the policy's short ID and CA chain for CMPv2", "GET",
+            if protocol in ("cmpv2", "scep"):  # the endpoint uses the policy's short ID; ca_chain signs CMP answers
+                detail = await api.timed(f"Read the policy's short ID for the {PROTOCOLS[protocol]} endpoint", "GET",
                                          f"{POLICY_PATH}/{{POLICY_ID}}", client.get_policy(policy_id),
                                          spec={"method": "GET", "path": f"{POLICY_PATH}/{{POLICY_ID}}",
                                                "output": "policy.json"}, phase="setup")
                 cmp_id = detail.get("alternative_id")
                 if not cmp_id:
-                    raise EnrollmentError("DTM returned no short ID for the CMPv2 endpoint")
+                    raise EnrollmentError(f"DTM returned no short ID for the {PROTOCOLS[protocol]} endpoint")
                 ca_chain_pem = "".join(certs.der_b64_to_pem(c["blob"]) for c in detail.get("ca_chain") or []
                                        if c.get("blob"))
                 variables["CMP_ID"] = cmp_id
@@ -410,7 +436,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
     """The fake batch: one device after another, each with its own key pair. Only the protocol
     round trip is measured; key generation is reported separately."""
     names = common_names(run_id, p["protocol"], p["count"], p["use_case"])
-    log(f"Enrolling {len(names)} device(s) via {PROTOCOLS[p['protocol']]} ({AUTHS[p['auth']].lower()}), one by one")
+    log(f"Enrolling the device via {PROTOCOLS[p['protocol']]} ({AUTHS[p['auth']].lower()})")
     issued, seconds, keygen, per_device, keys = [], [], 0.0, [], 0
     started_wall = time.time()
     outcome = "error"
@@ -426,7 +452,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
             seconds.append(time.monotonic() - generated)
             per_device.append(time.monotonic() - start)
             log(f"{cn} enrolled in {seconds[-1]:.2f}s", "success" if done == len(names) else "step")
-            store.update_run(run_id, progress={"label": f"Enrolling {len(names)} devices one by one",
+            store.update_run(run_id, progress={"label": "Enrolling the device",
                                                "started": started_wall, "total": len(names), "done": done})
         outcome = "ok"
     finally:
@@ -440,7 +466,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
     # A station also generates every key pair – the extrapolation uses the median per device of
     # key generation + round trip (robust against one slow request).
     median_device = statistics.median(per_device)
-    log(f"{len(issued)} device(s) enrolled – {total / len(seconds):.2f}s per request", "success")
+    log(f"Device enrolled – {total / len(seconds):.2f}s for the request", "success")
     return {"duration_s": round(total, 2), **rates(total, len(issued)), "median_device_s": round(median_device, 3),
             "keygen_s": round(keygen, 2), "estimate_devices": ESTIMATE_DEVICES,
             "estimate_min": round(ESTIMATE_DEVICES * median_device / 60, 1),
@@ -531,6 +557,21 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
              "openssl pkcs7 -inform DER -in device.p7b -print_certs -out device.crt",
              '[IO.File]::WriteAllBytes("$PWD/device.p7b", [Convert]::FromBase64String((Get-Content device.b64.out -Raw)))\n'
              "openssl pkcs7 -inform DER -in device.p7b -print_certs -out device.crt")
+    elif protocol == "scep":
+        org, ou = SCEP_SUBJECT
+        args = [f"-server-url https://{{host}}{SCEP_PATH.format(alternative_id='{cmp}')}", "-challenge {secret}",
+                f'-cn {cn} -organization "{org}" -ou "{ou}"', "-private-key device.key -certificate device.crt"]
+        step("keygen", "Generate the device key – RSA, SCEP encrypts to the CA with RSA (local, per device)", "LOCAL",
+             "openssl", "openssl genrsa -traditional -out device.key 2048", "openssl genrsa -traditional -out device.key 2048")
+        step("call", "Request the certificate via SCEP – the passcode is the challenge password (once per device)", "POST",
+             SCEP_PATH.format(alternative_id="{CMP_ID}"),
+             "# scepclient: Debian/Ubuntu package scep (micromdm)\nscepclient " + " \\\n  ".join(
+                 a.format(host="${DTM_HOST}", cmp="${CMP_ID}", secret='"${PASSCODE}"') for a in args),
+             "# scepclient.exe: release of github.com/micromdm/scep\nscepclient " + " `\n  ".join(
+                 a.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", secret="$env:PASSCODE") for a in args))
+        step("convert", "Inspect the issued certificate – scepclient already wrote it as PEM (local)", "LOCAL", "openssl",
+             "openssl x509 -in device.crt -noout -subject -serial -enddate",
+             "openssl x509 -in device.crt -noout -subject -serial -enddate")
     else:
         genkey = ("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device.key" if rsa else
                   "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out device.key")
