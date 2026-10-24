@@ -1,15 +1,16 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon, pill %}
 {% block content %}
-<h1>Runs</h1>
 {% if not configured %}
-<article class="card">
-  <div class="card-head"><h2>DTM connection missing</h2><a href="/settings" role="button" class="btn-sm">Open settings</a></div>
-</article>
+<div class="page-head"><h1>Welcome</h1></div>
+{% include "_welcome.html" %}
 {% else %}
-<p><a href="/runs/new" role="button" class="cta">New run</a></p>
-{% endif %}
-{% if runs %}
-<article class="card">
+<div class="page-head"><h1>Start a demo</h1></div>
+<section class="block">{% include "_use_cases.html" %}</section>
+<section class="block">
+  <div class="section-title"><h2>Recent runs</h2></div>
+  <article class="card">
+  {% if runs %}
   <div class="overflow-auto">
   <table class="striped data-table">
     <thead><tr><th>Run</th><th>Use case</th>{% if several %}<th>Connection</th>{% endif %}<th>Variant</th><th>Status</th><th>Cleanup</th><th>Created (UTC)</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
@@ -17,11 +18,11 @@
     {% for run in runs %}
       <tr>
         <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-        <td>{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {{ run.params.mode }} ({{ run.params.count }})</td>
+        <td {% if run.use_case in use_cases %}data-tip="{{ use_cases[run.use_case].title }}"{% endif %}>{{ "UC-%d" % (run.use_case[2:] | int) if run.use_case[2:].isdigit() else run.use_case }} · {{ run.params.mode }} ({{ run.params.count }})</td>
         {% if several %}<td>{{ run.connection }}</td>{% endif %}
         <td>{{ "API" if run.params.variant == "api" else "Web UI" }}</td>
-        <td><span class="status {{ run.status }}">{{ run.status }}</span></td>
-        <td>{{ run.cleanup_status or "–" }}</td>
+        <td>{{ pill(run.status) }}</td>
+        <td>{% if run.cleanup_status %}{{ pill(run.cleanup_status) }}{% else %}–{% endif %}</td>
         <td>{{ run.created_at[:16].replace("T", " ") }}</td>
         <td class="actions-cell">{% if run.rolled_back %}
           <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">
@@ -33,6 +34,10 @@
     </tbody>
   </table>
   </div>
-</article>
+  {% else %}
+  <div class="empty">{{ icon("inbox") }}<p>No runs yet.</p></div>
+  {% endif %}
+  </article>
+</section>
 {% endif %}
 {% endblock %}

@@ -59,6 +59,11 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     store.mark_interrupted()
 
     def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
+        # Shell (nav, connection chip) only for logged-in users – error pages are also served anonymously.
+        authenticated = auth.is_authenticated(request)
+        default = store.connection(None) if authenticated else None
+        ctx = {"nav": None, "authenticated": authenticated,
+               "default_connection": _public(default) if default else None} | ctx
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
     def run_connection(run: dict) -> dict | None:
@@ -193,12 +198,15 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         several = len(store.connections()) > 1
         runs = [run | {"connection": (run_connection(run) or {}).get("name")
                        or f"{run['params'].get('connection_name', '–')} (not configured)"} for run in runs]
-        return render(request, "index.html", runs=runs, configured=bool(store.connections()), several=several)
+        connections = store.connections()
+        return render(request, "index.html", nav="runs", runs=runs, configured=bool(connections), several=several,
+                      connections=[_public(c) for c in connections],
+                      selected=store.connection(None)["id"] if connections else None)
 
     def settings_view(request: Request, status_code: int = 200, **form):
         connections = [_public(c) for c in store.connections()]
         used = {c["id"]: in_use(c["id"]) for c in connections}
-        return render(request, "settings.html", status_code, connections=connections, in_use=used,
+        return render(request, "settings.html", status_code, nav="settings", connections=connections, in_use=used,
                       form=form or {"host": "one.digicert.com"})
 
     @app.get("/settings")
@@ -245,15 +253,20 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                 error = f"Connection check failed: {exc}"
             finally:
                 await client.aclose()
+        if error and not store.connections():
+            return render(request, "index.html", 400, nav="runs", configured=False, runs=[], connections=[],
+                          form={"name": name, "host": host, "account_id": account_id, "error": error})
         if error:
             return settings_view(request, 400, id=connection_id, name=name, host=host, account_id=account_id,
                                  has_key=bool(existing), error=error)
+        first = not store.connections()
         try:
             store.save_connection(connection_id, name, host, account_id, api_key)
         except sqlite3.IntegrityError:  # a concurrent save took the name meanwhile
             return settings_view(request, 400, id=connection_id, name=name, host=host, account_id=account_id,
                                  has_key=bool(existing), error=f"A connection named {name!r} already exists.")
-        return RedirectResponse("/settings", status_code=303)
+        # The very first connection comes from the welcome page – go straight on to the use cases.
+        return RedirectResponse("/" if first else "/settings", status_code=303)
 
     def connection_or_404(connection_id: int) -> dict:
         conn = store.connection(connection_id)

@@ -196,7 +196,8 @@ def test_connection_routes_refuse_cross_site_posts(two, store):
 
 
 def test_unconfigured_catalog_and_form(user):
-    assert "DTM connection missing" in user.get("/runs/new").text
+    html = user.get("/runs/new").text
+    assert 'action="/settings/connections"' in html and "formaction" not in html  # welcome form, no tiles
     assert user.get("/runs/new/uc01").status_code == 409
     assert user.post("/runs", data=form()).status_code == 409
 
@@ -214,10 +215,11 @@ def test_every_table_is_a_data_table_or_compact(two, store):
             classes = re.search(r'<table class="([^"]*)"', table).group(1).split()
             assert "data-table" in classes or "compact" in classes, (path, classes)
             assert "<code>" not in table, path  # no chips inside single-line cells
-    assert seen == 4
+    assert seen == 3  # home runs table + certificate tables; settings lists connections without a table
     settings = pages["/settings"]
-    assert f'<td class="mono">{OTHER_ACCOUNT_ID}</td>' in settings
-    assert settings.count('<td class="actions-cell">') == 2
+    assert "<table" not in settings and settings.count('<ul class="conn-list">') == 1
+    assert f'<span class="mono">{OTHER_ACCOUNT_ID}</span>' in settings
+    assert settings.count('<div class="actions">') == 2
     assert pages["/"].count('<td class="actions-cell">') == 1
 
 

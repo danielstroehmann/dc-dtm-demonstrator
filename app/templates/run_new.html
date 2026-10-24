@@ -1,47 +1,66 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}New run · DTM Demonstrator{% endblock %}
 {% block content %}
 <nav aria-label="breadcrumb"><ul><li><a href="/runs/new?connection={{ connection.id }}">Use cases</a></li><li>{{ use_case.title }}</li></ul></nav>
-<hgroup>
-  <h1>{{ use_case.title }}</h1>
-  {% if several %}<p class="muted">Connection: <strong>{{ connection.name }}</strong> – {{ connection.host }}</p>{% endif %}
+<div class="page-head">
+  <div><h1>{{ use_case.title }}</h1>
   <p>{{ use_case.summary }}</p>
-</hgroup>
+  {% if several %}<p>Connection: <strong>{{ connection.name }}</strong> – {{ connection.host }}</p>{% endif %}</div>
+</div>
 <article class="card">
 <form method="post" action="/runs">
   <input type="hidden" name="use_case" value="{{ use_case_id }}">
   <input type="hidden" name="connection_id" value="{{ connection.id }}">
-  <label>Run ID
-    <input name="run_id" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16"
-           aria-describedby="run-id-help">
-    <small id="run-id-help">a–z, 0–9, max. 16</small>
-  </label>
-  <fieldset class="grid">
-    <legend>Variant</legend>
-    <label><input type="radio" name="variant" value="api" checked> Via API (measured)</label>
-    <label><input type="radio" name="variant" value="webui"> In the DTM web UI</label>
-  </fieldset>
-  <fieldset class="grid">
-    <legend>Issuance</legend>
-    <label><input type="radio" name="mode" value="batch" checked> Batch</label>
-    <label><input type="radio" name="mode" value="single"> Single certificate</label>
-  </fieldset>
-  <label>Number of certificates
-    <input type="number" name="count" value="10" min="1" max="{{ max_batch }}">
-  </label>
-  <label>Issuing CA
-    <select name="ca_id" required>
-      {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
-    </select>
-  </label>
-  <label>Certificate profile
-    <select name="profile_id" required>
-      {% for p in profiles %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
-    </select>
-  </label>
-  <label><input type="checkbox" name="approval" value="true" role="switch">
-    Require approval (auto-approved)</label>
-  <button type="submit" class="cta">Start run</button>
+  <section class="form-section">
+    <header><h3>Run</h3></header>
+    <div class="fields">
+      <label>Run ID
+        <input name="run_id" class="medium" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16" aria-describedby="run-id-help">
+      </label>
+      <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
+    </div>
+  </section>
+  <section class="form-section">
+    <header><h3>Issuance</h3></header>
+    <div class="fields">
+      <div class="seg-group"><span class="seg-label" id="l-variant">Variant</span>
+        <div role="radiogroup" aria-labelledby="l-variant" class="segmented">
+          <label><input type="radio" name="variant" value="api" checked> Via API (measured)</label>
+          <label><input type="radio" name="variant" value="webui"> In the DTM web UI</label>
+        </div></div>
+      <div class="seg-group"><span class="seg-label" id="l-mode">Mode</span>
+        <div role="radiogroup" aria-labelledby="l-mode" class="segmented">
+          <label><input type="radio" name="mode" value="batch" checked> Batch</label>
+          <label><input type="radio" name="mode" value="single"> Single certificate</label>
+        </div></div>
+      <label>Number of certificates
+        <input type="number" name="count" class="short" value="10" min="1" max="{{ max_batch }}">
+      </label>
+    </div>
+  </section>
+  <section class="form-section">
+    <header><h3>Certificate</h3></header>
+    <div class="fields">
+      <div class="field-row">
+        <label>Issuing CA
+          <select name="ca_id" required>
+            {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
+          </select>
+        </label>
+        <label>Certificate profile
+          <select name="profile_id" required>
+            {% for p in profiles %}<option value="{{ p.id }}" {% if "client" in p.name | lower %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+      <label><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>
+    </div>
+  </section>
+  <div class="action-bar">
+    <a href="/" class="link">Cancel</a>
+    <button type="submit" class="cta btn-icon">{{ icon("play") }}Start run</button>
+  </div>
 </form>
 </article>
 {% endblock %}

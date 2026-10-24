@@ -1,22 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Settings · DTM Demonstrator{% endblock %}
 {% block content %}
-<h1>Settings</h1>
+<div class="page-head"><h1>Settings</h1></div>
 {% if connections %}
-<article class="card">
-  <div class="card-head"><h2>DTM connections</h2></div>
-  <div class="overflow-auto">
-  <table class="striped data-table">
-    <thead><tr><th>Name</th><th>Host</th><th>Account</th><th><span class="visually-hidden">Default</span></th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-    <tbody>
+<section class="block">
+  <div class="section-title"><h2>DTM connections</h2></div>
+  <article class="card">
+    <ul class="conn-list">
     {% for c in connections %}
-      <tr>
-        <td>{{ c.name }}</td>
-        <td>{{ c.host }}</td>
-        <td class="mono">{{ c.account_id }}</td>
-        <td>{% if c.is_default %}<span class="badge">Default</span>{% endif %}</td>
-        <td class="actions-cell"><div class="actions">
-          <a href="/settings?edit={{ c.id }}" role="button" class="outline btn-sm">Edit</a>
+      <li>
+        <div><span class="name">{{ c.name }}</span>{% if c.is_default %} <span class="badge">Default</span>{% endif %}
+          <span class="meta">{{ c.host }} · <span class="mono">{{ c.account_id }}</span></span></div>
+        <div class="actions">
+          <a href="/settings?edit={{ c.id }}#connection-form" role="button" class="outline btn-sm">Edit</a>
           {% if not c.is_default %}
           <form method="post" action="/settings/connections/{{ c.id }}/default" class="inline">
             <button type="submit" class="outline btn-sm">Make default</button>
@@ -30,34 +26,17 @@
             <button type="submit" class="outline secondary btn-sm">Delete</button>
           </form>
           {% endif %}
-        </div></td>
-      </tr>
+        </div>
+      </li>
     {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</article>
+    </ul>
+  </article>
+</section>
 {% endif %}
-
-<article class="card" id="connection-form">
-  <div class="card-head"><h2>{{ "Edit connection" if form.id else "Add connection" }}</h2>
-    {% if form.id %}<a href="/settings" role="button" class="outline btn-sm">Cancel</a>{% endif %}</div>
-  {% if form.error %}<p class="error" role="alert">{{ form.error }}</p>{% endif %}
-  <form method="post" action="/settings/connections">
-    {% if form.id %}<input type="hidden" name="id" value="{{ form.id }}">{% endif %}
-    <label>Name
-      <input name="name" value="{{ form.name or '' }}" required maxlength="40" placeholder="e.g. US production, NL">
-    </label>
-    <label>Host
-      <input name="host" value="{{ form.host or '' }}" required pattern="[a-z0-9.\-]+\.[a-z]{2,}">
-    </label>
-    <label>Account ID
-      <input name="account_id" value="{{ form.account_id or '' }}" required placeholder="UUID of the DTM account">
-    </label>
-    <label>API key {% if form.has_key %}<small class="muted">(configured – leave empty to keep it)</small>{% endif %}
-      <input type="password" name="api_key" autocomplete="off" {% if not form.has_key %}required{% endif %}>
-    </label>
-    <button type="submit">Check and save</button>
-  </form>
-</article>
+<section class="block">
+  <article class="card focus" id="connection-form">
+    <div class="card-head"><h2>{{ "Edit connection" if form.id else "Add connection" }}</h2></div>
+    {% include "_connection_form.html" %}
+  </article>
+</section>
 {% endblock %}

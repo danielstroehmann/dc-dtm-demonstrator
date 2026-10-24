@@ -37,8 +37,9 @@ def cleaned(store, run_id):
 def test_new_run_requires_configuration(user):
     response = user.get("/runs/new/uc01")
     assert response.status_code == 409 and "not configured" in response.text
-    index = user.get("/").text
-    assert "DTM connection missing" in index and 'href="/settings"' in index and 'class="cta"' not in index
+    index = user.get("/").text  # the welcome page offers the connection form instead of a dead end
+    assert "<h1>Welcome</h1>" in index and 'action="/settings/connections"' in index
+    assert "formaction" not in index and "Recent runs" not in index
 
 
 def test_new_run_lists_only_usable_cas_and_active_profiles(configured_user, fake):
@@ -61,7 +62,8 @@ def test_new_run_dtm_error_is_502(configured_user, fake):
 
 def test_catalog_without_connection(user, fake):
     html = user.get("/runs/new").text
-    assert "<h2>DTM connection missing</h2>" in html and 'href="/settings"' in html and "formaction" not in html
+    assert '<ol class="stepper" aria-label="Getting started">' in html
+    assert '<form method="post" action="/settings/connections">' in html and "formaction" not in html
 
 
 def test_catalog_lists_all_use_cases(configured_user, store, fake):
@@ -70,8 +72,9 @@ def test_catalog_lists_all_use_cases(configured_user, store, fake):
     html = response.text
     assert html.count('formaction="/runs/new/') == len(evergreen.USE_CASES) == 2
     for key, use_case in evergreen.USE_CASES.items():
-        assert f'formaction="/runs/new/{key}"' in html and use_case.title in html and use_case.summary[:40] in html
-        assert f'aria-label="Choose {use_case.title}"' in html
+        assert f'formaction="/runs/new/{key}"' in html and use_case.title in html
+        assert use_case.summary[:40] not in html  # tiles show title and tags only (UI design v2)
+        assert f'aria-label="Start {use_case.title}"' in html
     assert html.index('formaction="/runs/new/uc01"') < html.index('formaction="/runs/new/uc02"')
     assert '<form method="get">' in html
     (conn,) = store.connections()
@@ -102,9 +105,10 @@ def test_catalog_requires_login(web, path):
 def test_catalog_and_form_escape_use_case_texts(configured_user, monkeypatch):
     from app import main
     monkeypatch.setitem(main.USE_CASES, "uc01", evergreen.UseCase(f"T {SCRIPT}", f"S {SCRIPT}", "server_side"))
-    for path in ("/runs/new", "/runs/new/uc01"):
+    for path in ("/runs/new", "/", "/runs/new/uc01"):
         html = configured_user.get(path).text
-        assert SCRIPT not in html and "T &lt;script&gt;" in html and "S &lt;script&gt;" in html
+        assert SCRIPT not in html and "T &lt;script&gt;" in html, path
+    assert "S &lt;script&gt;" in configured_user.get("/runs/new/uc01").text  # the summary is on the form only
 
 
 # --- run creation validation -----------------------------------------------------------------
@@ -665,9 +669,16 @@ def test_failed_run_shows_api_calls(configured_user, store, fake):
 def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store):
     store.create_run("x1", "uc99", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
     store.update_run("x1", status="failed")
-    assert user.get("/runs/x1").status_code == 200
+    page = user.get("/runs/x1")
+    assert page.status_code == 200 and "<p>uc99 · Single" in page.text
     index = user.get("/")
-    assert index.status_code == 200 and "uc99 · single" in index.text
+    assert index.status_code == 200 and re.search(r"<td\s*>UC-99 · single", index.text)  # no title tooltip
+    # a non-numeric ID is shown raw – never "UC-legacy"
+    store.create_run("x2", "legacy", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
+    store.update_run("x2", status="failed")
+    index = user.get("/").text
+    assert re.search(r"<td\s*>legacy · single", index) and "UC-legacy" not in index
+    assert "<p>legacy · Single" in user.get("/runs/x2").text
 
 
 def test_progress_card_during_cleanup(configured_store, user, store):
@@ -738,7 +749,8 @@ def test_run_page_order_and_removed_texts(configured_user, store):
     configured_user.post("/runs", data=form(mode="batch", count="2"))
     finished(store, "r1")
     html = configured_user.get("/runs/r1").text
-    marks = ["<h1>Run r1</h1>", '<div id="live"', "<h2>Overview</h2>", "<h2>Timeline", "<h2>Payload</h2>",
+    marks = ['<h1>Run r1 <span class="pill ok">completed</span></h1>', '<ol class="stepper" aria-label="Run phases">',
+             '<div id="live"', "<h2>Overview</h2>", "<h2>Timeline", "<h2>Payload</h2>",
              "<h2>Reproducible Steps</h2>", "<h2>Clean up</h2>"]
     assert "<h2>Delete run</h2>" not in html
     positions = [html.index(m) for m in marks]
@@ -808,14 +820,17 @@ def test_instant_approval_still_shows_tile(configured_user, store):
 
 # --- status line, cards, CTA ---------------------------------------------------------------
 
+# The run status moved into the page header (pill in the h1); the live line reports only an
+# unfinished cleanup.
 @pytest.mark.parametrize("status,cleanup_status,expected", [
     ("completed", None, None),
     ("completed", "done", None),
     ("completed", "running", "Cleanup: <span class=\"status running\">running</span>"),
     ("completed", "failed", "Cleanup: <span class=\"status failed\">failed</span>"),
-    ("failed", None, "Status: <span class=\"status failed\">failed</span>"),
-    ("waiting", "done", "Status: <span class=\"status waiting\">waiting</span>"),
-    ("running", None, "Status: <span class=\"status running\">running</span>"),
+    ("failed", None, None),
+    ("waiting", "done", None),
+    ("running", None, None),
+    ("failed", "running", "Cleanup: <span class=\"status running\">running</span>"),
 ])
 def test_status_line_only_when_informative(configured_store, user, store, status, cleanup_status, expected):
     store.create_run("s1", "uc01", BASE_PARAMS)
@@ -825,15 +840,9 @@ def test_status_line_only_when_informative(configured_store, user, store, status
         assert 'class="status-line"' not in live
     else:
         assert 'class="status-line"' in live and expected in live
-    if status == "failed" and cleanup_status is None:
-        assert "Cleanup:" not in live
-
-
-def test_status_line_shows_both_parts(configured_store, user, store):
-    store.create_run("s2", "uc01", BASE_PARAMS)
-    store.update_run("s2", status="failed", cleanup_status="running")
-    live = user.get("/runs/s2/live").text
-    assert re.search(r"Status: <span class=\"status failed\">failed</span>\s*· Cleanup: ", live)
+    assert "Status:" not in live
+    page = user.get("/runs/s1").text
+    assert re.search(rf'<h1>Run s1 <span class="pill[^"]*">{status}</span></h1>', page)
 
 
 def test_progress_card_markup(configured_store, user, store):
@@ -843,37 +852,57 @@ def test_progress_card_markup(configured_store, user, store):
     assert '<article class="card progress-card">' in live and '<h2 aria-busy="true">Uploading</h2>' in live
 
 
-def test_cta_only_for_new_run_and_start_run(configured_user, store):
-    configured_user.post("/runs", data=form())
+def cta_count(html: str) -> int:
+    return sum("cta" in classes.split() for classes in re.findall(r'class="([^"]*)"', html))
+
+
+def test_cta_only_for_start_run_and_first_connection(user, store):
+    """Orange only for the action that starts something: Start run and the very first connection."""
+    assert {p: cta_count(user.get(p).text) for p in ("/", "/settings", "/runs/new")} == {
+        "/": 1, "/settings": 1, "/runs/new": 1}
+    assert '<button type="submit" class="cta">Check and save</button>' in user.get("/").text
+    store.save_connection(None, "Default", HOST, ACCOUNT_ID, API_KEY)
+    user.post("/runs", data=form())
     finished(store, "r1")
-    pages = {path: configured_user.get(path).text for path in
+    pages = {path: user.get(path).text for path in
              ("/", "/runs/new", "/runs/new/uc01", "/settings", "/runs/r1", "/nope")}
-    assert {p: h.count('class="cta"') for p, h in pages.items()} == {
-        "/": 1, "/runs/new": 0, "/runs/new/uc01": 1, "/settings": 0, "/runs/r1": 0, "/nope": 0}
-    assert '<a href="/runs/new" role="button" class="cta">New run</a>' in pages["/"]
-    assert '<button type="submit" class="cta">Start run</button>' in pages["/runs/new/uc01"]
+    assert {p: cta_count(h) for p, h in pages.items()} == {
+        "/": 0, "/runs/new": 0, "/runs/new/uc01": 1, "/settings": 0, "/runs/r1": 0, "/nope": 0}
+    assert re.search(r'<button type="submit" class="cta btn-icon"><svg[^>]*>.*?</svg>Start run</button>',
+                     pages["/runs/new/uc01"], re.S)
 
 
 def test_page_structure_cards(configured_user, store):
     catalog = configured_user.get("/runs/new").text
-    assert '<article class="card">' in catalog and "<h1>New run</h1>" in catalog
-    assert re.search(r'<div class="card-head"><h2>[^<]+</h2><button type="submit" formaction="/runs/new/uc01" '
-                     r'class="btn-sm" aria-label="Choose [^"]+">Choose</button>', catalog)
+    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 2
+    assert re.search(r'<h3><span class="uc-id">UC-1</span>[^<]+</h3>', catalog)
+    assert re.search(r'<button type="submit" formaction="/runs/new/uc01" class="btn-sm btn-icon"\s+'
+                     r'aria-label="Start [^"]+"><svg[^>]*>.*?</svg>Start</button>', catalog, re.S)
     settings = configured_user.get("/settings").text
     assert "<h1>Settings</h1>" in settings and "<h2>DTM connections</h2>" in settings
     assert "<h2>Add connection</h2>" in settings
     assert "All calls are scoped" not in settings  # intro removed
     index = configured_user.get("/").text
-    assert "<h1>Runs</h1>" in index and "Every object a run creates" not in index
+    assert "<h1>Start a demo</h1>" in index and "<h2>Recent runs</h2>" in index
+    assert "Every object a run creates" not in index
     new = configured_user.get("/runs/new/uc01").text
     assert "a–z, 0–9, max. 16" in new and "Require approval (auto-approved)" in new
+    assert '<span class="seg-label" id="l-variant">Variant</span>' in new
+    assert '<span class="seg-label" id="l-mode">Mode</span>' in new  # not "Issuance" twice (section title)
+    assert new.count('role="radiogroup"') == 2
     error = configured_user.get("/nope").text
     assert '<div class="card-head"><h2>Something went wrong</h2></div>' in error
 
 
-def test_login_page_is_a_card(web):
+def test_login_page_is_a_split_screen(web, configured_store):
     html = web.get("/login").text
-    assert '<article class="card narrow">' in html and '<div class="card-head"><h2>Log in</h2></div>' in html
+    assert '<body class="auth">' in html and '<section class="auth-brand">' in html
+    form_area = re.search(r'<(section|main) class="auth-form">', html)
+    assert form_area and html.index('<section class="auth-brand">') < form_area.start()
+    assert "<h2>Log in</h2>" in html and '<form method="post" action="/login">' in html
+    assert '<div class="action-bar"><button type="submit">Log in</button></div>' in html
+    # anonymous: no app shell – no navigation, no connection chip, no log-out
+    assert "site-header" not in html and "conn-chip" not in html and 'action="/logout"' not in html
 
 
 # --- CSRF posture with SameSite=Lax: no GET route may change state ------------------------------

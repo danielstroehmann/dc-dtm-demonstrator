@@ -47,7 +47,7 @@ def test_right_password_sets_hardened_cookie(web):
     token = cookie.split(";")[0].split("=", 1)[1]
     assert jwt.decode(token, SECRET, algorithms=["HS256"])["sub"] == "admin"
     page = web.get("/")
-    assert page.status_code == 200 and "<h1>Runs</h1>" in page.text
+    assert page.status_code == 200 and "<h1>Welcome</h1>" in page.text  # logged in, no connection yet
 
 
 def test_logout_ends_session(user):

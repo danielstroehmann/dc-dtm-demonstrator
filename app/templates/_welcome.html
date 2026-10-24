@@ -1,0 +1,9 @@
+{# First start: no DTM connection yet – connect right here. #}
+<ol class="stepper" aria-label="Getting started">
+  <li class="current" aria-current="step">Connect DTM</li><li>Choose a use case</li><li>Run and roll back</li>
+</ol>
+<article class="card focus narrow-card">
+  <div class="card-head"><h2>Connect your DTM account</h2></div>
+  {% set form = form or {"host": "one.digicert.com"} %}
+  {% include "_connection_form.html" %}
+</article>

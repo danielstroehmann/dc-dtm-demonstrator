@@ -1,9 +1,23 @@
 {% extends "base.html" %}
+{% from "_icons.html" import pill %}
 {% block title %}Run {{ run.id }} · DTM Demonstrator{% endblock %}
 {% block content %}
-<h1>Run {{ run.id }}</h1>
-{% include "_run_live.html" %}
+{% set p = run.params %}
 {% set finished = run.result and run.status not in ("pending", "running") %}
+{# Phases: Run → Result → Clean up. The page reloads at every phase change (HX-Refresh / form POST). #}
+{% if rolled_back %}{% set phase = 4 %}{% elif run.cleanup_status %}{% set phase = 3 %}
+{% elif run.status in ("pending", "running") %}{% set phase = 1 %}{% else %}{% set phase = 2 %}{% endif %}
+<nav aria-label="breadcrumb"><ul><li><a href="/">Runs</a></li><li>{{ run.id }}</li></ul></nav>
+<div class="page-head">
+  <div><h1>Run {{ run.id }} {{ pill(run.status) }}</h1>
+  <p>{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {{ p.mode | capitalize }} ({{ p.count }}) · {{ "via API" if p.variant == "api" else "in the DTM web UI" }}{% if p.connection_name %} · {{ p.connection_name }}{% endif %}</p></div>
+</div>
+<ol class="stepper" aria-label="Run phases">
+  {% for label in ("Run", "Result", "Clean up") %}
+  <li class="{{ 'done' if loop.index < phase else 'current' if loop.index == phase else '' }}" {% if loop.index == phase %}aria-current="step"{% endif %}>{{ label }}</li>
+  {% endfor %}
+</ol>
+{% include "_run_live.html" %}
 {% if finished %}{% include "_result_overview.html" %}{% endif %}
 {% if rolled_back %}{% include "_delete_run.html" %}{% endif %}
 {% include "_timeline.html" %}

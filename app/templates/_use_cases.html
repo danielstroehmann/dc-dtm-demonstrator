@@ -1,0 +1,24 @@
+{% from "_icons.html" import icon %}
+{# Use-case tiles: GET form so the selected connection travels along with the chosen use case. #}
+{% set icons = {"server_side": "key", "client_side": "factory"} %}
+{% set key_tag = {"server_side": "Server-side keys", "client_side": "Factory CSR"} %}
+<form method="get">
+  {% if connections | length > 1 %}
+  <label class="conn-select">Connection
+    <select name="connection">
+      {% for c in connections %}<option value="{{ c.id }}" {% if c.id == selected %}selected{% endif %}>{{ c.name }} – {{ c.host }}</option>{% endfor %}
+    </select>
+  </label>
+  {% elif selected %}<input type="hidden" name="connection" value="{{ selected }}">{% endif %}
+  <div class="tiles">
+    {% for key, uc in use_cases.items() %}
+    <article class="tile">
+      <div class="tile-top"><span class="tile-icon">{{ icon(icons[uc.key_generation]) }}</span>
+        <h3><span class="uc-id">UC-{{ key[2:] | int }}</span>{{ uc.title }}</h3></div>
+      <ul class="tags"><li>{{ key_tag[uc.key_generation] }}</li><li>Single · Batch</li><li>API · Web UI</li></ul>
+      <div class="tile-foot"><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"
+        aria-label="Start {{ uc.title }}">{{ icon("play") }}Start</button></div>
+    </article>
+    {% endfor %}
+  </div>
+</form>

@@ -53,4 +53,5 @@ def test_login_and_index(client):
     if URL.startswith("https://"):
         assert "secure" in cookie
     index = client.get("/")
-    assert index.status_code == 200 and "<h1>Runs</h1>" in index.text
+    # home page: welcome (no DTM connection yet) or the use-case tiles
+    assert index.status_code == 200 and ("<h1>Welcome</h1>" in index.text or "<h1>Start a demo</h1>" in index.text)

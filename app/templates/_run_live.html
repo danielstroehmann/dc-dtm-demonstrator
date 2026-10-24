@@ -1,11 +1,8 @@
 {# Polled every second while the run or its cleanup is active; reloads the page once it ends. #}
 <div id="live" {% if active %}hx-get="/runs/{{ run.id }}/live" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
-  {# Only states that tell something; "completed"/"done" are evident from the page. #}
-  {% set show_run = run.status != "completed" %}
-  {% set show_cleanup = run.cleanup_status and run.cleanup_status != "done" %}
-  {% if show_run or show_cleanup %}
-  <p class="status-line">{% if show_run %}Status: <span class="status {{ run.status }}">{{ run.status }}</span>{% endif %}
-    {% if show_run and show_cleanup %} · {% endif %}{% if show_cleanup %}Cleanup: <span class="status {{ run.cleanup_status }}">{{ run.cleanup_status }}</span>{% endif %}</p>
+  {# The run status sits in the page header; only an unfinished cleanup is reported here. #}
+  {% if run.cleanup_status and run.cleanup_status != "done" %}
+  <p class="status-line">Cleanup: <span class="status {{ run.cleanup_status }}">{{ run.cleanup_status }}</span></p>
   {% endif %}
   {% if run.error %}<p class="error" role="alert">{{ run.error }}</p>{% endif %}
   {% if progress %}

@@ -29,19 +29,21 @@ def test_settings_page_without_connections(user):
 
 def test_save_first_connection(user, store, fake):
     response = save(user, name="  US prod ", host=f"  {HOST.upper()} ", account_id=f" {ACCOUNT_ID} ")
-    assert response.status_code == 303 and response.headers["location"] == "/settings"
+    # the very first connection comes from the welcome page and goes straight on to the use cases
+    assert response.status_code == 303 and response.headers["location"] == "/"
     conn = only(store)
     assert (conn["name"], conn["host"], conn["account_id"], conn["api_key"], conn["is_default"]) == (
         "US prod", HOST, ACCOUNT_ID, API_KEY, 1)
     assert fake.names("account") == [""] and fake.violations == []
     html = user.get("/settings").text
-    assert "<td>US prod</td>" in html and f"<td>{HOST}</td>" in html and ACCOUNT_ID in html
-    assert '<span class="badge">Default</span>' in html and f'href="/settings?edit={conn["id"]}"' in html
+    assert '<span class="name">US prod</span>' in html and f'<span class="meta">{HOST} · ' in html
+    assert f'<span class="mono">{ACCOUNT_ID}</span>' in html
+    assert '<span class="badge">Default</span>' in html and f'href="/settings?edit={conn["id"]}#connection-form"' in html
     assert API_KEY not in html
     edit = user.get(f"/settings?edit={conn['id']}").text
     assert "<h2>Edit connection</h2>" in edit and 'value="US prod"' in edit and "leave empty to keep it" in edit
     assert f'<input type="hidden" name="id" value="{conn["id"]}">' in edit and API_KEY not in edit
-    assert "New run" in user.get("/").text
+    assert "<h1>Start a demo</h1>" in user.get("/").text
 
 
 @pytest.mark.parametrize("host", ["https://one.digicert.com", "one digicert.com", "localhost", "one.digicert.com/x",
