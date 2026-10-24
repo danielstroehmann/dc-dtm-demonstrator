@@ -24,7 +24,7 @@ curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/late
 ```
 
 Then open one of the printed URLs. Options: `--version vX.Y.Z`, `--host NAME` (repeatable),
-`--tls custom --tls-cert … --tls-key …`, `--port N`, `--yes` (no questions; a password is generated
+`--tls custom --tls-cert … --tls-key …`, `--port N`, `--http-port N` (plain HTTP, redirects to HTTPS; default 80), `--yes` (no questions; a password is generated
 and shown once), `--uninstall [--purge]`.
 
 Settings live in `/opt/dtm-demonstrator/.env` (e.g. `SITE_HOSTS` for the certificate names). After editing it, reboot or run

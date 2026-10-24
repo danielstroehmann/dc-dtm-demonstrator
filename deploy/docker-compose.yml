@@ -22,15 +22,19 @@ services:
     environment:
       SITE_HOSTS: ${SITE_HOSTS}
       DEFAULT_SNI: ${DEFAULT_SNI}
+      HTTPS_PORT: ${HTTPS_PORT:-443}
     # Caddy needs "https://<name>:443, …"; derive it from the one editable key SITE_HOSTS.
+    # HTTPS_SUFFIX is the port part of the HTTP → HTTPS redirect target (empty for 443).
     entrypoint:
       - /bin/sh
       - -c
       - >-
         export SITE_ADDRESSES="$$(for h in $$SITE_HOSTS; do printf 'https://%s:443, ' "$$h"; done | sed 's/, $$//')";
+        export HTTPS_SUFFIX="$$([ "$$HTTPS_PORT" = 443 ] || echo ":$$HTTPS_PORT")";
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     ports:
       - "${HTTPS_PORT:-443}:443"
+      - "${HTTP_PORT:-80}:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./tls:/tls:ro

@@ -11,3 +11,12 @@
 	header -Server
 	reverse_proxy app:8000
 }
+
+# Plain HTTP only redirects to HTTPS, and only for the configured host names (no open redirect).
+http:// {
+	header -Server
+	@known host {$SITE_HOSTS}
+	# 302, not 308: browsers cache permanent redirects, and the HTTPS port is configurable.
+	redir @known https://{host}{$HTTPS_SUFFIX}{uri} 302
+	respond "Unknown host name – use one of the configured addresses." 404
+}

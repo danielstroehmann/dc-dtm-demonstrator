@@ -13,7 +13,7 @@ IMAGE_REPO="ghcr.io/danielstroehmann/dc-dtm-demonstrator"
 INSTALL_DIR="/opt/dtm-demonstrator"
 APP_UID=10001
 
-version="" branch="" tls_mode="" tls_cert="" tls_key="" hosts="" port="" local_image=""
+version="" branch="" tls_mode="" tls_cert="" tls_key="" hosts="" port="" http_port="" local_image=""
 uninstall=false purge=false assume_yes=false
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -29,6 +29,7 @@ Options:
   --tls-key PATH        private key (PEM) for --tls custom
   --host NAME           host name or IP the UI is reached by (repeatable; default: host name + IPs)
   --port N              HTTPS port (default 443)
+  --http-port N         HTTP port that redirects to HTTPS (default 80)
   --local-image IMAGE   use an already loaded image instead of pulling (testing)
   --yes                 no questions; with neither --version nor --branch the latest release is used
   --uninstall           stop and remove the demonstrator (data is kept)
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
 		--tls-key) tls_key="${2:?}"; shift 2 ;;
 		--host) hosts="${hosts:+$hosts }${2:?}"; shift 2 ;;
 		--port) port="${2:?}"; shift 2 ;;
+		--http-port) http_port="${2:?}"; shift 2 ;;
 		--local-image) local_image="${2:?}"; shift 2 ;;
 		--yes) assume_yes=true; shift ;;
 		--uninstall) uninstall=true; shift ;;
@@ -61,6 +63,7 @@ VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
 [ -z "$local_image" ] || [[ "$local_image" =~ ^[a-z0-9./_:-]+$ ]] || die "invalid image name: $local_image"
 [ -z "$branch" ] || [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid branch: $branch"
 [ -z "$port" ] || { [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "invalid port: $port"
+[ -z "$http_port" ] || { [[ "$http_port" =~ ^[0-9]+$ ]] && [ "$http_port" -ge 1 ] && [ "$http_port" -le 65535 ]; } || die "invalid HTTP port: $http_port"
 [ -z "$tls_mode" ] || [[ "$tls_mode" =~ ^(selfsigned|custom)$ ]] || die "--tls must be selfsigned or custom"
 
 compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrator "$@"; }
@@ -152,7 +155,6 @@ docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 
 # --- files ----------------------------------------------------------------------------------
 fetch() { curl -fsSL "https://raw.githubusercontent.com/$REPO/$ref/$1" -o "$2" || die "could not download $1 for $ref"; }
-fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"
 
 env_file="$INSTALL_DIR/.env"
 if [ ! -s "$env_file" ]; then
@@ -160,6 +162,7 @@ if [ ! -s "$env_file" ]; then
 # DTM Demonstrator settings. Edit, then reboot or run: systemctl restart dtm-demonstrator
 # SITE_HOSTS: space-separated host names / IPv4 addresses the HTTPS certificate covers.
 # DEFAULT_SNI: the address used when a browser connects by IP (no SNI).
+# HTTPS_PORT / HTTP_PORT: published ports; plain HTTP redirects to HTTPS.
 EOF
 fi
 chmod 600 "$env_file"
@@ -173,6 +176,20 @@ env_rewrite() { # drop KEY, optionally append KEY='VALUE' – single quotes: com
 	env_tmp=""
 }
 env_set() { env_rewrite "$1" "$2"; }
+
+# Settings: kept from the previous run unless given again. The port checks run before a
+# password is generated – a generated password is only shown at the end and would be lost otherwise.
+tls_mode="${tls_mode:-$(env_get TLS_MODE)}"; tls_mode="${tls_mode:-selfsigned}"
+port="${port:-$(env_get HTTPS_PORT)}"; port="${port:-443}"
+previous_http_port=$(env_get HTTP_PORT)
+http_port="${http_port:-$previous_http_port}"; http_port="${http_port:-80}"
+[ "$http_port" != "$port" ] || die "HTTP and HTTPS port must differ"
+# An update must not take a working install down: the HTTP port has to be free, unless our own
+# proxy already holds it.
+if ss -Hltn "sport = :$http_port" 2>/dev/null | grep -q . \
+	&& ! { [ "$previous_http_port" = "$http_port" ] && [ -n "$(compose ps -q proxy 2>/dev/null)" ]; }; then
+	die "port $http_port is in use by another service – pass --http-port N"
+fi
 
 # Secrets: set once, never overwritten on later runs.
 new_password="" shown_password=""
@@ -198,9 +215,6 @@ if [ -z "$(env_get ADMIN_PASSWORD)" ]; then
 fi
 [ -n "$(env_get JWT_SECRET)" ] || env_set JWT_SECRET "$(openssl rand -hex 32)"
 
-# Settings: kept from the previous run unless given again.
-tls_mode="${tls_mode:-$(env_get TLS_MODE)}"; tls_mode="${tls_mode:-selfsigned}"
-port="${port:-$(env_get HTTPS_PORT)}"; port="${port:-443}"
 if [ -z "$hosts" ]; then hosts="$(env_get SITE_HOSTS)"; fi
 if [ -z "$hosts" ]; then
 	# Host name + IPv4 addresses of real interfaces (not Docker's bridges).
@@ -238,6 +252,7 @@ fi
 env_set DEMONSTRATOR_IMAGE "$image"
 env_set TLS_MODE "$tls_mode"
 env_set HTTPS_PORT "$port"
+env_set HTTP_PORT "$http_port"
 env_set SITE_HOSTS "$hosts"
 env_rewrite SITE_ADDRESSES  # derived from SITE_HOSTS when the proxy starts (older installs stored it)
 env_set DEFAULT_SNI "$default_sni"
@@ -254,6 +269,7 @@ if [ "$tls_mode" = custom ]; then
 	fi
 	[ -f "$INSTALL_DIR/tls/cert.pem" ] && [ -f "$INSTALL_DIR/tls/key.pem" ] || die "--tls custom: no certificate installed yet"
 fi
+fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"
 fetch "deploy/Caddyfile.$tls_mode" "$INSTALL_DIR/Caddyfile"
 
 # --- boot integration: apply .env changes on every start ------------------------------------
@@ -289,7 +305,11 @@ if [ -z "$local_image" ]; then
 	info "Pulling images"
 	compose pull --quiet
 fi
-systemctl restart dtm-demonstrator.service  # = compose up -d; keeps the unit state truthful
+systemctl restart dtm-demonstrator.service || {  # = compose up -d; keeps the unit state truthful
+	journalctl -u dtm-demonstrator.service -n 30 --no-pager || true
+	compose logs --tail 30 proxy || true
+	die "the demonstrator did not start – see the log above"
+}
 info "Waiting for the demonstrator to become healthy"
 for _ in $(seq 1 60); do
 	state=$(docker inspect -f '{{.State.Health.Status}}' "$(compose ps -q app)" 2>/dev/null || true)
@@ -303,6 +323,9 @@ for _ in $(seq 1 15); do
 	sleep 2
 done
 [ "${proxy_ok:-}" = true ] || { compose logs --tail 50 proxy; die "the HTTPS proxy is not reachable on port $port"; }
+https_url="https://$default_sni$([ "$port" = 443 ] || echo ":$port")/"
+redirect=$(curl -s -m 5 -o /dev/null -w '%{http_code} %{redirect_url}' -H "Host: $default_sni" "http://127.0.0.1:$http_port/" || true)
+[ "$redirect" = "302 $https_url" ] || echo "WARNING: http://$default_sni:$http_port/ does not redirect to $https_url (got: $redirect)" >&2
 
 echo
 info "DTM Demonstrator $ref is running:"
