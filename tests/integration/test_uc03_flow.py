@@ -252,13 +252,59 @@ async def test_api_calls_and_variables(store, enroll_net, cmp_openssl, tmp_path)
     assert dtm.PROFILES in paths and enrollment.POLICY_PATH in paths
     variables = run["result"]["api_variables"]
     assert variables["PASSCODE"] == "<choose a passcode, 6–64 characters>"
-    # the real reference belongs to the user's own passcode – the snippet reads it from the create output
-    assert variables["PASSCODE_REF"] == "<alternate_id from passcode.json.out>"
-    assert next(iter(enroll_net.auth_objects["passcode"].values()))["alternate_id"] not in json.dumps(variables)
+    (record,) = enroll_net.auth_objects["passcode"].values()
+    # the reference is an ID, not a secret: the run's real one; the passcode itself stays a placeholder
+    assert variables["PASSCODE_REF"] == record["alternate_id"]
+    assert record["body"]["passcode"] not in json.dumps(run)
     assert variables["CMP_ID"] == next(iter(enroll_net.policies.values()))["alternative_id"]
     passcode_call = next(c for c in calls if c["path"] == enrollment.PASSCODE_PATH)
     assert passcode_call["spec"]["json"]["passcode"] == "{PASSCODE}"
     assert passcode_call["spec"]["output"] == "passcode.json.out"
+
+
+READ_REF = {"bash": 'export PASSCODE_REF="$(jq -r .alternate_id passcode.json.out)"',
+            "powershell": "$env:PASSCODE_REF = (Get-Content passcode.json.out -Raw | ConvertFrom-Json).alternate_id"}
+READ_CMP_ID = {"bash": 'export CMP_ID="$(jq -r .alternative_id policy.json)"',
+               "powershell": "$env:CMP_ID = (Get-Content policy.json -Raw | ConvertFrom-Json).alternative_id"}
+
+
+@pytest.mark.parametrize("protocol,auth", COMBOS)
+async def test_local_steps_read_the_ids_from_the_previous_outputs(store, enroll_net, cmp_openssl, scep_client,
+                                                                  tmp_path, protocol, auth):
+    run = await start(store, enroll_net, "rid", tmp_path, protocol=protocol, auth=auth, count=1,
+                      **protocol_params(protocol))
+    assert run["status"] == "completed", run["error"]
+    calls = run["result"]["api_calls"]
+    purposes = [c["purpose"] for c in calls]
+    ref_step = "Read the passcode reference CMPv2 sends as sender ID (local)"
+    id_step = f"Read the policy's short ID for the {enrollment.PROTOCOLS[protocol]} endpoint (local)"
+    if protocol == "cmpv2" and auth == "passcode":
+        i = purposes.index(ref_step)
+        assert calls[i - 1]["path"] == enrollment.PASSCODE_PATH  # right after creating the passcode
+        assert (calls[i]["method"], calls[i]["phase"], calls[i]["spec"]) == ("LOCAL", "setup", {"command": READ_REF})
+    else:
+        assert ref_step not in purposes
+    if protocol in ("cmpv2", "scep"):
+        i = purposes.index(id_step)
+        assert calls[i - 1]["method"] == "GET" and calls[i - 1]["spec"]["output"] == "policy.json"
+        assert (calls[i]["method"], calls[i]["phase"], calls[i]["spec"]) == ("LOCAL", "setup", {"command": READ_CMP_ID})
+    else:
+        assert not any(p.startswith("Read the policy's short ID") for p in purposes)
+    if auth == "passcode":
+        assert enroll_net.active_auth("passcode")[0]["body"]["passcode"] not in all_snippets(run) + db_text(store, "rid")
+
+
+def test_id_reading_commands_work_in_bash(tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("jq") or not shutil.which("bash"):
+        pytest.skip("jq/bash not available")
+    (tmp_path / "passcode.json.out").write_text(json.dumps({"id": "p1", "alternate_id": "ref-42"}))
+    (tmp_path / "policy.json").write_text(json.dumps({"id": "IOT_x", "alternative_id": "abc123", "ca_chain": []}))
+    script = READ_REF["bash"] + "\n" + READ_CMP_ID["bash"] + '\nprintf "%s %s" "$PASSCODE_REF" "$CMP_ID"'
+    out = subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=tmp_path, capture_output=True, text=True,
+                         check=True).stdout
+    assert out == "ref-42 abc123"
 
 
 # --- metrics -----------------------------------------------------------------------------------
@@ -454,8 +500,8 @@ async def test_openssl_missing(store, enroll_net, tmp_path, monkeypatch):
 async def test_unsafe_cmp_id_from_dtm_is_refused(store, enroll_net, cmp_openssl, tmp_path, bad):
     enroll_net.fail["policy_get"] = lambda request: httpx.Response(200, json={"alternative_id": bad, "ca_chain": []})
     run = await start(store, enroll_net, "ui1", tmp_path, protocol="cmpv2")
-    assert run["status"] == "failed" and run["error"].startswith("unexpected ID from DTM")
-    assert cmp_openssl.calls() == []
+    assert run["status"] == "failed" and run["error"] == "DTM returned no usable short ID for the CMPv2 endpoint"
+    assert cmp_openssl.calls() == [] and bad not in json.dumps(run["result"]["api_variables"])
 
 
 async def test_cmp_passcode_without_reference_is_refused(store, enroll_net, cmp_openssl, tmp_path):
@@ -466,7 +512,20 @@ async def test_cmp_passcode_without_reference_is_refused(store, enroll_net, cmp_
         return httpx.Response(201, json=data)
     enroll_net.fail["passcode_create"] = no_reference
     run = await start(store, enroll_net, "nr1", tmp_path, protocol="cmpv2")
-    assert run["status"] == "failed" and "passcode reference" in run["error"] and cmp_openssl.calls() == []
+    assert run["status"] == "failed" and run["error"] == "DTM returned no usable passcode reference"
+    assert cmp_openssl.calls() == []
+
+
+@pytest.mark.parametrize("bad", ["ref with space", "../ref", "r" * 65, "$(id)"])
+async def test_unsafe_passcode_reference_is_refused(store, enroll_net, cmp_openssl, tmp_path, bad):
+    def odd_reference(request):
+        response = enroll_net._auth_create("passcode")(request)
+        data = json.loads(response.content) | {"alternate_id": bad}
+        return httpx.Response(201, json=data)
+    enroll_net.fail["passcode_create"] = odd_reference
+    run = await start(store, enroll_net, "ur1", tmp_path, protocol="cmpv2")
+    assert run["status"] == "failed" and run["error"] == "DTM returned no usable passcode reference"
+    assert bad not in json.dumps(run["result"]["api_variables"]) and cmp_openssl.calls() == []
 
 
 async def test_concurrent_cmp_runs_create_the_shared_profile_once(store, enroll_net, cmp_openssl, tmp_path):
@@ -482,7 +541,8 @@ async def test_concurrent_cmp_runs_create_the_shared_profile_once(store, enroll_
 async def test_policy_without_short_id_fails_cmp(store, enroll_net, cmp_openssl, tmp_path):
     enroll_net.fail["policy_get"] = lambda request: httpx.Response(200, json={"id": "x", "ca_chain": []})
     run = await start(store, enroll_net, "ns1", tmp_path, protocol="cmpv2")
-    assert run["status"] == "failed" and "no short ID" in run["error"] and cmp_openssl.calls() == []
+    assert run["status"] == "failed" and run["error"] == "DTM returned no usable short ID for the CMPv2 endpoint"
+    assert cmp_openssl.calls() == []
 
 
 async def test_failed_credential_create_is_rolled_back(store, enroll_net, tmp_path):
@@ -663,7 +723,7 @@ async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, 
             assert ("--fail-with-body" if protocol == "rest" else "--fail ") in command
     setup_text = "\n".join(c["spec"]["command"]["powershell"] for c in enroll_entries(run) if c["phase"] == "setup")
     assert ("openssl pkcs12 -export" in setup_text) == (auth == "certificate" and protocol != "cmpv2")
-    assert ("ConvertFrom-Json" in setup_text) == (auth == "certificate" and protocol == "cmpv2")
+    assert ("ca_chain" in setup_text) == (protocol == "cmpv2")  # ca-chain.pem for every CMPv2 run
     if auth == "certificate":
         factory = next(c for c in run["result"]["api_calls"] if c["path"] == "openssl")
         command = snippets.render(factory["spec"], "curl")

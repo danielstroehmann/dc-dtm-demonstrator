@@ -417,3 +417,54 @@ body.auth { display: block; }
   .stepper li.current::before { content: counter(step) " · "; }
   .conn-list li { grid-template-columns: 1fr; }
 }
+
+/* =====================================================================================
+   Desktop density (2026-10-25): the demonstrator is shown on desktop browsers only – less vertical
+   space, questions side by side. Overrides the sections above; the phone media queries above are
+   partly superseded and kept only for very narrow windows.
+   ===================================================================================== */
+:root[data-theme="light"] {
+  --pico-font-size: 100%;                 /* Pico grows the root font on wide screens – keep it steady */
+  --pico-spacing: 0.75rem;
+  --pico-form-element-spacing-vertical: 0.45rem;
+  --pico-form-element-spacing-horizontal: 0.75rem;
+  --pico-line-height: 1.45;
+}
+h1 { font-size: 1.5rem; }
+.site-header { margin-bottom: var(--s5); }
+.site-header nav { min-height: 3rem; }
+.page-head { margin-bottom: var(--s4); }
+section.block { margin-bottom: var(--s5); }
+article.card { padding: var(--s4) var(--s5); margin-bottom: var(--s4); }
+.card-head { margin-bottom: var(--s3); }
+.tile { padding: var(--s4); gap: var(--s2); }
+.empty { padding: var(--s5) var(--s4); }
+.stepper { margin-bottom: var(--s4); }
+.form-section { grid-template-columns: 8rem 1fr; gap: var(--s2) var(--s5); padding: var(--s3) 0; }
+.action-bar { margin-top: var(--s3); padding-top: var(--s3); }
+.seg-group { margin-bottom: 0; }
+.segmented { margin-bottom: 0; }
+.segmented label { padding: 0.35rem var(--s3); font-size: 0.9rem; }
+/* Questions and fields side by side, as many as fit */
+.q-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); gap: var(--s3) var(--s5);
+  align-items: start; }
+.q-grid > * { margin: 0; }
+.q-grid label { margin-bottom: 0; }
+.field-help { margin-top: 0; margin-bottom: var(--s1); }
+.timeline-scroll { max-height: 15rem; }
+/* Wider content on desktop with a side gutter (Pico's containers have no padding above 576px);
+   choices stay on one line */
+@media (min-width: 1024px) {
+  .site-header > .container, main.container, footer.container { max-width: min(1320px, calc(100% - 3rem)); }
+}
+.segmented { flex-wrap: nowrap; }
+/* Grid fields: label on top, control, optional help – all cells start on the same line */
+.q-grid .field, .q-grid .seg-group { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
+.q-grid .field > select, .q-grid .field > .readonly-value, .q-grid .field > input:not(.short) { align-self: stretch; }
+.field-label, .seg-label { font-weight: 400; color: var(--pico-color); margin: 0; }
+.q-grid .field select, .q-grid .field input { margin: 0; }
+.readonly-value { padding: var(--pico-form-element-spacing-vertical) var(--pico-form-element-spacing-horizontal);
+  border: 1px solid var(--dc-border); border-radius: var(--pico-border-radius); background: var(--idle-tint);
+  color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--pico-line-height); }
+.readonly-value.mono { font-size: 0.85rem; }
+.q-grid .switch-cell { align-self: end; padding-bottom: var(--s2); }

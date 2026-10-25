@@ -1,7 +1,9 @@
-"""UC-4 – one device enrolled via EST in the factory, renewed in the field via EST simplereenroll
-(mTLS with its current certificate) against the stateful fake DTM."""
+"""UC-4 – one device enrolled in the factory and renewed in the field, via EST (simplereenroll, mTLS
+with its current certificate) or CMPv2 (ir, then kur signed with the current certificate), against
+the stateful fake DTM and the fake openssl."""
 
 import json
+from pathlib import Path
 
 import pytest
 from cryptography import x509
@@ -9,7 +11,7 @@ from cryptography.hazmat.primitives import serialization
 
 from app import certs, cleanup, dtm, enrollment, snippets
 from app.store import Store
-from tests.fakedtm import ACCOUNT_ID, CLIENTAUTH_HOST, ECDSA_CA_ID, HOST, FakeDTM
+from tests.fakedtm import ACCOUNT_ID, CLIENTAUTH_HOST, ECDSA_CA_ID, HOST, FakeDTM, cert_pem
 from tests.integration.test_uc01_flow import assert_certificate_files
 from tests.integration.test_uc03_flow import all_snippets, key_body, secrets_seen  # noqa: F401 – fixture
 
@@ -91,7 +93,7 @@ async def test_enroll_and_renew_twice(store, enroll_net, secrets_seen, tmp_path,
     keys = [device_key(tmp_path, "u4")]
     # the renewal block is there before the first renewal: every step, not yet run
     seeded = [c for c in r["api_calls"] if c["phase"] == "renewal"]
-    assert [c["purpose"] for c in seeded] == [s["purpose"] for s in enrollment.renew_steps(cn, "P_256")]
+    assert [c["purpose"] for c in seeded] == [s["purpose"] for s in enrollment.renew_steps("est", cn, "P_256")]
     assert [(c["count"], c["seconds"]) for c in seeded] == [(0, None)] * 3
 
     for n in (1, 2):
@@ -125,7 +127,7 @@ async def test_enroll_and_renew_twice(store, enroll_net, secrets_seen, tmp_path,
     calls = r["api_calls"]
     assert {c["phase"] for c in calls} == {"setup", "recurring", "renewal"}
     renewal = [c for c in calls if c["phase"] == "renewal"]
-    steps = enrollment.renew_steps(cn, "P_256")
+    steps = enrollment.renew_steps("est", cn, "P_256")
     assert [(c["purpose"], c["method"], c["path"], c["spec"]) for c in renewal] == [
         (s["purpose"], s["method"], s["path"], {"command": s["command"]}) for s in steps]
     assert [c["count"] for c in renewal] == [2, 2, 2]
@@ -309,7 +311,7 @@ def test_claim_status_is_exclusive(tmp_path):
 
 def test_renew_steps_carry_no_secret_and_use_the_device_certificate():
     for key_type in ("P_256", "RSA_2048"):
-        steps = enrollment.renew_steps("robot-x1-uc04-est-0001", key_type)
+        steps = enrollment.renew_steps("est", "robot-x1-uc04-est-0001", key_type)
         assert [s["kind"] for s in steps] == ["keygen", "call", "convert"]
         assert {s["phase"] for s in steps} == {"renewal"}
         for s in steps:
@@ -327,7 +329,7 @@ def test_renew_steps_carry_no_secret_and_use_the_device_certificate():
 
 def test_renewal_block_renders_in_every_dialect(store):
     from tests.integration.test_api_call_elements import requests_in
-    for s in enrollment.renew_steps("cn", "P_256"):
+    for s in [*enrollment.renew_steps("est", "cn", "P_256"), *enrollment.renew_steps("cmpv2", "cn", "P_256")]:
         for dialect in snippets.DIALECTS:
             assert requests_in(snippets.render({"command": s["command"]}, dialect)) == (s["method"] != "LOCAL")
 
@@ -367,3 +369,299 @@ async def test_other_400_errors_get_no_renewal_hint(store, enroll_net, tmp_path)
     await renew(store, "o4", tmp_path)
     (error,) = [e["message"] for e in store.events("o4") if e["level"] == "error"]
     assert "invalid CSR" in error and "does not allow renewing" not in error
+
+
+# --- CMPv2: enrollment (ir) and renewal (kur) -------------------------------------------------------
+
+async def start_cmp(store, fake, cmp_openssl, run_id, tmp_path, **overrides):
+    run = await start(store, fake, run_id, tmp_path, protocol="cmpv2", **overrides)
+    cmp_openssl.sync_to_dtm()  # DTM lists the enrolled certificate – kur checks the signer against it
+    return run
+
+
+async def renew_cmp(store, cmp_openssl, run_id, tmp_path):
+    run = await renew(store, run_id, tmp_path)
+    cmp_openssl.sync_to_dtm()
+    return run
+
+
+def kur_calls(cmp_openssl):
+    return [c for c in cmp_openssl.calls() if c["argv"][:3] == ["cmp", "-cmd", "kur"]]
+
+
+@pytest.mark.parametrize("auth", ["passcode", "certificate"])
+async def test_cmp_enroll_and_renew_twice(store, enroll_net, cmp_openssl, secrets_seen, tmp_path, auth):  # noqa: F811
+    fake = enroll_net
+    run = await start_cmp(store, fake, cmp_openssl, "c4", tmp_path, auth=auth)
+    assert run["status"] == "completed", run["error"]
+    (policy,) = fake.policies.values()
+    assert policy["certificate_management_methods"] == ["CMP_V2"]
+    profile = fake.profile(dtm.PROFILE_RENEWAL_CMP.name)
+    assert policy["certificate_profile_id"] == profile["id"] and profile["allow_bare_public_key"] is True
+    entries = {e["key"]: e["value"] for e in profile["body"]}
+    assert (entries["validity.duration_unit"], entries["validity.duration_value"],
+            entries["renewal_settings.renew_valid_cert"]) == ("months", 6, "anytime")
+    assert run["result"]["cmp_id"] == policy["alternative_id"]
+    device = tmp_path / "runs" / "c4" / "device"
+    assert (device / "ca-chain.pem").read_text() == cert_pem(fake.ica_cert) + cert_pem(fake.root_cert)
+    assert sorted(p.name for p in device.iterdir()) == ["ca-chain.pem", "device.pem"]
+    seeded = [c for c in run["result"]["api_calls"] if c["phase"] == "renewal"]
+    cn = run["result"]["certificates"][0]["common_name"]
+    assert [c["purpose"] for c in seeded] == [s["purpose"] for s in enrollment.renew_steps("cmpv2", cn, "P_256")]
+
+    previous = [run["result"]["certificates"][0]]
+    for n in (1, 2):
+        run = await renew_cmp(store, cmp_openssl, "c4", tmp_path)
+        r = run["result"]
+        assert len(r["renewals"]) == n and r["certificate_total"] == n + 1, store.events("c4")[-3:]
+        newest = r["certificates"][-1]
+        assert newest["common_name"] == cn and newest["serial"] != previous[-1]["serial"]
+        assert r["renewals"][-1]["serial"] == newest["serial"] and r["renewals"][-1]["attempts"] == 1
+        # the device file now holds the new key and certificate (ca-chain.pem stays next to it)
+        data = (device / "device.pem").read_bytes()
+        key = serialization.load_pem_private_key(data, None)
+        (cert,) = x509.load_pem_x509_certificates(data)
+        assert format(cert.serial_number, "X") == newest["serial"]
+        assert cert.public_key().public_numbers() == key.public_key().public_numbers()
+        assert (device / "device.pem").stat().st_mode & 0o777 == 0o600
+        previous.append(newest)
+
+    calls = kur_calls(cmp_openssl)
+    assert len(calls) == 2
+    for call, signer in zip(calls, previous[:2]):
+        argv = call["argv"]
+
+        def opt(flag):
+            return argv[argv.index(flag) + 1]
+        assert opt("-server") == f"https://{HOST}" + enrollment.CMP_PATH.format(alternative_id=policy["alternative_id"])
+        assert opt("-cert") == opt("-key") == opt("-extracerts") == str(device / "device.pem")
+        assert opt("-trusted") == str(device / "ca-chain.pem") and "-implicit_confirm" in argv
+        assert "-ref" not in argv and "-secret" not in argv  # signature protection by the current certificate
+        signed_with = x509.load_pem_x509_certificate(call["files"]["-cert"].encode())
+        assert format(signed_with.serial_number, "X") == signer["serial"]
+        new_key = serialization.load_pem_private_key(call["files"]["-newkey"].encode(), None)
+        issued = x509.load_pem_x509_certificate(call["issued"].encode())
+        assert issued.public_key().public_numbers() == new_key.public_key().public_numbers()
+        assert not Path(opt("-newkey")).exists() and not Path(opt("-certout")).exists()  # temp files gone
+        assert set(call["env_keys"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"} == {"PATH"}
+    assert not [r for r in fake.enroll_requests if r.url.path.endswith("/simplereenroll")]
+    assert len(fake.issued()) == 3  # renewal does not revoke
+
+    renewal = [c for c in run["result"]["api_calls"] if c["phase"] == "renewal"]
+    steps = enrollment.renew_steps("cmpv2", cn, "P_256")
+    assert [(c["purpose"], c["method"], c["path"], c["spec"]) for c in renewal] == [
+        (s["purpose"], s["method"], s["path"], {"command": s["command"]}) for s in steps]
+    assert [c["count"] for c in renewal] == [2, 2, 2]
+    stored = db_text(store, "c4") + all_snippets(run)
+    assert "PRIVATE KEY" not in stored and "BEGIN CERTIFICATE" not in db_text(store, "c4")
+    for key in secrets_seen:
+        assert key_body(key) not in stored
+    if auth == "passcode":
+        (record,) = fake.auth_objects["passcode"].values()
+        assert record["body"]["passcode"] not in stored
+    assert fake.violations == []
+
+
+async def test_cmp_renewal_retries_after_rejection(store, enroll_net, cmp_openssl, tmp_path, fast_timing):
+    await start_cmp(store, enroll_net, cmp_openssl, "cr4", tmp_path)
+    cmp_openssl.reject_key_updates(2)  # "PKIStatus: rejection" right after issuance (live wording)
+    fast_timing.clear()
+    run = await renew_cmp(store, cmp_openssl, "cr4", tmp_path)
+    assert len(run["result"]["renewals"]) == 1 and run["result"]["renewals"][0]["attempts"] == 3
+    assert len(kur_calls(cmp_openssl)) == 3 and fast_timing.count(enrollment.RENEW_RETRY_S) == 2
+
+
+async def test_cmp_renewal_gives_up_without_changes(store, enroll_net, cmp_openssl, tmp_path, fast_timing):
+    await start_cmp(store, enroll_net, cmp_openssl, "cf4", tmp_path)
+    before, files = store.get_run("cf4"), device_file(tmp_path, "cf4")
+    cmp_openssl.reject_key_updates(3)
+    fast_timing.clear()
+    run = await renew_cmp(store, cmp_openssl, "cf4", tmp_path)
+    assert run["status"] == "completed" and run["result"] == before["result"]
+    assert device_file(tmp_path, "cf4") == files and len(enroll_net.issued()) == 1
+    assert len(kur_calls(cmp_openssl)) == 3 and fast_timing.count(enrollment.RENEW_RETRY_S) == 2
+    (error,) = [e["message"] for e in store.events("cf4") if e["level"] == "error"]
+    from tests.fake_openssl import REJECTION
+    assert error == "Renewal failed: CMPv2 key update rejected: " + (
+        f"…{('CMP error: ' + REJECTION)[-200:]}" if len("CMP error: " + REJECTION) > 200 else f"CMP error: {REJECTION}")
+
+
+@pytest.mark.parametrize("cause", ["transfer error: connection reset by peer", "cannot load certificate from 'x'"])
+async def test_cmp_renewal_other_failures_are_not_retried(store, enroll_net, cmp_openssl, tmp_path, fast_timing,
+                                                          cause):
+    """Only DTM's rejection is worth a retry – anything else could issue extra certificates."""
+    await start_cmp(store, enroll_net, cmp_openssl, "cn4", tmp_path)
+    before = store.get_run("cn4")
+    cmp_openssl.fail_key_updates(cause)
+    fast_timing.clear()
+    run = await renew_cmp(store, cmp_openssl, "cn4", tmp_path)
+    assert run["result"] == before["result"] and len(kur_calls(cmp_openssl)) == 1
+    assert fast_timing.count(enrollment.RENEW_RETRY_S) == 0
+    (error,) = [e["message"] for e in store.events("cn4") if e["level"] == "error"]
+    assert error == f"Renewal failed: CMPv2 key update rejected: CMP error: {cause}"
+
+
+async def test_cmp_renewal_without_ca_chain_is_not_retried(store, enroll_net, cmp_openssl, tmp_path, fast_timing):
+    await start_cmp(store, enroll_net, cmp_openssl, "cc4", tmp_path)
+    (tmp_path / "runs" / "cc4" / "device" / "ca-chain.pem").unlink()
+    fast_timing.clear()
+    run = await renew_cmp(store, cmp_openssl, "cc4", tmp_path)
+    assert run["result"]["renewals"] == [] and len(kur_calls(cmp_openssl)) <= 1
+    assert fast_timing.count(enrollment.RENEW_RETRY_S) == 0
+    assert any(e["message"].startswith("Renewal failed: CMPv2 key update") for e in store.events("cc4"))
+
+
+@pytest.mark.parametrize("protocol", ["est", "cmpv2"])
+async def test_renewal_time_is_the_network_call_only(store, enroll_net, cmp_openssl, tmp_path, monkeypatch, protocol):
+    """Key generation is reported separately – a slow keygen must not show up as round trip."""
+    import time as real_time
+    if protocol == "cmpv2":
+        await start_cmp(store, enroll_net, cmp_openssl, "tn4", tmp_path)
+    else:
+        await start(store, enroll_net, "tn4", tmp_path)
+    slow = certs.device_request
+
+    def slow_keygen(cn, key_type):
+        real_time.sleep(1.0)
+        return slow(cn, key_type)
+    monkeypatch.setattr(certs, "device_request", slow_keygen)
+    run = await renew(store, "tn4", tmp_path)
+    (renewal,) = run["result"]["renewals"]
+    assert renewal["keygen_s"] >= 1.0 and renewal["seconds"] < 1.0  # would be >= 1 s if keygen were included
+
+
+
+async def test_cmp_renewal_with_a_revoked_certificate_is_refused(store, enroll_net, cmp_openssl, tmp_path):
+    """Not injected: the fake DTM no longer lists the signer certificate as issued."""
+    await start_cmp(store, enroll_net, cmp_openssl, "cv4", tmp_path)
+    for c in enroll_net.certificates.values():
+        c["status"] = "REVOKED"
+    cmp_openssl.sync_to_dtm()
+    run = await renew_cmp(store, cmp_openssl, "cv4", tmp_path)
+    assert run["result"]["renewals"] == []
+    errors = [e["message"] for e in store.events("cv4") if e["level"] == "error"]
+    assert errors == ["Renewal failed: CMPv2 key update rejected: CMP error: signer certificate is not an issued "
+                      "certificate of this policy"]
+
+
+async def test_cmp_renewal_without_openssl(store, enroll_net, cmp_openssl, tmp_path, monkeypatch):
+    await start_cmp(store, enroll_net, cmp_openssl, "co4", tmp_path)
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    run = await renew(store, "co4", tmp_path)
+    assert run["result"]["renewals"] == []
+    assert any(e["message"] == "Renewal failed: openssl is not installed – CMPv2 needs it" for e in store.events("co4"))
+
+
+async def test_cmp_full_rollback_revokes_all_and_removes_the_device(store, enroll_net, cmp_openssl, tmp_path):
+    await start_cmp(store, enroll_net, cmp_openssl, "cb4", tmp_path, auth="certificate")
+    await renew_cmp(store, cmp_openssl, "cb4", tmp_path)
+    await renew_cmp(store, cmp_openssl, "cb4", tmp_path)
+    assert len(enroll_net.issued()) == 3
+    run = await do_cleanup(store, enroll_net, "cb4", "full", tmp_path)
+    assert run["cleanup_status"] == "done", store.events("cb4")
+    assert enroll_net.issued() == [] and not (tmp_path / "runs" / "cb4").exists()
+    assert enroll_net.profile(dtm.PROFILE_RENEWAL_CMP.name)["status"] == "ACTIVE"  # shared, kept
+
+
+def test_cmp_renew_steps():
+    for key_type in ("P_256", "RSA_2048"):
+        steps = enrollment.renew_steps("cmpv2", "robot-x1-uc04-cmpv2-0001", key_type)
+        assert [s["kind"] for s in steps] == ["keygen", "call", "convert"]
+        assert {s["phase"] for s in steps} == {"renewal"}
+        assert [s["method"] for s in steps] == ["LOCAL", "POST", "LOCAL"]
+        assert steps[1]["path"] == enrollment.CMP_PATH.format(alternative_id="{CMP_ID}")
+        for s in steps:
+            for text in s["command"].values():
+                assert "x-api-key" not in text.lower() and "PASSCODE" not in text and "PRIVATE KEY" not in text
+        keygen, call, convert = (s["command"] for s in steps)
+        assert "openssl genpkey" in keygen["bash"] and "device-new.key" in keygen["bash"]
+        assert ("RSA" in keygen["bash"]) == (key_type == "RSA_2048")
+        for shell in ("bash", "powershell"):
+            assert "openssl cmp -cmd kur" in call[shell] and "DIOT_" in call[shell] and "clientauth." not in call[shell]
+            assert "-newkey device-new.key" in call[shell] and "-certout device-new.crt" in call[shell]
+        assert "\nsleep 10\n" in "\n" + call["bash"] and "Start-Sleep 10" in call["powershell"]
+        assert "mv device-new.crt" in convert["bash"] and "mv device-new.key device.key" in convert["bash"]
+        assert "Move-Item" in convert["powershell"]
+
+
+REPLAY_CURL = """
+import json, os, sys
+args, opts, i = sys.argv[1:], {}, 0
+while i < len(args):
+    if args[i] in ("-X", "-H", "-o", "--data", "--data-binary", "-F", "--cert", "--key", "--cert-type"):
+        opts.setdefault(args[i], []).append(args[i + 1]); i += 2
+    elif args[i].startswith("-"):
+        i += 1
+    else:
+        opts["url"] = args[i]; i += 1
+with open(os.environ["STUB_LOG"], "a") as log:
+    log.write(json.dumps({"method": (opts.get("-X") or ["GET"])[0], "url": opts["url"]}) + "\\n")
+answers = json.loads(open(os.environ["STUB_ANSWERS"]).read())
+path = opts["url"].split("://", 1)[1].split("/", 1)[1].split("?")[0]
+body = next((v for k, v in answers.items() if ("/" + path).endswith(k)), {})
+if "-o" in opts:
+    open(opts["-o"][0], "w").write(json.dumps(body))
+else:
+    sys.stdout.write(json.dumps(body))
+"""
+
+
+async def test_replay_of_a_cmp_passcode_run_builds_the_ca_chain_before_kur(store, enroll_net, cmp_openssl, tmp_path):
+    """The copyable bash steps of a UC-4 CMPv2 + passcode run, in order (setup → enrollment → renewal),
+    against stubs: management calls answer canned JSON, openssl cmp is the fake (it learns the
+    certificates it issued, like DTM), everything else is the real openssl / jq."""
+    import base64
+    import os
+    import shutil
+    import subprocess
+    import sys
+    real = next((p for p in (shutil.which("openssl", path=d) for d in os.environ["PATH"].split(os.pathsep)
+                             if d != str(cmp_openssl.bin_dir)) if p), None)
+    if not (real and shutil.which("jq") and shutil.which("bash")) or not subprocess.run(
+            [real, "version"], capture_output=True, text=True).stdout.startswith("OpenSSL 3"):
+        pytest.skip("needs bash, jq and OpenSSL 3")
+    run = await start_cmp(store, enroll_net, cmp_openssl, "rp4", tmp_path)
+    assert run["status"] == "completed", run["error"]
+    calls = run["result"]["api_calls"]
+    assert [c["phase"] for c in calls] == sorted((c["phase"] for c in calls),
+                                                 key=["setup", "recurring", "renewal"].index)
+    script = snippets.script(run["result"]["api_variables"], calls, "curl")
+
+    work, bin_dir = tmp_path / "replay", tmp_path / "replay-bin"
+    work.mkdir()
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(f"#!{sys.executable}\n" + REPLAY_CURL)
+    (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n")  # the "wait for DTM" pause
+    for tool in ("curl", "sleep"):
+        (bin_dir / tool).chmod(0o755)
+    cmp_openssl.pass_through(real)
+    cmp_openssl.config["auto_state"] = True
+    cmp_openssl._write()
+    (cmp_openssl.bin_dir / "state.json").unlink(missing_ok=True)
+    chain = [{"blob": base64.b64encode(c.public_bytes(serialization.Encoding.DER)).decode()}
+             for c in (enroll_net.ica_cert, enroll_net.root_cert)]
+    answers = {enrollment.PASSCODE_PATH: {"id": "p1", "alternate_id": "ref-replay"},
+               "/certificate-policy/IOT_replay": {"id": "IOT_replay", "alternative_id": "replay1", "ca_chain": chain}}
+    (tmp_path / "answers.json").write_text(json.dumps(answers))
+    env = {"PATH": f"{bin_dir}{os.pathsep}{cmp_openssl.bin_dir}{os.pathsep}{os.environ['PATH']}",
+           "STUB_LOG": str(tmp_path / "curl.jsonl"), "STUB_ANSWERS": str(tmp_path / "answers.json"),
+           "HOME": str(tmp_path)}
+    script = script.replace("export POLICY_ID=" + run["result"]["api_variables"]["POLICY_ID"],
+                            "export POLICY_ID=IOT_replay")
+    cmp_openssl.record.unlink(missing_ok=True)
+    result = subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, env=env, capture_output=True,
+                            text=True, timeout=120)
+    assert result.returncode == 0, result.stderr[-2000:]
+    calls_made = cmp_openssl.calls()
+    assert [c["argv"][2] for c in calls_made] == ["ir", "kur"], calls_made
+    ir, kur = calls_made
+    assert ir["argv"][ir["argv"].index("-ref") + 1] == "ref-replay"  # read from passcode.json.out
+    assert kur["argv"][kur["argv"].index("-server") + 1].endswith("/DIOT_replay1")  # read from policy.json
+    # ca-chain.pem existed (built from policy.json) when kur ran, and holds the policy's chain
+    assert kur["files"]["-trusted"] == cert_pem(enroll_net.ica_cert) + cert_pem(enroll_net.root_cert)
+    final = x509.load_pem_x509_certificate((work / "device.crt").read_bytes())
+    key = serialization.load_pem_private_key((work / "device.key").read_bytes(), None)
+    assert final == x509.load_pem_x509_certificate(kur["issued"].encode())  # switched to the renewed one
+    assert final.public_key().public_numbers() == key.public_key().public_numbers()

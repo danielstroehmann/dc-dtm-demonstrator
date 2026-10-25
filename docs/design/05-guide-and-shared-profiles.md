@@ -4,7 +4,7 @@
 
 ## One guided entry for UC-1 to UC-3
 
-The home page offers **Evergreen Device IDs** (guided) and **UC-4** (renewal in the field). The guide asks:
+The home page offers **Evergreen device certificates** (guided, UC-1..UC-3) and **Renewable device certificates** (UC-4). The guide asks:
 
 1. Where is the key pair generated? – in DTM (server-side) / in the factory
 2. How many devices at once? – batch (count) / single device (**always exactly one certificate**)

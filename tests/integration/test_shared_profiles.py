@@ -198,8 +198,8 @@ async def test_status(fake):
     shared(fake, EVERGREEN)
     shared(fake, CMP, status="DISABLED")
     shared(fake, RENEWAL, account_id=OTHER_ACCOUNT_ID, unit="months", value=6)  # not ours
-    assert await call(fake, "shared_profile_status") == {EVERGREEN.name: "ACTIVE", CMP.name: "DISABLED",
-                                                         RENEWAL.name: "missing"}
+    missing = {s.name: "missing" for s in dtm.SHARED_PROFILES}
+    assert await call(fake, "shared_profile_status") == missing | {EVERGREEN.name: "ACTIVE", CMP.name: "DISABLED"}
     assert writes(fake) == []
 
 
@@ -222,7 +222,8 @@ async def test_retire_disables_ours_only(fake):
     fake.profiles.append(legacy)
     fake.calls.clear()
     status = await call(fake, "retire_shared_profiles")
-    assert status == {EVERGREEN.name: "DISABLED", CMP.name: "DISABLED", RENEWAL.name: "missing"}
+    assert status == {s.name: "missing" for s in dtm.SHARED_PROFILES} | {EVERGREEN.name: "DISABLED",
+                                                                        CMP.name: "DISABLED"}
     assert ours["status"] == retired["status"] == legacy["status"] == "DISABLED"
     assert foreign["status"] == "ACTIVE"
     assert sorted(fake.names("profile_disable")) == sorted([ours["id"], legacy["id"]])  # no needless PUTs
@@ -256,7 +257,7 @@ async def test_engines_use_the_right_profile_and_never_record_or_delete_it(store
         assert run["result"]["api_variables"]["PROFILE_ID"] == policy["certificate_profile_id"]
         assert not any("profile" in o["kind"] or o["name"].startswith("robot-evergreen")
                        or o["name"].startswith("robot-renewal") for o in store.objects(run_id))
-    assert sorted(b["name"] for b in fake.created_profiles) == sorted(s.name for s in dtm.SHARED_PROFILES)
+    assert sorted(b["name"] for b in fake.created_profiles) == sorted(s.name for s in (EVERGREEN, CMP, RENEWAL))
     messages = [e["message"] for r in runs for e in store.events(r)]
     assert sum(m.startswith("Created the shared certificate profile") for m in messages) == 3
     assert sum(m.startswith("Using the shared certificate profile") for m in messages) == 3
@@ -270,7 +271,7 @@ async def test_engines_use_the_right_profile_and_never_record_or_delete_it(store
         finally:
             await client.aclose()
         assert store.get_run(run_id)["cleanup_status"] == "done", store.events(run_id)
-    assert {fake.profile(s.name)["status"] for s in dtm.SHARED_PROFILES} == {"ACTIVE"}
+    assert {fake.profile(s.name)["status"] for s in (EVERGREEN, CMP, RENEWAL)} == {"ACTIVE"}
     assert not any(n.startswith("profile_") and n not in ("profile_get", "profile_create") for n in fake.route_order())
     assert fake.violations == []  # a profile delete would hit an unmodelled endpoint
 

@@ -62,7 +62,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - Test credentials live only in the local, gitignored `.env` – never in chat logs, docs or commits.
 
 ### UI (overrides commons ui-ux "unified look across projects")
-
+- **Desktop browsers only** (author, 2026-10-25) – overrides the commons' iPhone target (and the mobile
+  PageSpeed score): compact vertical spacing, fields and questions side by side; no mobile layout work.
 - Look & feel recognisable from **docs.digicert.com**: Roboto (self-hosted, OFL), DigiCert
   blue `#1976d2` (hover `#11508e`, header `#004ba0`), orange accent `#f57c00`, greys
   `#333`/`#777`/`#f5f5f5` – applied as Pico CSS variables in `app/static/app.css`. Modern

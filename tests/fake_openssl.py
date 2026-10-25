@@ -63,8 +63,11 @@ def main() -> None:
     RECORD.update({"argv": argv, "cmp_secret": os.environ.get("CMP_SECRET"), "env_keys": sorted(os.environ),
                    "files": files})
 
-    if argv[:1] != ["cmp"] or options.get("-cmd") != "ir":
-        fail("only 'cmp -cmd ir' is modelled")
+    if argv[:1] != ["cmp"] or options.get("-cmd") not in ("ir", "kur"):
+        fail("only 'cmp -cmd ir' and 'cmp -cmd kur' are modelled")
+    if options.get("-cmd") == "kur":
+        key_update(config, options, files)
+        return
     if config.get("fail"):  # "{secret}" echoes the MAC secret, as a careless server message might
         fail(config["fail"].replace("{secret}", os.environ.get("CMP_SECRET", "")))
     secret = options.get("-secret", "")
@@ -84,6 +87,53 @@ def main() -> None:
             .issuer_name(ca_cert.subject).public_key(device_key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=365))
+            .sign(ca_key, hashes.SHA256()))
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    Path(options["-certout"]).write_bytes(pem)
+    save(pem.decode())
+    if config.get("auto_state"):  # replay tests: DTM now lists this certificate as issued
+        state_file = Path(sys.argv[0]).resolve().parent / "state.json"
+        state = json.loads(state_file.read_text()) if state_file.exists() else {}
+        alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1]
+        state.setdefault(alternative_id, []).append(format(cert.serial_number, "x"))
+        state_file.write_text(json.dumps(state))
+
+
+REJECTION = ('request rejected by server:PKIStatus: rejection; StatusString: "certificate not yet valid for '
+             'key update"; PKIFailureInfo: badRequest')
+
+
+def key_update(config: dict, options: dict, files: dict) -> None:
+    """kur: signature protection with the current certificate. Like DTM: the signer must be a
+    certificate issued under the policy behind DIOT_<id> and not revoked (state.json, published by
+    the test from the fake DTM), and its key must sign; the new certificate keeps the subject."""
+    if config.get("kur_reject", 0) > 0:  # DTM refuses a just-issued certificate for a few seconds
+        config["kur_reject"] -= 1
+        (Path(sys.argv[0]).resolve().parent / "config.json").write_text(json.dumps(config))
+        fail(REJECTION)  # the live wording
+    if config.get("kur_fail"):  # a failure that is not DTM's rejection (transport, local files, …)
+        fail(config["kur_fail"])
+    if not all(f in files for f in ("-cert", "-key", "-extracerts", "-trusted", "-newkey")):
+        fail("kur needs -cert, -key, -extracerts, -trusted and -newkey")
+    state = json.loads((Path(sys.argv[0]).resolve().parent / "state.json").read_text())
+    alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1]
+    current = x509.load_pem_x509_certificate(files["-cert"].encode())
+    signer = serialization.load_pem_private_key(files["-key"].encode(), None)
+    if format(current.serial_number, "x") not in state.get(alternative_id, []):
+        fail("signer certificate is not an issued certificate of this policy")
+    if signer.public_key().public_numbers() != current.public_key().public_numbers():
+        fail("message signature invalid")
+    if x509.load_pem_x509_certificate(files["-extracerts"].encode()) != current:
+        fail("Error while reading the certificate in the extraCert field")
+    if config["ca_cert"].strip() not in files["-trusted"]:
+        fail("cannot validate the response signature (-trusted)")
+    new_key = serialization.load_pem_private_key(files["-newkey"].encode(), None)
+    ca_cert = x509.load_pem_x509_certificate(config["ca_cert"].encode())
+    ca_key = serialization.load_pem_private_key(config["ca_key"].encode(), None)
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(current.subject).issuer_name(ca_cert.subject)
+            .public_key(new_key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=180))
             .sign(ca_key, hashes.SHA256()))
     pem = cert.public_bytes(serialization.Encoding.PEM)
     Path(options["-certout"]).write_bytes(pem)

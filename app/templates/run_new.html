@@ -11,36 +11,30 @@
 {% set guide = use_case_id == "evergreen" %}
 <nav aria-label="breadcrumb"><ul><li><a href="/runs/new?connection={{ connection.id }}">Use cases</a></li><li>{{ use_case.title }}</li></ul></nav>
 <div class="page-head">
-  <div><h1>{{ use_case.title }}</h1>
-  <p>{{ use_case.summary }}</p>
-  {% if several %}<p>Connection: <strong>{{ connection.name }}</strong> – {{ connection.host }}</p>{% endif %}</div>
+  <div><h1>{{ use_case.title }}</h1></div>
 </div>
 <article class="card">
 {# The guide shows each question only when it applies (data-when, see app.js); the server resolves
    the answers to UC-1, UC-2 or UC-3 and checks them again. #}
-<form method="post" action="/runs" {% if guide %}data-guide{% endif %}>
+<form method="post" action="/runs" data-guide>
   <input type="hidden" name="use_case" value="{{ use_case_id }}">
   <input type="hidden" name="connection_id" value="{{ connection.id }}">
   {% if guide %}
   <section class="form-section">
-    <header><h3>Keys</h3></header>
-    <div class="fields">
+    <header><h3>Issuance</h3></header>
+    <div class="fields q-grid">
       {{ choice("key_location", "Where is the key pair generated?",
                 [("server", "In DTM (server-side)", ""), ("factory", "In the factory", "")], "server") }}
-    </div>
-  </section>
-  <section class="form-section">
-    <header><h3>Issuance</h3></header>
-    <div class="fields">
       {{ choice("mode", "How many devices at once?", [("batch", "Batch", ""), ("single", "Single device", "")], "batch") }}
-      <div data-when="mode=batch">
-        <label>Number of certificates
-          <input type="number" name="count" class="short" value="10" min="1" max="{{ max_batch }}">
-        </label>
+      <div class="field" data-when="mode=batch">
+        <label for="count" class="field-label">Number of certificates</label>
+        <input id="count" type="number" name="count" class="short" value="10" min="1" max="{{ max_batch }}">
       </div>
       <div data-when="mode=single key_location=factory">
         {{ choice("protocol", "Protocol", [("rest", "REST API", ""), ("est", "EST", ""), ("cmpv2", "CMPv2", ""),
                                            ("scep", "SCEP", "")], "rest") }}
+      </div>
+      <div data-when="mode=single key_location=factory">
         {{ choice("auth_method", "How does the factory authenticate?",
                   [("apikey", "API key", "protocol=rest"), ("passcode", "Passcode", ""),
                    ("certificate", "Factory certificate", "protocol=rest | protocol=est | protocol=cmpv2")], "apikey") }}
@@ -53,42 +47,46 @@
   {% else %}
   <section class="form-section">
     <header><h3>Enrollment</h3></header>
-    <div class="fields">
+    <div class="fields q-grid">
+      {{ choice("protocol", "Protocol (enrollment and renewal)", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
       {{ choice("auth_method", "How does the factory authenticate?",
                 [("passcode", "Passcode", ""), ("certificate", "Factory certificate", "")], "passcode") }}
-      <input type="hidden" name="protocol" value="est"><input type="hidden" name="count" value="1">
+      <input type="hidden" name="count" value="1">
       <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
     </div>
   </section>
   {% endif %}
+  {# The profile is not chosen – it is the shared one for the purpose; shown as a read-only field. #}
+  {% macro profile_field(name, validity, when="") -%}
+  <div class="field" {% if when %}data-when="{{ when }}"{% endif %}>
+    <span class="field-label">Certificate profile</span>
+    <div class="readonly-value mono" tabindex="0" data-tip="Shared per account and reused by every run – DTM does not allow deleting used profiles">{{ name }}</div>
+    <small class="field-help">{{ validity }}{% if profile_status.get(name) == "missing" %} – created once by this run, DTM keeps it{% elif profile_status.get(name) == "DISABLED" %} – retired, this run enables it again{% endif %}</small>
+  </div>
+  {%- endmacro %}
   <section class="form-section">
     <header><h3>Certificate</h3></header>
-    <div class="fields">
-      <div class="field-row">
-        <label>Issuing CA
-          <select name="ca_id" required>
-            {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.name }} ({{ ca.key_type | upper }})</option>{% endfor %}
-          </select>
-        </label>
-        {% macro profile_line(name, validity, when="") -%}
-        <p class="field-help" {% if when %}data-when="{{ when }}"{% endif %} data-tip="Shared per account and reused by every run – DTM does not allow deleting used profiles">Profile <span class="mono">{{ name }}</span> ({{ validity }}){% if profile_status.get(name) == "missing" %} – created once by this run, DTM keeps it{% elif profile_status.get(name) == "DISABLED" %} – retired, this run enables it again{% endif %}</p>
-        {%- endmacro %}
-        {% if guide %}
-        {{ profile_line("robot-evergreen-5y-profile", "5 years", "mode=batch | key_location=server | protocol=rest | protocol=est | protocol=scep") }}
-        <p class="field-help" data-when="mode=single key_location=factory protocol=scep">SCEP needs an RSA issuing CA</p>
-        {{ profile_line("robot-evergreen-cmp-5y-profile", "5 years, bare public key", "mode=single key_location=factory protocol=cmpv2") }}
-        {% else %}{{ profile_line("robot-renewal-6m-profile", "6 months, renewable any time") }}{% endif %}
+    <div class="fields q-grid">
+      <div class="field">
+        <label for="ca_id" class="field-label">Issuing CA</label>
+        <select id="ca_id" name="ca_id" required>
+          {% for ca in cas %}<option value="{{ ca.id }}">{{ ca.key_type | upper }} · {{ ca.name }}</option>{% endfor %}
+        </select>
+        {% if guide %}<small class="field-help" data-when="mode=single key_location=factory protocol=scep">SCEP needs an RSA issuing CA</small>{% endif %}
       </div>
-      {% if guide %}<label data-when="mode=batch variant=api"><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
-    </div>
-  </section>
-  <section class="form-section">
-    <header><h3>Run</h3></header>
-    <div class="fields">
-      <label>Run ID
-        <input name="run_id" class="medium" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16" aria-describedby="run-id-help">
-      </label>
-      <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
+      {% if guide %}
+      {{ profile_field("robot-evergreen-5y-profile", "5 years", "mode=batch | key_location=server | protocol=rest | protocol=est | protocol=scep") }}
+      {{ profile_field("robot-evergreen-cmp-5y-profile", "5 years · bare key", "mode=single key_location=factory protocol=cmpv2") }}
+      {% else %}
+      {{ profile_field("robot-renewal-6m-profile", "6 months · renew any time", "protocol=est") }}
+      {{ profile_field("robot-renewal-cmp-6m-profile", "6 months · renew any time · bare key", "protocol=cmpv2") }}
+      {% endif %}
+      <div class="field">
+        <label for="run_id" class="field-label">Run ID</label>
+        <input id="run_id" name="run_id" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16" aria-describedby="run-id-help">
+        <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
+      </div>
+      {% if guide %}<label class="switch-cell" data-when="mode=batch variant=api"><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
     </div>
   </section>
   <div class="action-bar">

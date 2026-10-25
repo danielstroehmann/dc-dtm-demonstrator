@@ -57,12 +57,18 @@ def test_form_loads_data_from_the_selected_connection(two, fakes):
     html = two.get(f"/runs/new/evergreen?connection={two.ids['NL']}").text
     assert "NL ECDSA ICA" in html and "Fake ECDSA ICA" not in html
     assert fakes[OTHER_ACCOUNT_ID].names("profiles")  # the profile hints come from the selected account
-    assert "Connection: <strong>NL</strong>" in html
+    assert "Connection:" not in html  # no connection line any more – the hidden field carries it
+    # the header chip shows the connection of this form, not the default one
+    assert re.search(r'class="conn-chip" data-tip="DTM connection: NL · [^"]*"><span>NL · ', html)
+    assert not re.search(r'class="conn-chip"[^>]*><span>US · ', html) and "Default connection:" not in html
+    # elsewhere the chip shows the default connection
+    assert re.search(r'class="conn-chip" data-tip="DTM connection: US · [^"]*"><span>US · ', two.get("/").text)
     assert f'<input type="hidden" name="connection_id" value="{two.ids["NL"]}">' in html
     assert f'href="/runs/new?connection={two.ids["NL"]}">' in html  # breadcrumb keeps the choice
     assert fakes[ACCOUNT_ID].requests == []
     default = two.get("/runs/new/evergreen").text
-    assert "Fake ECDSA ICA" in default and "Connection: <strong>US</strong>" in default
+    assert "Fake ECDSA ICA" in default and "NL ECDSA ICA" not in default
+    assert f'<input type="hidden" name="connection_id" value="{two.ids["US"]}">' in default
 
 
 def test_run_on_a_non_default_connection_and_cleanup_uses_it(two, store, fakes):

@@ -21,7 +21,7 @@
       <ul>
         <li><a class="nav-link" href="/" {% if nav == "runs" %}aria-current="page"{% endif %}>Runs</a></li>
         <li><a class="nav-link" href="/settings" {% if nav == "settings" %}aria-current="page"{% endif %}>Settings</a></li>
-        {% if default_connection %}<li><a href="/settings" class="conn-chip" data-tip="Default connection: {{ default_connection.name }} · {{ default_connection.host }}"><span>{{ default_connection.name }} · {{ default_connection.host }}</span></a></li>{% endif %}
+        {% if default_connection %}<li><a href="/settings" class="conn-chip" data-tip="DTM connection: {{ default_connection.name }} · {{ default_connection.host }}"><span>{{ default_connection.name }} · {{ default_connection.host }}</span></a></li>{% endif %}
         <li><form method="post" action="/logout" class="inline"><button type="submit" class="logout" aria-label="Log out" data-tip="Log out">{{ icon("logout") }}</button></form></li>
       </ul>
       {% endif %}{% endblock %}

@@ -245,8 +245,15 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     phase="setup")
                 store.add_object(run_id, "passcode", created["id"], f"{base}-passcode")
                 passcode_ref = created["alternate_id"]
-                if protocol == "cmpv2":  # CMPv2 sender KID of the user's own passcode
-                    variables["PASSCODE_REF"] = "<alternate_id from passcode.json.out>"
+                if protocol == "cmpv2":  # CMPv2 sends this reference as sender KID – an ID, not a secret
+                    if not SAFE_ID.fullmatch(passcode_ref or ""):
+                        raise EnrollmentError("DTM returned no usable passcode reference")
+                    variables["PASSCODE_REF"] = passcode_ref
+                    api.add("Read the passcode reference CMPv2 sends as sender ID (local)", "LOCAL", "jq", None,
+                            spec={"command": {
+                                "bash": "export PASSCODE_REF=\"$(jq -r .alternate_id passcode.json.out)\"",
+                                "powershell": "$env:PASSCODE_REF = (Get-Content passcode.json.out -Raw | ConvertFrom-Json).alternate_id"}},
+                            phase="setup")
             else:
                 log("The factory creates its own client certificate (self-signed) and registers it in DTM")
                 factory = certs.factory_certificate(f"{base}-factory")
@@ -263,8 +270,9 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     phase="setup")
 
             # UC-4 renews: 6 months, renewable at any time; CMPv2 sends a bare public key.
-            spec = (dtm.PROFILE_RENEWAL if p["use_case"] == "uc04" else
-                    dtm.PROFILE_EVERGREEN_CMP if protocol == "cmpv2" else dtm.PROFILE_EVERGREEN)
+            renewal = p["use_case"] == "uc04"
+            spec = {(False, False): dtm.PROFILE_EVERGREEN, (False, True): dtm.PROFILE_EVERGREEN_CMP,
+                    (True, False): dtm.PROFILE_RENEWAL, (True, True): dtm.PROFILE_RENEWAL_CMP}[(renewal, protocol == "cmpv2")]
             profile_id = await use_shared_profile(client, api, spec, variables, log)
 
             policy_name = f"{base}-policy"
@@ -288,11 +296,16 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                                          spec={"method": "GET", "path": f"{POLICY_PATH}/{{POLICY_ID}}",
                                                "output": "policy.json"}, phase="setup")
                 cmp_id = detail.get("alternative_id")
-                if not cmp_id:
-                    raise EnrollmentError(f"DTM returned no short ID for the {PROTOCOLS[protocol]} endpoint")
+                if not SAFE_ID.fullmatch(cmp_id or ""):
+                    raise EnrollmentError(f"DTM returned no usable short ID for the {PROTOCOLS[protocol]} endpoint")
                 ca_chain_pem = "".join(certs.der_b64_to_pem(c["blob"]) for c in detail.get("ca_chain") or []
                                        if c.get("blob"))
                 variables["CMP_ID"] = cmp_id
+                api.add(f"Read the policy's short ID for the {PROTOCOLS[protocol]} endpoint (local)", "LOCAL", "jq", None,
+                        spec={"command": {
+                            "bash": "export CMP_ID=\"$(jq -r .alternative_id policy.json)\"",
+                            "powershell": "$env:CMP_ID = (Get-Content policy.json -Raw | ConvertFrom-Json).alternative_id"}},
+                        phase="setup")
             log("DTM is configured for this run", "success")
             result |= {"division": f"{base}-division", "policy": policy_name, "protocol": protocol, "auth": auth}
 
@@ -301,8 +314,12 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             result |= await _enroll(station, api, store, run_id, p, log)
             if p["use_case"] == "uc04":  # the device in the field: its key and certificate
                 _save_device(run_dir, station.last_key, result["certificates"][-1]["pem"])
+                if protocol == "cmpv2":  # CMPv2 key update: same endpoint, answers signed by the issuing CA
+                    (run_dir / "device" / "ca-chain.pem").write_text(ca_chain_pem)
+                    result["cmp_id"] = cmp_id
                 result["renewals"] = []
-                _record_renewal_steps(api.calls, result["certificates"][-1]["common_name"], p["key_type"], None, None)
+                _record_renewal_steps(api.calls, protocol, result["certificates"][-1]["common_name"], p["key_type"],
+                                      None, None)
                 for key in ("estimate_min", "estimate_devices"):  # one device – nothing to extrapolate
                     result.pop(key, None)
         certs.save_certificates(run_dir, result.get("certificates") or [])
@@ -336,8 +353,8 @@ def _save_device(run_dir: Path, key_pem: bytes, cert_pem: str) -> None:
 
 
 async def renew(store: Store, run_id: str, run_dir: Path) -> None:
-    """UC-4, per click: the device renews in the field via EST simplereenroll. It authenticates with
-    its current certificate (mTLS on the clientauth host) – no passcode, no factory certificate.
+    """UC-4, per click: the device renews in the field via EST simplereenroll (mTLS on the clientauth
+    host) or a CMPv2 key update (signed) – authenticated by its current certificate only.
     Verified live on Essentials: same CN, new serial and validity; the old certificate stays issued.
     Whatever happens, the run leaves "renewing" again."""
     log = lambda msg, level="step": store.add_event(run_id, msg, level)  # noqa: E731
@@ -360,37 +377,23 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
     if not policies or not SAFE_ID.fullmatch(policies[0]["dtm_id"]):
         raise EnrollmentError("the run has no usable certificate policy")
     policy_id, cn = policies[0]["dtm_id"], result["certificates"][0]["common_name"]
+    protocol = p.get("protocol", "est")
     store.update_run(run_id, progress={"label": "Renewing in the field", "started": time.time()})
     log("Renewal in the field: the device authenticates with its current certificate")
     start = time.monotonic()
     key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])  # a fresh key pair
     keygen = time.monotonic() - start
-    context = ssl.create_default_context(cafile=certifi.where())
-    context.load_cert_chain(run_dir / "device" / "device.pem")
-    async with httpx.AsyncClient(verify=context, timeout=REQUEST_TIMEOUT) as http:
-        for attempt in range(1, RENEW_ATTEMPTS + 1):
-            start = time.monotonic()
-            try:
-                response = await http.post(
-                    f"https://clientauth.{p['dtm_host']}{RENEW_PATH.format(policy_id=policy_id)}",
-                    headers={"Content-Type": "application/pkcs10", "Content-Transfer-Encoding": "base64"},
-                    content=base64.b64encode(csr.public_bytes(serialization.Encoding.DER)))
-            except httpx.HTTPError as exc:
-                raise EnrollmentError(f"EST simplereenroll failed: {type(exc).__name__}") from exc
-            seconds = time.monotonic() - start
-            if response.status_code != 401 or attempt == RENEW_ATTEMPTS:
-                break
-            log(f"DTM does not accept the new certificate yet – retrying in {RENEW_RETRY_S:g}s", "wait")
-            await asyncio.sleep(RENEW_RETRY_S)
-    if response.status_code >= 300:
-        text = response.text[:200] if not response.text.lstrip().startswith("<") else "(HTML error page)"
-        hint = (" – the certificate profile does not allow renewing a valid certificate"
-                if "Renewal is disabled" in response.text else "")
-        raise EnrollmentError(f"EST simplereenroll returned {response.status_code}: {text}{hint}")
-    try:
-        issued = certs.parse_pkcs7_certificates(base64.b64decode(response.content))[0]
-    except (ValueError, IndexError) as exc:
-        raise EnrollmentError("EST simplereenroll answer contains no certificate") from exc
+    for attempt in range(1, RENEW_ATTEMPTS + 1):
+        if protocol == "cmpv2":
+            issued, retry, seconds = await _renew_cmp(p, result, run_dir, key_pem)
+        else:
+            issued, retry, seconds = await _renew_est(p, policy_id, run_dir, csr)
+        if issued or not retry or attempt == RENEW_ATTEMPTS:
+            break
+        log(f"DTM does not accept the new certificate yet – retrying in {RENEW_RETRY_S:g}s", "wait")
+        await asyncio.sleep(RENEW_RETRY_S)
+    if not issued:
+        raise EnrollmentError(retry)
     pem = issued["pem"]
     certs.save_certificates(run_dir, [issued])  # the result knows the certificate before the device switches
     result["certificates"].append(issued)
@@ -398,7 +401,7 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
     result["renewals"] = result.get("renewals", []) + [
         {"serial": issued["serial"], "seconds": round(seconds, 2), "keygen_s": round(keygen, 2),
          "attempts": attempt, "at": now()}]
-    _record_renewal_steps(result["api_calls"], cn, p["key_type"], keygen, seconds)
+    _record_renewal_steps(result["api_calls"], protocol, cn, p["key_type"], keygen, seconds)
     store.update_run(run_id, result=result)
     _save_device(run_dir, key_pem, pem)
     log(f"Renewed in {seconds:.2f}s (round trip{f', attempt {attempt}' if attempt > 1 else ''}) – new serial "
@@ -406,14 +409,85 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
     store.update_run(run_id, status="completed")
 
 
-def _record_renewal_steps(calls: list[dict], cn: str, key_type: str, keygen: float | None,
+async def _renew_est(p: dict, policy_id: str, run_dir: Path, csr) -> tuple[dict | None, str, float]:
+    """EST simplereenroll with the current certificate as mTLS client certificate. Returns
+    (certificate, "", round trip) or (None, reason, …) – 401 right after issuance is worth a retry."""
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_cert_chain(run_dir / "device" / "device.pem")
+    async with httpx.AsyncClient(verify=context, timeout=REQUEST_TIMEOUT) as http:
+        start = time.monotonic()
+        try:
+            response = await http.post(
+                f"https://clientauth.{p['dtm_host']}{RENEW_PATH.format(policy_id=policy_id)}",
+                headers={"Content-Type": "application/pkcs10", "Content-Transfer-Encoding": "base64"},
+                content=base64.b64encode(csr.public_bytes(serialization.Encoding.DER)))
+        except httpx.HTTPError as exc:
+            raise EnrollmentError(f"EST simplereenroll failed: {type(exc).__name__}") from exc
+        seconds = time.monotonic() - start
+    if response.status_code >= 300:
+        text = response.text[:200] if not response.text.lstrip().startswith("<") else "(HTML error page)"
+        hint = (" – the certificate profile does not allow renewing a valid certificate"
+                if "Renewal is disabled" in response.text else "")
+        reason = f"EST simplereenroll returned {response.status_code}: {text}{hint}"
+        if response.status_code == 401:
+            return None, reason, seconds
+        raise EnrollmentError(reason)
+    try:
+        return certs.parse_pkcs7_certificates(base64.b64decode(response.content))[0], "", seconds
+    except (ValueError, IndexError) as exc:
+        raise EnrollmentError("EST simplereenroll answer contains no certificate") from exc
+
+
+async def _renew_cmp(p: dict, result: dict, run_dir: Path, key_pem: bytes) -> tuple[dict | None, str, float]:
+    """CMPv2 key update request (kur), signed with the current certificate; answers are signed by the
+    issuing CA (verified live). Only a rejection by DTM is worth a retry (the short window right after
+    issuance); timeouts and local errors are final."""
+    cmp_id = result.get("cmp_id") or ""
+    if not SAFE_ID.fullmatch(cmp_id):
+        raise EnrollmentError("the run has no CMPv2 endpoint ID")
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise EnrollmentError("openssl is not installed – CMPv2 needs it")
+    device = run_dir / "device"
+    with tempfile.TemporaryDirectory(prefix="dtm-uc04-") as tmp:
+        key_file, cert_file = Path(tmp, "new.key"), Path(tmp, "new.crt")
+        key_file.write_bytes(key_pem)
+        key_file.chmod(0o600)
+        args = [openssl, "cmp", "-cmd", "kur", "-server", f"https://{p['dtm_host']}{CMP_PATH.format(alternative_id=cmp_id)}",
+                "-tls_used", "-tls_trusted", certifi.where(), "-cert", str(device / "device.pem"),
+                "-key", str(device / "device.pem"), "-extracerts", str(device / "device.pem"),
+                "-trusted", str(device / "ca-chain.pem"), "-newkey", str(key_file), "-implicit_confirm",
+                "-unprotected_errors", "-msg_timeout", "20", "-total_timeout", "30", "-certout", str(cert_file)]
+        start = time.monotonic()
+        process = await asyncio.create_subprocess_exec(*args, env={"PATH": "/usr/bin:/bin"}, stdin=asyncio.subprocess.DEVNULL,
+                                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(process.communicate(), REQUEST_TIMEOUT + 5)
+        except TimeoutError as exc:
+            raise EnrollmentError("CMPv2 key update timed out") from exc
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        seconds = time.monotonic() - start
+        if process.returncode == 0 and cert_file.exists():
+            return certs.parse_pem_certificate(cert_file.read_text()), "", seconds
+        lines = [line for line in out.decode(errors="replace").splitlines() if "CMP error" in line]
+        reason = lines[-1] if lines else "openssl failed"
+        reason = "CMPv2 key update rejected: " + (reason if len(reason) <= 200 else "…" + reason[-200:])
+        if any("rejection" in line.lower() for line in lines):  # DTM answered and refused
+            return None, reason, seconds
+        raise EnrollmentError(reason)
+
+
+def _record_renewal_steps(calls: list[dict], protocol: str, cn: str, key_type: str, keygen: float | None,
                           seconds: float | None) -> None:
     """The renewal block of the reproducible steps: seeded untimed right after the enrollment, then
     each renewal adds its count and time per step."""
     existing = {c["purpose"]: c for c in calls if c.get("phase") == "renewal"}
     timing = {"keygen": keygen, "call": seconds}
     renewed = seconds is not None
-    for step in renew_steps(cn, key_type):
+    for step in renew_steps(protocol, cn, key_type):
         took = timing.get(step["kind"])
         if step["purpose"] in existing:
             entry = existing[step["purpose"]]
@@ -513,7 +587,7 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
     if clientauth:  # Windows' curl.exe (Schannel) takes the client certificate as PKCS#12
         step("setup", "Convert the factory certificate for Windows curl.exe (local, once)", "LOCAL", "openssl",
              "# Linux/macOS: curl uses factory.crt and factory.key directly – nothing to do", P12_PS, "setup")
-    if protocol == "cmpv2" and auth == "certificate":
+    if protocol == "cmpv2":  # signature-protected answers (ir with certificate, every kur renewal)
         step("setup", "Build ca-chain.pem from the policy – DTM signs CMPv2 answers with the issuing CA (local, once)",
              "LOCAL", "openssl", CA_CHAIN_BASH, CA_CHAIN_PS, "setup")
 
@@ -598,9 +672,12 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
     return steps
 
 
-def renew_steps(cn: str, key_type: str) -> list[dict]:
-    """UC-4 renewal in the field, as separate steps: new key + CSR → EST simplereenroll with the
-    current certificate as mTLS client certificate → PEM; the new key replaces the old one."""
+def renew_steps(protocol: str, cn: str, key_type: str) -> list[dict]:
+    """UC-4 renewal in the field, as separate steps: new key (+ CSR) → EST simplereenroll with the
+    current certificate as mTLS client certificate, or CMPv2 key update signed with it → the device
+    switches to the new key and certificate."""
+    if protocol == "cmpv2":
+        return _renew_steps_cmp(key_type)
     new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
     req = (f'openssl req -new -newkey {new_key} -nodes -keyout device-new.key -subj "/CN={cn}" '
            "-outform DER -out renew.der")
@@ -634,4 +711,30 @@ def renew_steps(cn: str, key_type: str) -> list[dict]:
                                    "openssl pkcs7 -inform DER -in renew.p7b -print_certs -out device.crt\n"
                                    "Move-Item -Force device-new.key device.key\n"
                                    "Remove-Item device.p12  # it holds the previous key"}},
+    ]
+
+
+def _renew_steps_cmp(key_type: str) -> list[dict]:
+    genkey = ("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device-new.key"
+              if key_type.upper().startswith("RSA") else
+              "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out device-new.key")
+    lines = [f"-server https://{{host}}{CMP_PATH.format(alternative_id='{cmp}')}", "-tls_used -tls_trusted {bundle}",
+             "-cert device.crt -key device.key -extracerts device.crt -trusted ca-chain.pem",
+             "-newkey device-new.key -implicit_confirm -certout device-new.crt"]
+    bash = [line.format(host="${DTM_HOST}", cmp="${CMP_ID}", bundle="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}")
+            for line in lines]
+    ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE") for line in lines]
+    wait = "# DTM accepts a just-issued certificate for renewal only after a few seconds\n"
+    return [
+        {"kind": "keygen", "phase": "renewal", "method": "LOCAL", "path": "openssl",
+         "purpose": "Generate a new device key – CMPv2 sends the public key, no CSR (local)",
+         "command": {"bash": genkey, "powershell": genkey}},
+        {"kind": "call", "phase": "renewal", "method": "POST", "path": CMP_PATH.format(alternative_id="{CMP_ID}"),
+         "purpose": "Renew via CMPv2 key update (kur) – signed with the current device certificate (in the field)",
+         "command": {"bash": wait + "sleep 10\nopenssl cmp -cmd kur " + " \\\n  ".join(bash),
+                     "powershell": wait + "Start-Sleep 10\nopenssl cmp -cmd kur " + " `\n  ".join(ps)}},
+        {"kind": "convert", "phase": "renewal", "method": "LOCAL", "path": "openssl",
+         "purpose": "Switch the device to the new key and certificate (local)",
+         "command": {"bash": "mv device-new.crt device.crt\nmv device-new.key device.key",
+                     "powershell": "Move-Item -Force device-new.crt device.crt\nMove-Item -Force device-new.key device.key"}},
     ]

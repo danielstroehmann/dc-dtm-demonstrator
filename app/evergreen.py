@@ -42,15 +42,15 @@ USE_CASES = {
         "with a passcode or its own client certificate. The request is timed and extrapolated to a production run.",
         "client_side", ("EST · CMPv2 · SCEP · REST", "Passcode · Factory certificate", "Single device")),
     "uc04": UseCase(
-        "Evergreen Device ID with Renewal in the Field",
-        "One device is enrolled in the factory via EST and later renews its certificate in the field with a "
+        "Renewable device certificates",
+        "One device is enrolled in the factory via EST or CMPv2 and later renews its certificate in the field with a "
         "click – authenticated by the certificate it already holds. No device group, so the Essentials license "
         "is enough.",
-        "client_side", ("EST", "Single device", "Renewal per click")),
+        "client_side", ("EST · CMPv2", "Single device", "Renewal per click")),
 }
 # The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.
 GUIDE = UseCase(
-    "Evergreen Device IDs",
+    "Evergreen device certificates",
     "Long-lived device certificates for the factory – answer a few questions and the run shows the matching "
     "flow end to end.",
     "client_side", ("Server-side or factory keys", "Batch · Single", "REST · EST · CMPv2 · SCEP"))

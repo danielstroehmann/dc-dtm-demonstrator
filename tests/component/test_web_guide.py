@@ -15,6 +15,7 @@ from tests.fakedtm import ECDSA_CA_ID, RSA_CA_ID
 from tests.guide_form import GuideForm
 
 EVERGREEN, CMP, RENEWAL = dtm.PROFILE_EVERGREEN.name, dtm.PROFILE_EVERGREEN_CMP.name, dtm.PROFILE_RENEWAL.name
+MISSING = {spec.name: "missing" for spec in dtm.SHARED_PROFILES}
 
 
 def dtm_writes(fake) -> list[str]:
@@ -34,6 +35,7 @@ def test_two_tiles_without_uc_ids(configured_user, fake):
     for tag in evergreen.GUIDE.tags:
         assert f"<li>{tag}</li>" in html
     assert "REST · EST · CMPv2 · SCEP" in html
+    assert "<li>EST · CMPv2</li>" in html  # UC-4: enrollment and renewal protocols
     assert fake.requests == []
 
 
@@ -77,16 +79,40 @@ def test_form_markup_contract(configured_user):
     assert re.search(r'<form method="post" action="/runs" data-guide>', html)
     assert '<input type="hidden" name="use_case" value="evergreen">' in html
     # the questions and the conditions under which they apply
-    assert '<div data-when="mode=batch">' in html  # count
-    assert '<div data-when="mode=single key_location=factory">' in html  # protocol + authentication
+    assert '<div class="field" data-when="mode=batch">' in html  # count
+    assert html.count('<div data-when="mode=single key_location=factory">') == 2  # protocol | authentication
     assert '<label data-when="protocol=rest"><input type="radio" name="auth_method" value="apikey"' in html
     assert re.search(r'<label data-when="protocol=rest \| protocol=est \| protocol=cmpv2"><input type="radio" '
                      r'name="auth_method" value="certificate"', html)  # no factory certificate for SCEP
     assert '<div data-when="mode=batch | key_location=server | auth_method=apikey">' in html  # API / web UI
-    assert '<label data-when="mode=batch variant=api"><input type="checkbox" name="approval"' in html
+    assert '<label class="switch-cell" data-when="mode=batch variant=api"><input type="checkbox" name="approval"' in html
     for value in ("rest", "est", "cmpv2", "scep"):
         assert f'name="protocol" value="{value}"' in html
     assert 'name="profile_id"' not in html  # profiles are shared, not chosen
+
+
+def test_guide_questions_share_one_q_grid_section(configured_user):
+    """Desktop density: every guide question is a grid item of the single "Issuance" section."""
+    form = guide(configured_user)
+    sections = [n for n in form.nodes if n.tag == "section" and "form-section" in n.attrs.get("class", "")]
+    titles = [next(c for c in s.walk() if c.tag == "h3").text for s in sections]
+    assert titles == ["Issuance", "Certificate"]  # no separate "Keys" or "Run" sections
+    issuance = sections[0]
+    (grid,) = [n for n in issuance.children if n.tag == "div"]
+    assert grid.attrs["class"].split() == ["fields", "q-grid"]
+    questions = ("key_location", "mode", "count", "protocol", "auth_method", "variant")
+    owner = {}
+    for node in grid.walk():
+        if node.tag == "input" and node.attrs.get("name") in questions:
+            item = next(a for a in [node, *node.ancestors()] if a.parent is grid)  # the direct grid item
+            owner.setdefault(node.attrs["name"], set()).add(id(item))
+    assert set(owner) == set(questions)
+    assert all(len(items) == 1 for items in owner.values())  # one grid item per question
+    assert len({next(iter(items)) for items in owner.values()}) == len(questions)  # side by side, not nested
+    certificate = [n for n in sections[1].children if n.tag == "div"][0]
+    assert "q-grid" in certificate.attrs["class"].split()
+    names = {n.attrs.get("name") for n in certificate.walk() if n.tag in ("input", "select")}
+    assert names == {"ca_id", "run_id", "approval"}
 
 
 def test_initial_state(configured_user):
@@ -275,8 +301,10 @@ def test_batch_keeps_its_count(configured_user, store):
 # --- profile hints on the form -----------------------------------------------------------------
 
 def hint(html: str, name: str) -> str:
-    match = re.search(r'<p class="field-help"[^>]*>Profile <span class="mono">' + re.escape(name) + r"</span>([^<]*)</p>",
-                      html)
+    """The read-only profile field: the name as value, below it "<validity>[ – <note>]"."""
+    match = re.search(r'<span class="field-label">Certificate profile</span>\s*<div class="readonly-value mono" '
+                      r'tabindex="0" data-tip="Shared per account[^"]*">' + re.escape(name) + r'</div>\s*'
+                      r'<small class="field-help">([^<]*)</small>', html)
     assert match, name
     return match.group(1)
 
@@ -286,10 +314,10 @@ def test_profile_hints(configured_user, fake):
     shared(fake, dtm.PROFILE_EVERGREEN)
     shared(fake, dtm.PROFILE_EVERGREEN_CMP, status="DISABLED")
     html = configured_user.get("/runs/new/evergreen").text
-    assert hint(html, EVERGREEN) == " (5 years)"
-    assert hint(html, CMP) == " (5 years, bare public key) – retired, this run enables it again"
+    assert hint(html, EVERGREEN) == "5 years"
+    assert hint(html, CMP) == "5 years · bare key – retired, this run enables it again"
     uc04 = configured_user.get("/runs/new/uc04").text
-    assert hint(uc04, RENEWAL) == " (6 months, renewable any time) – created once by this run, DTM keeps it"
+    assert hint(uc04, RENEWAL) == "6 months · renew any time – created once by this run, DTM keeps it"
     assert EVERGREEN not in uc04
     assert dtm_writes(fake) == []  # the form only reads the status
 
@@ -329,7 +357,7 @@ def test_settings_loads_profiles_on_demand(configured_user, store, fake):
     assert f'hx-get="/settings/connections/{conn}/profiles" hx-trigger="toggle once"' in page
     assert "profiles" not in fake.route_order()  # nothing loaded until opened
     html = profiles_partial(configured_user, conn).text
-    assert pills(html) == {EVERGREEN: "missing", CMP: "missing", RENEWAL: "missing"}
+    assert pills(html) == MISSING and len(MISSING) == len(dtm.SHARED_PROFILES) >= 3
     assert "Retire shared profiles" not in html  # nothing to retire
 
 
@@ -339,11 +367,11 @@ def test_settings_status_and_retire(configured_user, store, fake):
                                                                    status="DISABLED")
     conn = store.connections()[0]["id"]
     html = profiles_partial(configured_user, conn).text
-    assert pills(html) == {EVERGREEN: "active", CMP: "missing", RENEWAL: "retired"}
+    assert pills(html) == MISSING | {EVERGREEN: "active", RENEWAL: "retired"}
     assert f'hx-post="/settings/connections/{conn}/profiles/retire"' in html and "hx-confirm=" in html
     response = configured_user.post(f"/settings/connections/{conn}/profiles/retire")
     assert response.status_code == 200
-    assert pills(response.text) == {EVERGREEN: "retired", CMP: "missing", RENEWAL: "retired"}
+    assert pills(response.text) == MISSING | {EVERGREEN: "retired", RENEWAL: "retired"}
     assert active["status"] == retired["status"] == "DISABLED"
     assert "Retire shared profiles" not in response.text
 
@@ -400,8 +428,7 @@ def test_legacy_cmp_profile_is_listed_only_while_active(configured_user, store, 
     fake.profiles.append(legacy)
     conn = store.connections()[0]["id"]
     html = profiles_partial(configured_user, conn).text
-    assert pills(html) == {EVERGREEN: "missing", CMP: "missing", RENEWAL: "missing",
-                           "robot-uc03-cmp-profile": "active"}
+    assert pills(html) == MISSING | {"robot-uc03-cmp-profile": "active"}
     assert "Retire shared profiles" in html  # an active legacy profile alone offers retiring
     response = configured_user.post(f"/settings/connections/{conn}/profiles/retire")
     assert legacy["status"] == "DISABLED"

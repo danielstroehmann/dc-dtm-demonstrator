@@ -43,7 +43,8 @@ def test_new_run_requires_configuration(user):
 
 def test_new_run_lists_only_usable_cas(configured_user, fake):
     html = configured_user.get("/runs/new/evergreen").text
-    assert f'value="{ECDSA_CA_ID}"' in html and f'value="{RSA_CA_ID}"' in html
+    assert f'<option value="{ECDSA_CA_ID}">ECDSA · Fake ECDSA ICA</option>' in html  # key type first
+    assert f'<option value="{RSA_CA_ID}">RSA · Fake RSA ICA</option>' in html
     for hidden in ("ca-root", "ca-disabled", "ca-other-account"):
         assert f'value="{hidden}"' not in html
     assert 'name="profile_id"' not in html and PROFILE_ID not in html  # shared profiles, nothing to choose
@@ -83,13 +84,16 @@ def test_catalog_lists_the_guide_and_uc04(configured_user, store, fake):
     assert fake.requests == []  # the catalog needs no DTM call
 
 
-def test_use_case_form_shows_title_summary_and_breadcrumb(configured_user):
+def test_use_case_form_shows_title_and_breadcrumb_only(configured_user, store):
+    conn = store.connections()[0]["id"]
     for key in ("evergreen", "uc04"):
         use_case = evergreen.CATALOG[key]
         html = configured_user.get(f"/runs/new/{key}").text
-        assert f"<h1>{use_case.title}</h1>" in html
+        assert re.search(r'<div class="page-head">\s*<div><h1>' + re.escape(use_case.title) + r'</h1></div>\s*</div>',
+                         html)  # the page head is the title only
         assert re.search(r'href="/runs/new\?connection=\d+">Use cases</a>', html)
-        assert use_case.summary[:40] in html
+        assert use_case.summary[:40] not in html and "Connection:" not in html
+        assert f'<input type="hidden" name="connection_id" value="{conn}">' in html
         assert 'action="/runs"' in html
 
 
@@ -110,7 +114,7 @@ def test_catalog_and_form_escape_use_case_texts(configured_user, monkeypatch):
     for path in ("/runs/new", "/", "/runs/new/evergreen"):
         html = configured_user.get(path).text
         assert SCRIPT not in html and "T &lt;script&gt;" in html, path
-    assert "S &lt;script&gt;" in configured_user.get("/runs/new/evergreen").text  # the summary is on the form only
+    assert "S &lt;script&gt;" not in configured_user.get("/runs/new/evergreen").text  # no summary on the form any more
 
 
 # --- run creation validation -----------------------------------------------------------------
@@ -191,7 +195,7 @@ def test_generated_run_ids_do_not_repeat(configured_user, store):
 
 
 def test_form_default_run_id_is_random(configured_user):
-    ids = [re.search(r'<input name="run_id"[^>]*value="([^"]*)"', configured_user.get("/runs/new/uc01").text).group(1)
+    ids = [re.search(r'<input id="run_id" name="run_id"[^>]*value="([^"]*)"', configured_user.get("/runs/new/evergreen").text).group(1)
            for _ in range(5)]
     assert all(GENERATED_ID.fullmatch(i) for i in ids), ids
     # 36^6 ≈ 2.2e9 values: one collision among 5 is ~5e-9 likely, so allow it; a constant or
@@ -933,8 +937,10 @@ def test_cta_only_for_start_run_and_first_connection(user, store):
 def test_page_structure_cards(configured_user, store):
     catalog = configured_user.get("/runs/new").text
     assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 2
-    assert "<h3>Evergreen Device IDs</h3>" in catalog and 'class="uc-id"' not in catalog
-    assert "<h3>Evergreen Device ID with Renewal in the Field</h3>" in catalog
+    assert "<h3>Evergreen device certificates</h3>" in catalog and 'class="uc-id"' not in catalog
+    assert "<h3>Renewable device certificates</h3>" in catalog
+    assert evergreen.GUIDE.title == "Evergreen device certificates"
+    assert evergreen.USE_CASES["uc04"].title == "Renewable device certificates"
     assert re.search(r'<button type="submit" formaction="/runs/new/evergreen" class="btn-sm btn-icon"\s+'
                      r'aria-label="Start [^"]+"><svg[^>]*>.*?</svg>Start</button>', catalog, re.S)
     settings = configured_user.get("/settings").text

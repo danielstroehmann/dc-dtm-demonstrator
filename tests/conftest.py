@@ -214,14 +214,32 @@ class FakeOpenSSL:
 
     def sync_to_dtm(self) -> None:
         """Make the certificates openssl received known to the fake DTM (DTM lists them under the
-        policy behind DIOT_<alternative_id>), so the cleanup has something real to revoke."""
+        policy behind DIOT_<alternative_id>), so the cleanup has something real to revoke – then
+        publish which certificates DTM considers issued (state.json, read by `cmp -cmd kur`)."""
         from cryptography import x509
+        known = {c["serial_number"] for c in self.fake.certificates.values()}
         for call in self.calls():
             if not call["issued"]:
                 continue
             alternative_id = call["argv"][call["argv"].index("-server") + 1].rsplit("DIOT_", 1)[1]
             policy_id = next(p["id"] for p in self.fake.policies.values() if p["alternative_id"] == alternative_id)
-            self.fake.register_certificate(policy_id, x509.load_pem_x509_certificate(call["issued"].encode()))
+            cert = x509.load_pem_x509_certificate(call["issued"].encode())
+            if format(cert.serial_number, "x") not in known:
+                self.fake.register_certificate(policy_id, cert)
+                known.add(format(cert.serial_number, "x"))
+        state = {p["alternative_id"]: [c["serial_number"] for c in self.fake.certificates.values()
+                                       if c["policy_id"] == p["id"] and c["status"] == "ISSUED"]
+                 for p in self.fake.policies.values()}
+        (self.bin_dir / "state.json").write_text(json.dumps(state))
+
+    def reject_key_updates(self, count: int) -> None:
+        self.config["kur_reject"] = count
+        self._write()
+
+    def fail_key_updates(self, message: str) -> None:
+        """Every kur fails with this "CMP error" (not a rejection by DTM)."""
+        self.config["kur_fail"] = message
+        self._write()
 
 
 @pytest.fixture

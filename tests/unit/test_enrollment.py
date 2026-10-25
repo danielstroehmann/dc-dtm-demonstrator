@@ -132,6 +132,12 @@ def test_shared_profile_body_for_cmp_and_renewal():
     assert renewal["renewal_settings.renew_valid_cert"] == {"key": "renewal_settings.renew_valid_cert",
                                                             "optional": False, "enabled": True,
                                                             "sources": ["fixed_value"], "value": "anytime"}
+    renewal_cmp = {e["key"]: e for e in dtm.shared_profile_body(BASE_PROFILE, dtm.PROFILE_RENEWAL_CMP, "a")["body"]}
+    assert renewal_cmp["csr"]["sources"] == ["user_supplied", "allow_bare_public_key"]
+    assert renewal_cmp["renewal_settings.renew_valid_cert"]["value"] == "anytime"
+    assert (renewal_cmp["validity.duration_unit"]["value"], renewal_cmp["validity.duration_value"]["value"]) == (
+        "months", 6)
+    assert dtm.PROFILE_RENEWAL_CMP in dtm.SHARED_PROFILES and dtm.PROFILE_RENEWAL_CMP.name == "robot-renewal-cmp-6m-profile"
     bare = {"certificate_template": {"id": "t"}, "body": []}  # validity entries missing entirely
     added = {e["key"]: e["value"] for e in dtm.shared_profile_body(bare, dtm.PROFILE_EVERGREEN, "a")["body"]}
     assert added == {"validity.duration_unit": "years", "validity.duration_value": 5}
@@ -214,7 +220,9 @@ def steps_of(protocol, auth, cn="robot-x1-uc03-dev-0001", key_type="P_256"):
 @pytest.mark.parametrize("protocol,auth", COMBOS)
 def test_enroll_steps_structure(protocol, auth):
     steps = steps_of(protocol, auth)
-    setup = {("est", "certificate"): 1, ("rest", "certificate"): 1, ("cmpv2", "certificate"): 1}.get((protocol, auth), 0)
+    # PKCS#12 for Windows curl.exe (REST/EST with factory certificate); ca-chain.pem for every CMPv2 run
+    setup = {("est", "certificate"): 1, ("rest", "certificate"): 1, ("cmpv2", "certificate"): 1,
+             ("cmpv2", "passcode"): 1}.get((protocol, auth), 0)
     assert [s["kind"] for s in steps] == ["setup"] * setup + ["keygen", "call", "convert"]
     assert [s["phase"] for s in steps] == ["setup"] * setup + ["recurring"] * 3
     for s in steps:
@@ -399,8 +407,8 @@ def test_bash_enroll_steps_run(bash_env, protocol, auth):
 @pytest.mark.parametrize("auth", ["passcode", "certificate"])
 def test_bash_cmp_steps_run(bash_env, cmp_openssl, auth):
     """keygen and convert run with the real openssl, the cmp call with the recording fake."""
-    if auth == "certificate" and not shutil.which("jq"):
-        pytest.skip("jq not available")
+    if not shutil.which("jq"):
+        pytest.skip("jq not available")  # the ca-chain step reads policy.json
     run, work, env = bash_env
     real = next(p for p in (shutil.which("openssl", path=d) for d in env["PATH"].split(os.pathsep)
                             if d != str(cmp_openssl.bin_dir)) if p)
@@ -409,10 +417,10 @@ def test_bash_cmp_steps_run(bash_env, cmp_openssl, auth):
     env |= {"CMP_ID": "abc123", "PASSCODE_REF": "ref-42"}
     cn = "robot-x1-uc03-cmpv2-0001"
     prepare = ""
+    ica, _ = make_cert("Fake ICA", ca=True)
+    blob = base64.b64encode(ica.public_bytes(serialization.Encoding.DER)).decode()
+    (work / "policy.json").write_text(json.dumps({"ca_chain": [{"blob": blob}]}))
     if auth == "certificate":
-        ica, _ = make_cert("Fake ICA", ca=True)
-        blob = base64.b64encode(ica.public_bytes(serialization.Encoding.DER)).decode()
-        (work / "policy.json").write_text(json.dumps({"ca_chain": [{"blob": blob}]}))
         prepare = enrollment.factory_command("robot-x1-uc03-factory")["bash"] + "\n"
     run(prepare + bash_session("cmpv2", auth, cn))
     (call,) = cmp_openssl.calls()
@@ -431,6 +439,7 @@ def test_bash_cmp_steps_run(bash_env, cmp_openssl, auth):
     cert = x509.load_pem_x509_certificate((work / "device.crt").read_bytes())
     key = serialization.load_pem_private_key((work / "device.key").read_bytes(), None)
     assert cert.public_key().public_numbers() == key.public_key().public_numbers()
+    assert x509.load_pem_x509_certificates((work / "ca-chain.pem").read_bytes()) == [ica]  # built in both modes
 
 
 def test_bash_est_convert_accepts_single_line_base64(bash_env):

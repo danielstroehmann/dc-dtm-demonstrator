@@ -25,17 +25,18 @@ def renewed(store, run_id="d1"):
 
 def test_uc04_form(configured_user):
     html = configured_user.get("/runs/new/uc04").text
-    assert "<h3>Enrollment</h3>" in html
-    assert 'type="radio" name="protocol"' not in html  # EST only
-    assert '<input type="hidden" name="protocol" value="est">' in html
+    assert "<h3>Enrollment</h3>" in html and re.search(r'<form method="post" action="/runs" data-guide>', html)
+    protocols = re.findall(r'<input type="radio" name="protocol" value="([^"]+)" ?(checked)?', html)
+    assert protocols == [("est", "checked"), ("cmpv2", "")]  # enrollment and renewal
+    assert '<input type="hidden" name="protocol"' not in html
     assert '<input type="hidden" name="count" value="1">' in html
     auths = re.findall(r'<input type="radio" name="auth_method" value="([^"]+)"', html)
     assert auths == ["passcode", "certificate"] and 'name="approval"' not in html
 
 
 def test_uc04_forces_est_and_one_device(configured_user, store, enroll_net):
-    data = uc04_form(protocol="rest", count="7", variant="webui", mode="batch", approval="true",
-                     auth_method="certificate")
+    data = uc04_form(protocol="", count="7", variant="webui", mode="batch", approval="true",
+                     auth_method="certificate")  # no protocol → EST
     assert configured_user.post("/runs", data=data, follow_redirects=False).status_code == 303
     run = finished(store, "d1")
     assert run["status"] == "completed", run["error"]
@@ -44,10 +45,38 @@ def test_uc04_forces_est_and_one_device(configured_user, store, enroll_net):
         "est", 1, "api", "single", False, "certificate")
     html = configured_user.get("/runs/d1").text
     assert "<h2>Renewal in the Field</h2>" in html and "Renew now" in html
+    assert "Renewable device certificates · EST · Factory certificate · 1 request" in html  # run-page title
     assert "Current certificate:" not in html  # nothing renewed yet
     # the renewal block of the reproducible steps is there before the first renewal
     assert "<h3>Renewal in the Field</h3>" in configured_user.get("/runs/d1/api?dialect=curl").text
     assert "devices ≈" not in html  # one device – no extrapolation
+
+
+@pytest.mark.parametrize("protocol,expected", [("cmpv2", "cmpv2"), ("est", "est"), ("", "est")])
+def test_uc04_protocol_is_est_or_cmpv2(configured_user, store, enroll_net, cmp_openssl, protocol, expected):
+    configured_user.post("/runs", data=uc04_form(protocol=protocol))
+    run = finished(store, "d1")
+    assert run["status"] == "completed", run["error"]
+    assert run["params"]["protocol"] == expected
+    label = {"est": "EST", "cmpv2": "CMPv2"}[expected]
+    assert f"Renewable device certificates · {label} · Passcode · 1 request" in configured_user.get("/runs/d1").text
+
+
+def test_uc04_cmp_renewal_through_the_web(configured_user, store, enroll_net, cmp_openssl):
+    configured_user.post("/runs", data=uc04_form(protocol="cmpv2", auth_method="certificate"))
+    assert finished(store, "d1")["status"] == "completed"
+    cmp_openssl.sync_to_dtm()
+    assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 303
+    wait_for(lambda: renewals(store) == 1 and store.get_run("d1")["status"] == "completed", what="renewal")
+    api = configured_user.get("/runs/d1/api?dialect=curl").text
+    assert "<h3>Renewal in the Field</h3>" in api and "openssl cmp -cmd kur" in api and "PRIVATE KEY" not in api
+
+
+@pytest.mark.parametrize("protocol", ["scep", "rest", "EST", "cmp"])
+def test_uc04_refuses_other_protocols(configured_user, store, fake, protocol):
+    response = configured_user.post("/runs", data=uc04_form(protocol=protocol), follow_redirects=False)
+    assert response.status_code == 400 and "Renewal in the field: EST or CMPv2." in response.text
+    assert store.list_runs() == [] and fake.route_order() == []  # checked before DTM is asked
 
 
 def test_uc04_rejects_unknown_auth(configured_user, store):
@@ -189,7 +218,19 @@ def test_certificates_cleanup_removes_the_device_dir(configured_user, store, enr
 def test_uc04_form_names_the_renewal_profile(configured_user):
     html = configured_user.get("/runs/new/uc04").text
     assert 'name="profile_id"' not in html
-    assert re.search(r'Profile <span class="mono">robot-renewal-6m-profile</span> \(6 months, renewable any time\)', html)
+    assert re.search(r'<div class="field" data-when="protocol=est">\s*<span class="field-label">Certificate profile'
+                     r'</span>\s*<div class="readonly-value mono"[^>]*>robot-renewal-6m-profile</div>\s*'
+                     r'<small class="field-help">6 months · renew any time', html)
+    assert re.search(r'<div class="field" data-when="protocol=cmpv2">\s*<span class="field-label">Certificate profile'
+                     r'</span>\s*<div class="readonly-value mono"[^>]*>robot-renewal-cmp-6m-profile</div>\s*'
+                     r'<small class="field-help">6 months · renew any time · bare key', html)
+    from tests.guide_form import GuideForm
+    form = GuideForm(html)
+    assert form.visible_text("robot-renewal-6m-profile") and not form.visible_text("robot-renewal-cmp-6m-profile")
+    form.choose("protocol", "cmpv2")
+    assert form.visible_text("robot-renewal-cmp-6m-profile") and not form.visible_text("robot-renewal-6m-profile")
+    assert form.submission()["protocol"] == "cmpv2" and form.submission()["count"] == "1"
+    assert "<h3>Enrollment</h3>" in html and html.count('class="fields q-grid"') == 2
 
 
 def test_renewal_disabled_in_dtm_shows_the_hint(configured_user, store, enroll_net):

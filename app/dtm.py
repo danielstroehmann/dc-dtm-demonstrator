@@ -105,7 +105,8 @@ class ProfileSpec:
 PROFILE_EVERGREEN = ProfileSpec("robot-evergreen-5y-profile", "years", 5)
 PROFILE_EVERGREEN_CMP = ProfileSpec("robot-evergreen-cmp-5y-profile", "years", 5, bare_key=True)
 PROFILE_RENEWAL = ProfileSpec("robot-renewal-6m-profile", "months", 6, renew_anytime=True)
-SHARED_PROFILES = (PROFILE_EVERGREEN, PROFILE_EVERGREEN_CMP, PROFILE_RENEWAL)
+PROFILE_RENEWAL_CMP = ProfileSpec("robot-renewal-cmp-6m-profile", "months", 6, bare_key=True, renew_anytime=True)
+SHARED_PROFILES = (PROFILE_EVERGREEN, PROFILE_EVERGREEN_CMP, PROFILE_RENEWAL, PROFILE_RENEWAL_CMP)
 
 
 def shared_profile_body(base: dict, spec: ProfileSpec, account_id: str) -> dict:

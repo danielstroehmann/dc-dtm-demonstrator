@@ -360,7 +360,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         finally:
             await client.aclose()
         return render(request, "run_new.html", use_case=evergreen.CATALOG[use_case], use_case_id=use_case, cas=cas,
-                      profile_status=profile_status, connection=_public(conn), several=len(store.connections()) > 1,
+                      profile_status=profile_status, connection=_public(conn),
+                      default_connection=_public(conn), several=len(store.connections()) > 1,
                       max_batch=evergreen.MAX_BATCH,
                       default_run_id=new_run_id())
 
@@ -380,8 +381,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if mode == "single":  # a single device is exactly one certificate
             count = 1
         enrolled = use_case in ("uc03", "uc04")  # both run on the enrollment engine
-        if use_case == "uc04":  # one device via EST; renewal later per click
-            protocol, count = "est", 1
+        if use_case == "uc04":  # one device; renewal later per click (EST simplereenroll or CMPv2 kur)
+            protocol, count = protocol or "est", 1
+            if protocol not in ("est", "cmpv2"):
+                raise HTTPException(400, "Renewal in the field: EST or CMPv2.")
         if enrolled:  # enrollment protocols: API only, sequential single requests, no approval
             variant, mode, approval = "api", "single", False
             # Checked before DTM is asked for anything.

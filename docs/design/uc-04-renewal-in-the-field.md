@@ -1,4 +1,4 @@
-# UC-4 – Evergreen Device ID with Renewal in the Field
+# UC-4 – Renewable device certificates (renewal in the field)
 
 > Status: implemented 2026-10-24 (`app/enrollment.py`, `renew`). Verified live: enrollment + renewal,
 > cleanup without residue.
@@ -30,3 +30,15 @@
   401 once and succeeded on the retry.
 - The renewal block of the reproducible steps is shown right after the enrollment (untimed until the
   first renewal). A full copied script waits 10 s before `simplereenroll` because of the 401 window.
+
+## Renewal protocols (verified live 2026-10-25)
+
+| Protocol | Enrollment | Renewal in the field | Result |
+|---|---|---|---|
+| EST | `simpleenroll` (passcode or factory certificate) | `simplereenroll` on `clientauth.<host>`, mTLS with the current device certificate | works |
+| CMPv2 | `ir` | `kur` (key update request) signed with the current device certificate (`-cert/-key/-extracerts`, `-trusted` = policy `ca_chain`) | works, 0.7–0.8 s; profile `robot-renewal-cmp-6m-profile` (6 months, bare key) |
+| REST | `POST …/certificate` | `PUT …/certificate/serial-number/{serial}/renew` with mTLS of the current device certificate | **403** "Failed to enroll with client certificate" – not offered |
+| SCEP | – | renewal not documented, client support unclear | not offered |
+
+Right after issuance both EST and CMPv2 refuse the new certificate for a few seconds – the renewal
+retries (max. 3 attempts, 3 s apart).
