@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from tests.component.test_web_runs import cleaned, finished, form
+from tests.component.test_web_runs import assert_phase_titles, cleaned, finished, form
 from tests.conftest import wait_for
 from tests.fakedtm import ECDSA_CA_ID
 
@@ -48,7 +48,8 @@ def test_uc04_forces_est_and_one_device(configured_user, store, enroll_net):
     assert "Renewable device certificates · EST · Factory certificate · 1 request" in html  # run-page title
     assert "Current certificate:" not in html  # nothing renewed yet
     # the renewal block of the reproducible steps is there before the first renewal
-    assert "<h3>Renewal in the Field</h3>" in configured_user.get("/runs/d1/api?dialect=curl").text
+    assert_phase_titles(configured_user.get("/runs/d1/api?dialect=curl").text,
+                        [("Factory Enrollment", "factory"), ("Renewal in the Field", "refresh")])
     assert "devices ≈" not in html  # one device – no extrapolation
 
 
@@ -69,7 +70,8 @@ def test_uc04_cmp_renewal_through_the_web(configured_user, store, enroll_net, cm
     assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 303
     wait_for(lambda: renewals(store) == 1 and store.get_run("d1")["status"] == "completed", what="renewal")
     api = configured_user.get("/runs/d1/api?dialect=curl").text
-    assert "<h3>Renewal in the Field</h3>" in api and "openssl cmp -cmd kur" in api and "PRIVATE KEY" not in api
+    assert_phase_titles(api, [("Factory Enrollment", "factory"), ("Renewal in the Field", "refresh")])
+    assert "openssl cmp -cmd kur" in api and "PRIVATE KEY" not in api
 
 
 @pytest.mark.parametrize("protocol", ["scep", "rest", "EST", "cmp"])
@@ -96,7 +98,10 @@ def test_renew_through_the_web(configured_user, store, enroll_net):
     assert f'Current certificate: <span class="mono">{serial}</span>' in html
     assert "PRIVATE KEY" not in html
     api = configured_user.get("/runs/d1/api?dialect=curl").text
-    assert "<h3>Factory Enrollment</h3>" in api and "<h3>Renewal in the Field</h3>" in api
+    assert_phase_titles(api, [("Factory Enrollment", "factory"), ("Renewal in the Field", "refresh")])
+    # the renewal steps sit in the orange field box, the factory steps in the blue one
+    field = api[api.index('<section class="box accent field">'):]
+    assert "simplereenroll" in field and "simplereenroll" not in api[:api.index('<section class="box accent field">')]
     assert "PRIVATE KEY" not in api
     assert len(enroll_net.issued()) == 2
 
@@ -120,7 +125,10 @@ def test_renew_guards(configured_user, store, enroll_net):
     # wrong use case
     configured_user.post("/runs", data=form(run_id="u1"))
     finished(store, "u1")
-    assert configured_user.post("/runs/u1/renew", follow_redirects=False).status_code == 409
+    response = configured_user.post("/runs/u1/renew", follow_redirects=False)
+    assert response.status_code == 409
+    assert "Only a completed run of renewable device certificates that is not cleaned up can be renewed" in response.text
+    assert "UC-" not in response.text
     configured_user.post("/runs", data={**uc04_form(run_id="u3"), "use_case": "uc03"})
     finished(store, "u3")
     assert configured_user.post("/runs/u3/renew", follow_redirects=False).status_code == 409

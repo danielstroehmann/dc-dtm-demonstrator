@@ -702,14 +702,17 @@ async def test_snippets_contain_no_secret_and_the_right_auth(store, enroll_net, 
     for dialect in snippets.DIALECTS:
         command = snippets.render(enroll["spec"], dialect)
         ps = dialect == "powershell"
-        assert command == enroll["spec"]["command"]["powershell" if ps else "bash"]
+        run_name = "${env:RUN_NAME}" if ps else "${RUN_NAME}"
+        raw = enroll["spec"]["command"]["powershell" if ps else "bash"]
+        assert "robot-sn1-" not in raw  # the run's literal name became the {RUN_NAME} token …
+        assert command == raw.replace("{RUN_NAME}", run_name)  # … and the shell variable when rendered
         assert "x-api-key" not in command.lower() and "account_id" not in command
         if protocol == "scep":
             assert "clientauth." not in command and "/scep/DIOT_" in command
             assert ('-challenge $env:PASSCODE' if ps else '-challenge "${PASSCODE}"') in command
-            assert "-cn robot-sn1-uc03-" in command
+            assert f'-cn "{run_name}-scep-0001"' in command
         elif protocol == "cmpv2":
-            assert "/CN=robot-sn1-uc03-" in command
+            assert f'-subject "/CN={run_name}-cmpv2-0001"' in command
             assert "clientauth." not in command and "DIOT_" in command
             assert ("-secret env:PASSCODE" in command) == (auth == "passcode")
             assert ("-extracerts factory.crt -trusted ca-chain.pem" in command) == (auth == "certificate")
@@ -774,7 +777,12 @@ async def test_enrollment_steps_are_separate_api_call_entries(store, enroll_net,
     assert run["status"] == "completed", run["error"]
     calls = run["result"]["api_calls"]
     names = evergreen.common_names("st1", protocol, 2, UC)
-    steps = enrollment.enroll_steps(protocol, auth, names[0], run["params"]["key_type"])
+    # the recorded steps name the device after {RUN_NAME}, never with the run's literal name
+    steps = snippets.tokenize(enrollment.enroll_steps(protocol, auth, names[0], run["params"]["key_type"]),
+                              "robot-st1-uc03")
+    keygen = next(s for s in steps if s["kind"] in ("keygen", "call") and "{RUN_NAME}" in json.dumps(s))
+    assert f"{{RUN_NAME}}-{protocol}-0001" in json.dumps(keygen["command"])
+    assert "robot-st1-" not in json.dumps([c["spec"] for c in calls])
     recorded = enroll_entries(run)
     # one entry per step, in order, with the step's own label, command and phase
     assert [(c["purpose"], c["method"], c["path"], c["spec"], c["phase"]) for c in recorded] == [

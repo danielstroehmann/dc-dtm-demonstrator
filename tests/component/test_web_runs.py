@@ -720,7 +720,7 @@ def test_failed_run_shows_api_calls(configured_user, store, fake):
     html = configured_user.get("/runs/r1").text
     assert "Reproducible Steps" in html and "error</span>" in html
     # a setup failure has only setup calls
-    assert '<details class="box neutral">' in html and "<h3>Certificate Order</h3>" not in html
+    assert '<details class="box neutral">' in html and phase_titles(html) == [] and "Certificate Order" not in html
     assert "<h2>Payload</h2>" not in html
 
 
@@ -730,7 +730,9 @@ def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store)
     page = user.get("/runs/x1")
     assert page.status_code == 200 and "<p>uc99 · Single" in page.text
     index = user.get("/")
-    assert index.status_code == 200 and re.search(r"<td\s*>UC-99 · single", index.text)  # no title tooltip
+    # an unknown use case shows its raw ID – no internal "UC-n" numbering, no tooltip attribute
+    assert index.status_code == 200 and re.search(r"<td>uc99 · single", index.text)
+    assert "UC-99" not in index.text
     # a non-numeric ID is shown raw – never "UC-legacy"
     store.create_run("x2", "legacy", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
     store.update_run("x2", status="failed")
@@ -755,11 +757,36 @@ def test_progress_card_during_cleanup(configured_store, user, store):
 
 # --- result layout and reproducible-steps grouping --------------------------------------------
 
+# A phase title of the reproducible steps: icon chip + text (Certificate Order / Factory Enrollment /
+# Renewal in the Field), inside a <section class="box accent[ field]">.
+PHASE_TITLE = re.compile(r'<section class="(box accent[^"]*)">\s*<div class="box-head">\s*'
+                         r'<h3 class="phase-title"><span class="phase-icon">(.*?)</span>([^<]+)</h3>', re.S)
+
+
+PHASE_ICONS = {"factory": 'd="M3 21V10l6 4V10l6 4V6l6 3v12z"', "refresh": 'd="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"'}  # _icons.html
+
+
+def phase_titles(html: str) -> list[tuple[str, str, str]]:
+    """(box classes, icon markup, title) per phase box, in page order."""
+    return PHASE_TITLE.findall(html)
+
+
+def assert_phase_titles(html: str, expected: list[tuple[str, str]]) -> None:
+    """expected: (title, icon name) – each title with exactly one icon of that kind; only the
+    renewal box is the orange field box."""
+    found = phase_titles(html)
+    assert [t for _, _, t in found] == [t for t, _ in expected], found
+    for (classes, icon_html, title), (_, name) in zip(found, expected):
+        assert icon_html.count("<svg") == 1 and icon_html.count("</svg>") == 1, title
+        assert PHASE_ICONS[name] in icon_html and all(p not in icon_html for n, p in PHASE_ICONS.items() if n != name)
+        assert classes == ("box accent field" if title == "Renewal in the Field" else "box accent"), title
+
+
 def section(html: str, phase: str) -> str:
     if phase == "setup":  # collapsed neutral box
         start = html.index('<details class="box neutral">')
         return html[start:html.index("</details>", start)]
-    start = html.index("<h3>Certificate Order</h3>")  # highlighted accent box
+    start = html.index("Certificate Order</h3>")  # highlighted accent box
     start = html.rindex('<section class="box accent">', 0, start)
     return html[start:html.index("</section>", start)]
 
@@ -775,13 +802,16 @@ def test_steps_grouped_by_phase(configured_user, store):
     configured_user.post("/runs", data=form(mode="batch", count="2", approval="true"))
     run = finished(store, "r1")
     calls = run["result"]["api_calls"]
-    assert [c["phase"] for c in calls] == ["setup"] * 6 + ["recurring"] * 6  # incl. the shared profile lookup
+    # setup incl. the shared profile lookup; recurring: CSV, encryption key, upload, wait for approval,
+    # approve, poll, download, decrypt + unpack
+    assert [c["phase"] for c in calls] == ["setup"] * 6 + ["recurring"] * 8
     html = configured_user.get("/runs/r1").text
     setup, recurring = section(html, "setup"), section(html, "recurring")
     assert "<summary>One-Time Setup</summary>" in setup
     assert '<details class="box neutral" open' not in html  # collapsed by default
-    assert "<h3>Certificate Order</h3>" in recurring
-    assert html.index('<details class="box neutral">') < html.index("<h3>Certificate Order</h3>")
+    assert "Certificate Order</h3>" in recurring
+    assert_phase_titles(html, [("Certificate Order", "factory")])
+    assert html.index('<details class="box neutral">') < html.index("Certificate Order</h3>")
     assert '<ol class="calls">' in setup and '<ol class="calls">' in recurring
     assert '<div class="call-line">' in recurring and '<p class="call-purpose">' in recurring
     setup_purposes = [c["purpose"] for c in calls if c["phase"] == "setup"]
@@ -792,15 +822,23 @@ def test_steps_grouped_by_phase(configured_user, store):
     assert all(purpose(p) not in recurring for p in setup_purposes)
     assert all(purpose(p) not in setup for p in recurring_purposes)
     assert 'id="pre-setup-1"' in setup and 'id="pre-setup-6"' in setup and 'id="pre-setup-7"' not in html
-    assert 'id="pre-recurring-1"' in recurring and 'id="pre-recurring-6"' in recurring
+    assert 'id="pre-recurring-1"' in recurring and 'id="pre-recurring-8"' in recurring
+    assert 'id="pre-recurring-9"' not in html
     assert 'data-copy="script-setup-curl"' in setup and 'data-copy="script-recurring-curl"' in recurring
     s_setup, s_rec, s_all = (hidden_script(html, f"script-{n}-curl") for n in ("setup", "recurring", "all"))
-    heads = lambda text: [line[2:] for line in text.splitlines() if line.startswith("# ")]  # noqa: E731
+    # each step is a block "# <purpose>\n<command>" after the preamble – commands may carry "# " comments
+    # the whole script starts with a bash shebang block, the phase scripts directly with the preamble
+    heads = lambda text: [block.split("\n", 1)[0].removeprefix("# ")  # noqa: E731
+                          for block in text.removeprefix("#!/usr/bin/env bash\n\n").split("\n\n")[1:]]
     assert heads(s_setup) == setup_purposes
     assert heads(s_rec) == [c["purpose"] for c in calls if c["phase"] == "recurring" and c["spec"]]
     assert heads(s_all) == [c["purpose"] for c in calls if c["spec"]]
+    zsh = '[ -n "${ZSH_VERSION:-}" ] && setopt interactivecomments\n'  # "#" lines stay comments in zsh
+    assert s_all.startswith(f"#!/usr/bin/env bash\n\n{zsh}export DTM_API_KEY='<your API key>'\n")
+    assert s_setup.startswith(f"{zsh}export DTM_API_KEY='<your API key>'\n")  # setup: plain exports, no shebang
+    assert s_rec.startswith(zsh + """[ -n "${DTM_API_KEY:-}" ] || export DTM_API_KEY='<your API key>'\n""")  # keeps the key
     for text in (s_setup, s_rec, s_all):
-        assert text.startswith("export DTM_API_KEY='<your API key>'") and API_KEY not in text
+        assert API_KEY not in text
 
 
 def test_run_page_order_and_removed_texts(configured_user, store):
@@ -842,7 +880,7 @@ def test_webui_single_has_no_payload_section(configured_user, store):
     finished(store, "r1")
     html = configured_user.get("/runs/r1").text
     assert "<h2>Payload</h2>" not in html and "Enter in DTM web UI" in html
-    assert '<details class="box neutral">' in html and "<h3>Certificate Order</h3>" not in html
+    assert '<details class="box neutral">' in html and phase_titles(html) == [] and "Certificate Order" not in html
 
 
 def test_legacy_calls_without_phase_count_as_recurring(configured_store, user, store):
@@ -853,6 +891,7 @@ def test_legacy_calls_without_phase_count_as_recurring(configured_store, user, s
                        "count": 1, "spec": {"method": "GET", "path": "/x"}}]})
     html = user.get("/runs/l1").text
     assert '<details class="box neutral">' not in html
+    assert_phase_titles(html, [("Certificate Order", "factory")])
     assert '<p class="call-purpose">old call</p>' in section(html, "recurring")
     assert "# old call" in hidden_script(html, "script-recurring-curl")
 
@@ -1126,7 +1165,8 @@ def test_uc02_form_and_run(configured_user, store, fake):
         assert archive.namelist() == [f"robot-r1-uc02-batch-000{i}.csr" for i in (1, 2, 3)]
         assert all(b"BEGIN CERTIFICATE REQUEST" in archive.read(n) for n in archive.namelist())
     index = configured_user.get("/").text
-    assert evergreen.USE_CASES["uc02"].title in index
+    assert evergreen.DISPLAY_NAMES["uc02"] == "Evergreen device certificates"
+    assert "<td>Evergreen device certificates · batch (3)</td>" in index and "UC-" not in index
 
 
 def test_uc02_single_overview(configured_user, store):
@@ -1186,3 +1226,53 @@ def test_no_native_title_tooltips(configured_user, store):
     assert re.search(r'<time class="t" datetime="[^"]+" data-tip="[^"]+">', page)
     assert re.search(r'<td data-tip="[^"]+ UTC">\d{4}-\d{2}-\d{2}</td>', page)
     assert re.search(r'<small data-tip="[^"]+">Key generation</small>', page)
+
+
+# --- runs list: use case by its catalog name, variant by protocol + authentication --------------------
+
+def runs_rows(html: str) -> dict[str, list[str]]:
+    """Run ID → the text of its cells in the runs list (single-connection layout)."""
+    rows = {}
+    for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+        link = re.search(r'<a href="/runs/([^"]+)">', row)
+        if cells and link:
+            rows[link.group(1)] = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+    return rows
+
+
+@pytest.mark.parametrize("use_case,expected", [
+    ("uc01", "Evergreen device certificates"), ("uc02", "Evergreen device certificates"),
+    ("uc03", "Evergreen device certificates"), ("uc04", "Renewable device certificates"), ("legacy", "legacy")])
+def test_runs_list_names_the_use_case_by_its_catalog_entry(configured_store, user, store, use_case, expected):
+    store.create_run("n1", use_case, BASE_PARAMS | {"mode": "single", "count": 2})
+    html = user.get("/").text
+    assert runs_rows(html)["n1"][1] == f"{expected} · single (2)"
+    cell = re.search(r'<a href="/runs/n1">n1</a></td>\s*(<td[^>]*>)', html).group(1)
+    assert cell == "<td>"  # no data-tip – clipped cells get the automatic tooltip
+    assert "UC-" not in html
+
+
+@pytest.mark.parametrize("params,variant", [
+    ({"protocol": "est", "auth": "passcode"}, "EST · Passcode"),
+    ({"protocol": "cmpv2", "auth": "certificate"}, "CMPv2 · Factory certificate"),
+    ({"protocol": "scep", "auth": "passcode"}, "SCEP · Passcode"),
+    ({"protocol": "rest", "auth": "certificate"}, "REST API · Factory certificate"),
+    ({"variant": "api"}, "API"),
+    ({"variant": "webui"}, "Web UI"),
+])
+def test_runs_list_variant_cell(configured_store, user, store, params, variant):
+    use_case = "uc03" if "protocol" in params else "uc01"
+    store.create_run("v1", use_case, BASE_PARAMS | params)
+    assert runs_rows(user.get("/").text)["v1"][2] == variant
+
+
+def test_no_internal_use_case_numbers_on_index_and_run_pages(configured_user, store, enroll_net, cmp_openssl):
+    configured_user.post("/runs", data=form(mode="batch", count="2"))
+    finished(store, "r1")
+    store.create_run("r2", "uc04", BASE_PARAMS | {"protocol": "est", "auth": "passcode", "count": 1})
+    store.create_run("r3", "uc03", BASE_PARAMS | {"protocol": "cmpv2", "auth": "certificate", "count": 1})
+    for path in ("/", "/runs/r1", "/runs/r2", "/runs/r3", "/runs/r1/api?dialect=powershell"):
+        page = configured_user.get(path)
+        assert page.status_code == 200, path
+        assert not re.search(r"UC-?\d", page.text), (path, re.findall(r".{40}UC-?\d.{20}", page.text))

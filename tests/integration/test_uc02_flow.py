@@ -93,15 +93,20 @@ async def test_uc02_single(store, fake, tmp_path, captured_keys):
     assert r["keygen_s"] is not None and r["keygen_s"] >= 0
     assert len(captured_keys) == 2
     calls = r["api_calls"]
-    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "POST"]
-    keygen, single = calls[6], calls[7]
+    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "POST", "LOCAL"]
+    keygen, single, extract = calls[6], calls[7], calls[8]
     assert calls[4]["spec"]["json"]["certificate_policy"]["certificate_profile_id"] == "{PROFILE_ID}"  # a token
     assert run["result"]["api_variables"]["PROFILE_ID"] == policy["certificate_profile_id"]
     assert keygen["spec"]["command"]["bash"].startswith("openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256")
-    assert "/CN=robot-k1-uc02-single-0001" in keygen["spec"]["command"]["bash"]
+    # the device name follows RUN_NAME (a replay creates new names), not the literal run name
+    assert keygen["spec"]["command"] == evergreen.keygen_command("{RUN_NAME}-single-0001", "P_256")
+    assert "robot-k1-" not in json.dumps(keygen["spec"])
     # the snippet body carries a {CSR} token (filled from the locally generated device.csr), not our CSR
     assert single["count"] == 2 and single["spec"]["json"]["csr"] == "{CSR}"
-    assert single["spec"]["json"] == dtm.single_body("{POLICY_ID}", names[0], "{CSR}")
+    assert single["spec"]["json"] == dtm.single_body("{POLICY_ID}", "{RUN_NAME}-single-0001", "{CSR}")
+    # client-side keys: the answer holds only the certificate – no key to extract
+    assert extract["spec"]["command"]["bash"] == "jq -r .pem certificate.json.out > device.crt"
+    assert "private_key" not in json.dumps(extract["spec"])
     assert "CSR" in single["purpose"]
     assert_no_private_key_anywhere(store, fake, tmp_path, captured_keys)
     assert fake.violations == []
@@ -148,10 +153,17 @@ async def test_uc02_batch(store, fake, tmp_path, captured_keys, monkeypatch):
     assert [c["common_name"] for c in r["certificates"]] == names
     assert r["keygen_s"] is not None and r["per_certificate_s"] > 0
     calls = r["api_calls"]
-    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "POST", "GET", "GET"]
-    assert calls[7]["spec"]["form"] == dtm.csr_batch_fields("robot-k3-uc02-batch", "{POLICY_ID}")
+    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "POST", "GET", "GET",
+                                            "LOCAL"]
+    # key + CSR for every device (named after RUN_NAME), packed like the run's csrs.zip
+    assert calls[6]["spec"]["command"] == evergreen.csr_batch_command(3, "P_256")
+    assert "seq 1 3" in calls[6]["spec"]["command"]["bash"] and "1..3" in calls[6]["spec"]["command"]["powershell"]
+    assert calls[7]["spec"]["form"] == dtm.csr_batch_fields("{RUN_NAME}-batch", "{POLICY_ID}")
     assert calls[7]["spec"]["files"] == {"data": "@csrs.zip;type=application/zip"}
+    assert calls[7]["spec"]["capture"]["var"] == "JOB_ID"
+    assert calls[8]["spec"]["until"] == {"status": "completed"}
     assert calls[9]["spec"]["output"] == "result.zip"
+    assert calls[10]["spec"]["command"]["bash"] == "rm -rf result && unzip -q result.zip -d result && ls result"
     assert not any("decrypt" in (c["spec"] or {}).get("command", "") for c in calls)
     assert not any("enc.crt" in json.dumps(c["spec"]) for c in calls)
     waits = [e["message"] for e in store.events("k3") if e["level"] == "wait"]

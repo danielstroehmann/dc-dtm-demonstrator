@@ -25,7 +25,8 @@ from cryptography.hazmat.primitives import serialization
 from . import certs, dtm
 from .apicalls import ApiCalls
 from .dtm import DTMClient, DTMError
-from .evergreen import common_names, create_division, prefix, rates, use_shared_profile
+from .evergreen import LIST, by_name, common_names, create_division, prefix, rates, use_shared_profile
+from .snippets import tokenize
 from .store import Store, now
 
 PROTOCOLS = {"est": "EST", "cmpv2": "CMPv2", "scep": "SCEP", "rest": "REST API"}
@@ -210,7 +211,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     log = lambda msg, level="step": store.add_event(run_id, msg, level)  # noqa: E731
     api = ApiCalls()
     # Snippet variables: secrets only as placeholders – the passcode never leaves this function.
-    variables = {"DTM_HOST": p["dtm_host"], "DTM_ACCOUNT_ID": p["account_id"]}
+    variables = {"DTM_HOST": p["dtm_host"], "DTM_ACCOUNT_ID": p["account_id"], "ICA_ID": p["ca_id"]}
     if auth == "passcode":
         variables["PASSCODE"] = "<choose a passcode, 6–64 characters>"
     result: dict = {"api_calls": api.calls, "api_variables": variables}
@@ -226,7 +227,8 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                 "Create an authentication policy for the factory", "POST", AUTH_POLICY_PATH,
                 client.create_auth_policy(f"{base}-auth"),
                 spec={"method": "POST", "path": AUTH_POLICY_PATH, "body_file": "auth-policy.json",
-                      "json": {"name": f"{base}-auth", "account_id": "{DTM_ACCOUNT_ID}"}}, phase="setup")
+                      "json": {"name": "{RUN_NAME}-auth", "account_id": "{DTM_ACCOUNT_ID}"},
+                      "capture": {"var": "AUTH_POLICY_ID", "jq": ".id", "ps": "$r.id"}}, phase="setup")
             store.add_object(run_id, "auth_policy", auth_policy_id, f"{base}-auth")
             variables["AUTH_POLICY_ID"] = auth_policy_id
 
@@ -239,7 +241,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     client.create_passcode(f"{base}-passcode", auth_policy_id, passcode),
                     spec={"method": "POST", "path": PASSCODE_PATH, "body_file": "passcode.json",
                           "output": "passcode.json.out",
-                          "json": {"name": f"{base}-passcode", "account_id": "{DTM_ACCOUNT_ID}",
+                          "json": {"name": "{RUN_NAME}-passcode", "account_id": "{DTM_ACCOUNT_ID}",
                                    "authentication_policy_id": "{AUTH_POLICY_ID}",
                                    "enable_username_for_passcode": False, "passcode": "{PASSCODE}"}},
                     phase="setup")
@@ -264,7 +266,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     _record(store, run_id, "auth_certificate", f"{base}-factory",
                             client.create_auth_certificate(f"{base}-factory", auth_policy_id, factory[0])),
                     spec={"method": "POST", "path": AUTH_CERT_PATH, "body_file": "auth-certificate.json",
-                          "json": {"name": f"{base}-factory", "account_id": "{DTM_ACCOUNT_ID}",
+                          "json": {"name": "{RUN_NAME}-factory", "account_id": "{DTM_ACCOUNT_ID}",
                                    "authentication_policy_id": "{AUTH_POLICY_ID}", "pem": "{FACTORY_CERT}",
                                    "use_passcode": False}},
                     phase="setup")
@@ -284,9 +286,12 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                 client.create_enrollment_policy(name=policy_name, division_id=division_id, **policy_args),
                 spec={"method": "POST", "path": POLICY_PATH, "body_file": "policy.json",
                       "json": dtm.enrollment_policy_body(
-                          name=policy_name, division_id="{DIVISION_ID}", **policy_args
-                          | {"profile_id": "{PROFILE_ID}", "auth_policy_id": "{AUTH_POLICY_ID}"})},
+                          name="{RUN_NAME}-policy", division_id="{DIVISION_ID}", **policy_args
+                          | {"profile_id": "{PROFILE_ID}", "auth_policy_id": "{AUTH_POLICY_ID}", "ica_id": "{ICA_ID}"})},
                 phase="setup")
+            api.add("Look up the policy ID by its name", "GET", POLICY_PATH, None,
+                    spec={"method": "GET", "path": POLICY_PATH, "query": LIST,
+                          "capture": by_name("POLICY_ID", "{RUN_NAME}-policy")}, phase="setup")
             store.add_object(run_id, "policy", policy_id, policy_name)
             variables["POLICY_ID"] = policy_id
             cmp_id, ca_chain_pem = None, ""
@@ -318,8 +323,8 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     (run_dir / "device" / "ca-chain.pem").write_text(ca_chain_pem)
                     result["cmp_id"] = cmp_id
                 result["renewals"] = []
-                _record_renewal_steps(api.calls, protocol, result["certificates"][-1]["common_name"], p["key_type"],
-                                      None, None)
+                _record_renewal_steps(api.calls, protocol, common_names(run_id, protocol, 1, p["use_case"])[0], base,
+                                      p["key_type"], None, None)
                 for key in ("estimate_min", "estimate_devices"):  # one device – nothing to extrapolate
                     result.pop(key, None)
         certs.save_certificates(run_dir, result.get("certificates") or [])
@@ -401,7 +406,9 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
     result["renewals"] = result.get("renewals", []) + [
         {"serial": issued["serial"], "seconds": round(seconds, 2), "keygen_s": round(keygen, 2),
          "attempts": attempt, "at": now()}]
-    _record_renewal_steps(result["api_calls"], protocol, cn, p["key_type"], keygen, seconds)
+    _record_renewal_steps(result["api_calls"], protocol, common_names(run_id, protocol, 1, run_["use_case"])[0],
+                          prefix(run_id, run_["use_case"]), p["key_type"],
+                          keygen, seconds)
     store.update_run(run_id, result=result)
     _save_device(run_dir, key_pem, pem)
     log(f"Renewed in {seconds:.2f}s (round trip{f', attempt {attempt}' if attempt > 1 else ''}) – new serial "
@@ -480,14 +487,15 @@ async def _renew_cmp(p: dict, result: dict, run_dir: Path, key_pem: bytes) -> tu
         raise EnrollmentError(reason)
 
 
-def _record_renewal_steps(calls: list[dict], protocol: str, cn: str, key_type: str, keygen: float | None,
-                          seconds: float | None) -> None:
+def _record_renewal_steps(calls: list[dict], protocol: str, cn: str, run_name: str, key_type: str,
+                          keygen: float | None, seconds: float | None) -> None:
     """The renewal block of the reproducible steps: seeded untimed right after the enrollment, then
-    each renewal adds its count and time per step."""
+    each renewal adds its count and time per step. cn is our own device name – never the CN from DTM's
+    answer, it lands in shell code."""
     existing = {c["purpose"]: c for c in calls if c.get("phase") == "renewal"}
     timing = {"keygen": keygen, "call": seconds}
     renewed = seconds is not None
-    for step in renew_steps(protocol, cn, key_type):
+    for step in renew_steps(protocol, tokenize(cn, run_name), key_type):
         took = timing.get(step["kind"])
         if step["purpose"] in existing:
             entry = existing[step["purpose"]]
@@ -634,7 +642,7 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
     elif protocol == "scep":
         org, ou = SCEP_SUBJECT
         args = [f"-server-url https://{{host}}{SCEP_PATH.format(alternative_id='{cmp}')}", "-challenge {secret}",
-                f'-cn {cn} -organization "{org}" -ou "{ou}"', "-private-key device.key -certificate device.crt"]
+                f'-cn "{cn}" -organization "{org}" -ou "{ou}"', "-private-key device.key -certificate device.crt"]
         step("keygen", "Generate the device key – RSA, SCEP encrypts to the CA with RSA (local, per device)", "LOCAL",
              "openssl", "openssl genrsa -traditional -out device.key 2048", "openssl genrsa -traditional -out device.key 2048")
         step("call", "Request the certificate via SCEP – the passcode is the challenge password (once per device)", "POST",

@@ -61,6 +61,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     # Cache busting: static URLs carry a hash of the files, so a new build is never hidden by the cache.
     templates.env.globals["asset_v"] = _asset_hash(HERE / "static")
     templates.env.globals["use_cases"] = USE_CASES
+    templates.env.globals["use_case_names"] = evergreen.DISPLAY_NAMES
     templates.env.globals["catalog"] = evergreen.CATALOG
     templates.env.globals["snippets"] = snippets
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
@@ -500,7 +501,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if run["use_case"] == "uc04" and run["status"] == "renewing":  # double click: just show the run
             return RedirectResponse(f"/runs/{run_id}", status_code=303)
         if run["use_case"] != "uc04" or run["status"] != "completed" or run.get("cleanup_status"):
-            raise HTTPException(409, "Only a completed UC-4 run that is not cleaned up can be renewed")
+            raise HTTPException(409, "Only a completed run of renewable device certificates that is not cleaned up can be renewed")
         if len((run.get("result") or {}).get("renewals") or []) >= enrollment.MAX_RENEWALS:
             raise HTTPException(409, f"At most {enrollment.MAX_RENEWALS} renewals per run")
         # Claim the run before the task starts – a concurrent request must not start a second renewal.

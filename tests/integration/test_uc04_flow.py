@@ -127,7 +127,10 @@ async def test_enroll_and_renew_twice(store, enroll_net, secrets_seen, tmp_path,
     calls = r["api_calls"]
     assert {c["phase"] for c in calls} == {"setup", "recurring", "renewal"}
     renewal = [c for c in calls if c["phase"] == "renewal"]
-    steps = enrollment.renew_steps("est", cn, "P_256")
+    # the renewal keeps the device's identity, named after {RUN_NAME} (seeded and after each renewal)
+    steps = enrollment.renew_steps("est", "{RUN_NAME}-est-0001", "P_256")
+    assert '-subj "/CN={RUN_NAME}-est-0001"' in steps[0]["command"]["bash"]
+    assert "robot-u4-" not in json.dumps([c["spec"] for c in calls])
     assert [(c["purpose"], c["method"], c["path"], c["spec"]) for c in renewal] == [
         (s["purpose"], s["method"], s["path"], {"command": s["command"]}) for s in steps]
     assert [c["count"] for c in renewal] == [2, 2, 2]
@@ -596,9 +599,12 @@ while i < len(args):
         i += 1
     else:
         opts["url"] = args[i]; i += 1
+data = (opts.get("--data") or [""])[0]
+body_sent = json.loads(open(data[1:]).read()) if data.startswith("@") else None
 with open(os.environ["STUB_LOG"], "a") as log:
-    log.write(json.dumps({"method": (opts.get("-X") or ["GET"])[0], "url": opts["url"]}) + "\\n")
-answers = json.loads(open(os.environ["STUB_ANSWERS"]).read())
+    log.write(json.dumps({"method": (opts.get("-X") or ["GET"])[0], "url": opts["url"], "body": body_sent}) + "\\n")
+# list answers name the replay's objects after the RUN_NAME the script exported
+answers = json.loads(open(os.environ["STUB_ANSWERS"]).read().replace("@RUN_NAME@", os.environ.get("RUN_NAME", "")))
 path = opts["url"].split("://", 1)[1].split("/", 1)[1].split("?")[0]
 body = next((v for k, v in answers.items() if ("/" + path).endswith(k)), {})
 if "-o" in opts:
@@ -611,7 +617,9 @@ else:
 async def test_replay_of_a_cmp_passcode_run_builds_the_ca_chain_before_kur(store, enroll_net, cmp_openssl, tmp_path):
     """The copyable bash steps of a UC-4 CMPv2 + passcode run, in order (setup → enrollment → renewal),
     against stubs: management calls answer canned JSON, openssl cmp is the fake (it learns the
-    certificates it issued, like DTM), everything else is the real openssl / jq."""
+    certificates it issued, like DTM), everything else is the real openssl / jq.
+    Replayed under the fresh RUN_NAME the preamble draws and without any ID of the original run:
+    every ID a step needs must be captured from the (stubbed) DTM answers of the steps before."""
     import base64
     import os
     import shutil
@@ -642,22 +650,58 @@ async def test_replay_of_a_cmp_passcode_run_builds_the_ca_chain_before_kur(store
     (cmp_openssl.bin_dir / "state.json").unlink(missing_ok=True)
     chain = [{"blob": base64.b64encode(c.public_bytes(serialization.Encoding.DER)).decode()}
              for c in (enroll_net.ica_cert, enroll_net.root_cert)]
+    other = "robot-other-uc04"  # objects of another run in the same lists must not be picked
     answers = {enrollment.PASSCODE_PATH: {"id": "p1", "alternate_id": "ref-replay"},
-               "/certificate-policy/IOT_replay": {"id": "IOT_replay", "alternative_id": "replay1", "ca_chain": chain}}
+               enrollment.AUTH_POLICY_PATH: {"id": "ap-replay"},
+               "/rendezvous-zone": {"records": [{"id": "rz-off", "name": "0-zone", "status": "DISABLED"},
+                                                {"id": "rz-z", "name": "z-zone", "status": "ENABLED"},
+                                                {"id": "rz-replay", "name": "a-zone", "status": "ENABLED"}]},
+               "/division": {"records": [{"id": "div-other", "name": f"{other}-division"},
+                                         {"id": "div-replay", "name": "@RUN_NAME@-division"}]},
+               dtm.PROFILES: {"records": [  # the profile list spans every account the key sees
+                   {"id": "prof-retired", "name": dtm.PROFILE_RENEWAL_CMP.name, "status": "DISABLED",
+                    "account_id": ACCOUNT_ID},
+                   {"id": "prof-foreign", "name": dtm.PROFILE_RENEWAL_CMP.name, "status": "ACTIVE",
+                    "account_id": "another-account"},
+                   {"id": "prof-other", "name": dtm.PROFILE_RENEWAL.name, "status": "ACTIVE", "account_id": ACCOUNT_ID},
+                   {"id": "prof-replay", "name": dtm.PROFILE_RENEWAL_CMP.name, "status": "ACTIVE",
+                    "account_id": ACCOUNT_ID}]},
+               "/certificate-policy/IOT_replay": {"id": "IOT_replay", "alternative_id": "replay1", "ca_chain": chain},
+               enrollment.POLICY_PATH: {"records": [{"id": "IOT_other", "name": f"{other}-policy"},
+                                                    {"id": "IOT_gone", "name": "@RUN_NAME@-policy", "status": "DELETED"},
+                                                    {"id": "IOT_replay", "name": "@RUN_NAME@-policy"}]}}
     (tmp_path / "answers.json").write_text(json.dumps(answers))
     env = {"PATH": f"{bin_dir}{os.pathsep}{cmp_openssl.bin_dir}{os.pathsep}{os.environ['PATH']}",
            "STUB_LOG": str(tmp_path / "curl.jsonl"), "STUB_ANSWERS": str(tmp_path / "answers.json"),
            "HOME": str(tmp_path)}
-    script = script.replace("export POLICY_ID=" + run["result"]["api_variables"]["POLICY_ID"],
-                            "export POLICY_ID=IOT_replay")
+    # only what a user sets by hand: host, account, CA, passcode – the preamble draws a new RUN_NAME
+    variables = run["result"]["api_variables"]
+    assert {"DIVISION_ID", "POLICY_ID", "PROFILE_ID", "AUTH_POLICY_ID", "RZONE_ID", "CMP_ID", "PASSCODE_REF"} <= set(variables)
+    kept = {k: variables[k] for k in ("DTM_HOST", "DTM_ACCOUNT_ID", "ICA_ID", "PASSCODE", "RUN_NAME")}
+    script = snippets.script(kept, calls, "curl") + 'printf %s "$RUN_NAME" > run_name.txt\n'
     cmp_openssl.record.unlink(missing_ok=True)
     result = subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, env=env, capture_output=True,
                             text=True, timeout=120)
     assert result.returncode == 0, result.stderr[-2000:]
+    run_name = (work / "run_name.txt").read_text()
+    assert run_name.startswith("robot-r") and run_name.endswith("-uc04") and run_name != "robot-rp4-uc04"
+    sent = [json.loads(line) for line in (tmp_path / "curl.jsonl").read_text().splitlines()]
+    posted = {r["url"].split("?")[0].rsplit("/", 1)[1]: r["body"] for r in sent if r["method"] == "POST"}
+    assert posted["division"]["name"] == f"{run_name}-division" and posted["division"]["primary_rzone_id"] == "rz-replay"
+    assert posted["authentication-policy"]["name"] == f"{run_name}-auth"
+    assert posted["passcode"]["name"] == f"{run_name}-passcode"
+    assert posted["passcode"]["authentication_policy_id"] == "ap-replay"
+    policy = json.dumps(posted["certificate-policy"])
+    assert f"{run_name}-policy" in policy and '"div-replay"' in policy and '"prof-replay"' in policy
+    assert '"ap-replay"' in policy and f'"{ECDSA_CA_ID}"' in policy
+    assert any(r["method"] == "GET" and "/certificate-policy/IOT_replay?" in r["url"] for r in sent)
+    original = [variables[k] for k in ("DIVISION_ID", "POLICY_ID", "PROFILE_ID", "AUTH_POLICY_ID")]
+    assert not any(value in json.dumps(sent) for value in original + ["robot-rp4-"])
     calls_made = cmp_openssl.calls()
     assert [c["argv"][2] for c in calls_made] == ["ir", "kur"], calls_made
     ir, kur = calls_made
     assert ir["argv"][ir["argv"].index("-ref") + 1] == "ref-replay"  # read from passcode.json.out
+    assert ir["argv"][ir["argv"].index("-subject") + 1] == f"/CN={run_name}-cmpv2-0001"  # the device follows RUN_NAME
     assert kur["argv"][kur["argv"].index("-server") + 1].endswith("/DIOT_replay1")  # read from policy.json
     # ca-chain.pem existed (built from policy.json) when kur ran, and holds the policy's chain
     assert kur["files"]["-trusted"] == cert_pem(enroll_net.ica_cert) + cert_pem(enroll_net.root_cert)
@@ -665,3 +709,49 @@ async def test_replay_of_a_cmp_passcode_run_builds_the_ca_chain_before_kur(store
     key = serialization.load_pem_private_key((work / "device.key").read_bytes(), None)
     assert final == x509.load_pem_x509_certificate(kur["issued"].encode())  # switched to the renewed one
     assert final.public_key().public_numbers() == key.public_key().public_numbers()
+
+
+@pytest.mark.parametrize("protocol", ["est", "cmpv2"])
+async def test_renewal_script_keeps_the_ids_a_replay_captured(store, enroll_net, cmp_openssl, tmp_path, protocol):
+    """Renewing again after a replay: the renewal block pasted on its own must not reset POLICY_ID /
+    CMP_ID (and RUN_NAME) to the original run's values – only fill them in when the shell has none."""
+    run = await start(store, enroll_net, "kp4", tmp_path, protocol=protocol)
+    assert run["status"] == "completed", run["error"]
+    variables, calls = run["result"]["api_variables"], run["result"]["api_calls"]
+    ids = ["POLICY_ID"] + (["CMP_ID"] if protocol == "cmpv2" else [])
+    renewal = snippets.script(variables, calls, "curl", "renewal")
+    full = snippets.script(variables, calls, "curl")
+    ps_renewal = snippets.script(variables, calls, "powershell", "renewal")
+    for name in ids:
+        value = variables[name]
+        assert f'[ -n "${{{name}:-}}" ] || export {name}={value}\n' in renewal
+        assert f"\nexport {name}={value}\n" in full and f"|| export {name}=" not in full
+        assert f"if (-not $env:{name}) {{ $env:{name} = '{value}' }}" in ps_renewal
+    assert '[ -n "${RUN_NAME:-}" ] || export RUN_NAME="robot-r' in renewal
+    # the key and host the user filled in for the replay stay, too
+    assert f'\n[ -n "${{DTM_HOST:-}}" ] || export DTM_HOST={HOST}\n' in renewal
+    zsh = '[ -n "${ZSH_VERSION:-}" ] && setopt interactivecomments\n'
+    assert renewal.startswith(zsh + """[ -n "${DTM_API_KEY:-}" ] || export DTM_API_KEY='<your API key>'\n""")
+    assert full.startswith(f"#!/usr/bin/env bash\n\n{zsh}export DTM_API_KEY=") and not renewal.startswith("#!")
+    # the renewal block uses those variables – so keeping them matters
+    steps = renewal.split("\n\n", 1)[1]
+    assert "${POLICY_ID}" in steps if protocol == "est" else "${CMP_ID}" in steps
+    assert "robot-kp4-" not in steps
+
+
+async def test_renewal_steps_use_our_device_name_not_the_cn_dtm_returned(store, enroll_net, tmp_path, monkeypatch):
+    """The renewal steps are built from the name we gave the device – a CN in DTM's answer is data
+    from outside and must never land in a copyable command."""
+    hostile = 'evil$(touch PWNED)`id`"x'
+    original = enroll_net._new_certificate
+    monkeypatch.setattr(enroll_net, "_new_certificate", lambda oid, cn, key=None: original(oid, hostile, key))
+    run = await start(store, enroll_net, "hc4", tmp_path)
+    assert run["status"] == "completed", run["error"]
+    assert run["result"]["certificates"][0]["common_name"] == hostile  # DTM really answered with it
+    calls = run["result"]["api_calls"]
+    renewal = [c for c in calls if c["phase"] == "renewal"]
+    assert renewal and '-subj "/CN={RUN_NAME}-est-0001"' in renewal[0]["spec"]["command"]["bash"]
+    for dialect in snippets.DIALECTS:
+        for phase in ("renewal", None):
+            text = snippets.script(run["result"]["api_variables"], calls, dialect, phase)
+            assert "evil" not in text and "PWNED" not in text and "`id`" not in text, (dialect, phase)

@@ -4,6 +4,7 @@ requests the demonstrator sent."""
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -95,10 +96,16 @@ def test_curl_multipart():
     assert "Content-Type: application/json" not in text
 
 
-def test_wget_refuses_multipart():
+def test_wget_falls_back_to_curl_for_multipart():
     text = snippets.render(UPLOAD, "wget")
-    assert text.startswith("# wget cannot send multipart/form-data")
-    assert all(line.startswith("#") for line in text.splitlines())
+    hint, _, rest = text.partition("\n")
+    assert hint == "# wget cannot send multipart/form-data – this step uses curl"
+    assert rest == snippets.render(UPLOAD, "curl") and "wget" not in rest
+    # with a capture the curl fallback still sets the variable – the next wget step needs it
+    captured = UPLOAD | {"capture": {"var": "JOB_ID", "jq": ".id", "ps": "$r.id"}}
+    text = snippets.render(captured, "wget")
+    assert text == "# wget cannot send multipart/form-data – this step uses curl\n" + snippets.render(captured, "curl")
+    assert 'export JOB_ID="$(curl ' in text and ': "${JOB_ID:?' in text
 
 
 def test_powershell_variants():
@@ -258,9 +265,13 @@ def test_script_filters_by_phase():
     assert [line for line in recurring.splitlines() if line.startswith("# ")] == ["# issue", "# legacy"]
     assert [line for line in everything.splitlines() if line.startswith("# ")] == [
         "# zone", "# policy", "# issue", "# legacy"]
-    for text in (setup, recurring, everything):
-        assert text.startswith(snippets.preamble(VARIABLES, "curl"))  # every script is self-contained
-    assert snippets.script(VARIABLES, calls, "curl", "nonexistent") == snippets.preamble(VARIABLES, "curl") + "\n"
+    # every script is self-contained; a later phase keeps the IDs a replayed setup captured in this shell.
+    # Only the whole script is a file to run – with a bash shebang ($RANDOM is bash)
+    assert everything.startswith("#!/usr/bin/env bash\n\n" + snippets.preamble(VARIABLES, "curl") + "\n\n")
+    assert setup.startswith(snippets.preamble(VARIABLES, "curl") + "\n\n")
+    assert recurring.startswith(snippets.preamble(VARIABLES, "curl", keep=True) + "\n\n")
+    assert snippets.preamble(VARIABLES, "curl", keep=True) != snippets.preamble(VARIABLES, "curl")
+    assert snippets.script(VARIABLES, calls, "curl", "nonexistent") == snippets.preamble(VARIABLES, "curl", keep=True) + "\n"
 
 
 def test_phase_scripts_run_independently(shell):
@@ -326,3 +337,489 @@ def test_real_openssl_keygen_command_works(shell):
     csr = _x509.load_pem_x509_csr((shell.work / "device.csr").read_bytes())
     assert csr.is_signature_valid and csr.subject.rfc4514_string() == "CN=robot-x1-uc02-single-0001"
     assert json.loads('"' + (shell.work / "csr_var.txt").read_text() + '"') == (shell.work / "device.csr").read_text()
+
+
+# --- replay in a fresh shell: run-name token, captures, polling ---------------------------------
+
+from app.apicalls import ApiCalls  # noqa: E402
+
+RUN = "robot-x1-uc01"
+
+
+def test_tokenize_replaces_the_run_name_deeply_and_nothing_else():
+    value = {"name": f"{RUN}-division", "count": 3, "flag": True, "none": None, "token": "{POLICY_ID}",
+             "list": [f"{RUN}-single-0001", {"subj": f'-subj "/CN={RUN}-batch-0002"'}, 7],
+             "other_run": "robot-x10-uc01-division", "other_uc": "robot-x1-uc02-division"}
+    before = json.dumps(value)
+    assert snippets.tokenize(value, RUN) == {
+        "name": "{RUN_NAME}-division", "count": 3, "flag": True, "none": None, "token": "{POLICY_ID}",
+        "list": ["{RUN_NAME}-single-0001", {"subj": '-subj "/CN={RUN_NAME}-batch-0002"'}, 7],
+        "other_run": "robot-x10-uc01-division", "other_uc": "robot-x1-uc02-division"}
+    assert json.dumps(value) == before  # a new structure – the input stays as it was
+
+
+async def test_api_calls_tokenize_specs_once_the_run_name_is_known():
+    api = ApiCalls()
+    api.add("before", "GET", "/x", None, spec={"json": {"name": f"{RUN}-division"}})
+    api.run_name = RUN
+    api.add("after", "POST", "/x", None, spec={"json": {"name": f"{RUN}-division", "list": [f"{RUN}-a"]}})
+
+    async def answer():
+        return "ok"
+
+    assert await api.timed("timed", "GET", "/x", answer(), spec={"command": f'-subj "/CN={RUN}-single-0001"'}) == "ok"
+    api.add("no spec", "GET", "/x", 0.1)
+    specs = [c["spec"] for c in api.calls]
+    assert specs[0] == {"json": {"name": f"{RUN}-division"}}  # recorded before the name was known
+    assert specs[1] == {"json": {"name": "{RUN_NAME}-division", "list": ["{RUN_NAME}-a"]}}
+    assert specs[2] == {"command": '-subj "/CN={RUN_NAME}-single-0001"'}
+    assert specs[3] is None
+
+
+@pytest.mark.parametrize("dialect,url", [
+    ("curl", '"https://${DTM_HOST}/d?account_id=${DTM_ACCOUNT_ID}&limit=100"'),
+    ("wget", '"https://${DTM_HOST}/d?account_id=${DTM_ACCOUNT_ID}&limit=100"'),
+    ("powershell", '"https://$($env:DTM_HOST)/d?account_id=$($env:DTM_ACCOUNT_ID)&limit=100"')])
+def test_query_is_appended_after_the_account(dialect, url):
+    assert url in snippets.render({"method": "GET", "path": "/d", "query": evergreen.LIST}, dialect)
+    assert "&" not in snippets.render({"method": "GET", "path": "/d"}, dialect)
+
+
+CREATE = {"method": "POST", "path": "/a", "body_file": "a.json", "json": {"name": "{RUN_NAME}-auth"},
+          "capture": {"var": "AUTH_POLICY_ID", "jq": ".id", "ps": "$r.id"}}
+LOOKUP = {"method": "GET", "path": DIV_PATH, "query": evergreen.LIST,
+          "capture": evergreen.by_name("DIVISION_ID", "{RUN_NAME}-division")}
+
+
+def test_capture_of_a_create_in_bash():
+    assert snippets.render(CREATE, "curl") == (
+        'cat > a.json <<EOF\n{\n  "name": "${RUN_NAME}-auth"\n}\nEOF\n'
+        'export AUTH_POLICY_ID="$(curl -sS --fail-with-body -X POST "https://${DTM_HOST}/a?account_id=${DTM_ACCOUNT_ID}" \\\n'
+        '  -H "x-api-key: ${DTM_API_KEY}" \\\n  -H "Content-Type: application/json" \\\n  --data @a.json \\\n'
+        "  | jq -r '(.id) // empty')\"\n"
+        ': "${AUTH_POLICY_ID:?not found in the answer}"')
+    hinted = CREATE | {"capture": CREATE["capture"] | {"missing": "no policy – check the key"}}
+    assert snippets.render(hinted, "curl").endswith('\n: "${AUTH_POLICY_ID:?no policy – check the key}"')
+    assert snippets.render(hinted, "wget").endswith('\n  | jq -r \'(.id) // empty\')"\n'
+                                                    ': "${AUTH_POLICY_ID:?no policy – check the key}"')
+    assert "for i in" not in snippets.render(CREATE, "curl")  # a create is never repeated
+
+
+def test_capture_of_a_create_in_powershell():
+    text = snippets.render(CREATE, "powershell")
+    assert text.startswith('$body = @"\n{\n  "name": "$($env:RUN_NAME)-auth"\n}\n"@\n$r = Invoke-RestMethod -Method Post `')
+    assert text.endswith('-Body $body\n$env:AUTH_POLICY_ID = $r.id\n'
+                         'if (-not $env:AUTH_POLICY_ID) { throw "AUTH_POLICY_ID not found in the answer" }')
+    assert "foreach" not in text
+
+
+def test_lookup_capture_retries_then_guards():
+    bash = snippets.render(LOOKUP, "curl")
+    assert bash.startswith("for i in 1 2 3 4 5; do")
+    assert '--arg a "${RUN_NAME}-division"' in bash and "if length == 1 then .[0].id else empty end" in bash
+    assert '[ -n "$DIVISION_ID" ] && break; sleep 2\ndone\n: "${DIVISION_ID:?not found in the answer}"' in bash
+    ps = snippets.render(LOOKUP, "powershell")
+    assert ps.startswith("foreach ($i in 1..5) {") and "$_.name -ceq \"$($env:RUN_NAME)-division\"" in ps
+    assert ".Count -eq 1" in ps and '$_.status -ne "DELETED"' in ps
+    assert ps.endswith('if (-not $env:DIVISION_ID) { throw "DIVISION_ID not found in the answer" }')
+
+
+@pytest.mark.parametrize("missing", ['x"; touch PWNED; "', "x $(id)", "a}b", "x`id`"])
+def test_capture_hint_must_be_plain_text(missing):
+    spec = CREATE | {"capture": CREATE["capture"] | {"missing": missing}}
+    for dialect in snippets.DIALECTS:
+        with pytest.raises(ValueError):
+            snippets.render(spec, dialect)
+
+
+@pytest.mark.parametrize("name", ['x"; touch PWNED; "', "a b", "x$(id)", "a'b"])
+def test_record_names_must_be_plain(name):
+    with pytest.raises(ValueError):
+        evergreen.by_name("POLICY_ID", name)
+    assert evergreen.by_name("POLICY_ID", "{RUN_NAME}-policy")["arg"] == "{RUN_NAME}-policy"
+
+
+def test_until_is_bounded_and_stops_on_failure_states():
+    poll = {"method": "GET", "path": f"{JOBS}/{{JOB_ID}}", "until": {"status": "completed"}}
+    bash = snippets.render(poll, "curl")
+    assert bash.startswith("for i in $(seq 1 300); do\n")
+    assert 'case "$STATUS" in completed) break ;; failed|rejected|""|null) ' in bash
+    assert '/jobs/${JOB_ID}?account_id=' in bash and bash.endswith("  sleep 2\ndone")
+    wait = snippets.render(poll | {"until": {"status": "pending_approval", "stop": ["completed", "failed"]}}, "wget")
+    assert 'case "$STATUS" in pending_approval) break ;; completed|failed|""|null) ' in wait and "wget --method=GET" in wait
+    ps = snippets.render(poll, "powershell")
+    assert ps.startswith("foreach ($i in 1..300) {\n  try { $r = Invoke-RestMethod -Method Get `")
+    assert "catch { Write-Host" in ps and "if ($r.status -in 'completed', 'failed', 'rejected') { break }" in ps
+
+
+def test_command_tokens_become_shell_variables_but_written_ones_stay():
+    command = 'echo "${RUN_NAME}" {RUN_NAME} x{RUN_NAME} -subj "/CN={RUN_NAME}-0001" {NOTE} $RUN_NAME awk \'{printf $0}\''
+    assert snippets.render({"command": command}, "curl") == (
+        'echo "${RUN_NAME}" ${RUN_NAME} x{RUN_NAME} -subj "/CN=${RUN_NAME}-0001" {NOTE} $RUN_NAME awk \'{printf $0}\'')
+    per_shell = {"bash": "a {POLICY_ID}", "powershell": "b {POLICY_ID} ${env:POLICY_ID}"}
+    assert snippets.render({"command": per_shell}, "wget") == "a ${POLICY_ID}"
+    assert snippets.render({"command": per_shell}, "powershell") == "b ${env:POLICY_ID} ${env:POLICY_ID}"
+
+
+def test_preamble_draws_a_fresh_run_name_instead_of_the_runs():
+    variables = VARIABLES | {"RUN_NAME": "robot-x1-uc03"}
+    for dialect in snippets.DIALECTS:
+        text = snippets.preamble(variables, dialect)
+        assert "robot-x1-" not in text
+        assert text.count("RUN_NAME") == 1  # set once, at the end of the variables
+    assert 'export RUN_NAME="robot-r${RANDOM}${RANDOM}-uc03"' in snippets.preamble(variables, "curl")
+    assert '$env:RUN_NAME = "robot-r$(Get-Random -Maximum 1000000000)-uc03"' in snippets.preamble(variables, "powershell")
+    assert "RUN_NAME" not in snippets.preamble(VARIABLES | {"RUN_NAME": "robot-x1-$(id)"}, "curl")  # no use case
+    assert "RUN_NAME" not in snippets.preamble(VARIABLES, "curl")
+
+
+# executed in bash with jq: the captures must pick exactly the right record or stop the script
+
+@pytest.fixture
+def jq_shell(tmp_path):
+    if not (shutil.which("bash") and shutil.which("jq")):
+        pytest.skip("needs bash and jq")
+    work = tmp_path / "jq-work"
+    work.mkdir()
+    # curl answers the next line of answers.jsonl per call (in a file – each call runs in a subshell)
+    stubs = textwrap.dedent("""\
+        curl() { n=$(( $(cat n 2>/dev/null || echo 0) + 1 )); echo $n > n; sed -n "${n}p" answers.jsonl; }
+        sleep() { :; }
+        """)
+
+    def run(snippet: str, answers: list, env: dict | None = None) -> subprocess.CompletedProcess:
+        (work / "answers.jsonl").write_text("".join(json.dumps(a) + "\n" for a in answers))
+        (work / "n").unlink(missing_ok=True)
+        (work / "out.txt").unlink(missing_ok=True)
+        full = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "RUN_NAME": "robot-r7-uc01",
+                "DTM_ACCOUNT_ID": ACCOUNT} | (env or {})
+        return subprocess.run(["bash", "-c", stubs + snippet + '\nprintf %s "$OUT" > out.txt\n'], cwd=work, env=full,
+                              capture_output=True, text=True, timeout=60)
+
+    run.work = work
+    run.calls = lambda: int((work / "n").read_text())
+    return run
+
+
+def captured(jq_shell, spec, answers, var):
+    result = jq_shell(snippets.render(spec, "curl") + f'\nOUT="${var}"', answers)
+    out = jq_shell.work / "out.txt"
+    return result, out.read_text() if out.exists() else None
+
+
+def records(*rows):
+    return {"records": [dict(r) for r in rows]}
+
+
+def test_lookup_picks_the_one_live_record_of_the_replay(jq_shell):
+    answer = records({"id": "d-other", "name": "robot-r8-uc01-division"},
+                     {"id": "d-deleted", "name": "robot-r7-uc01-division", "status": "DELETED"},
+                     {"id": "d-new", "name": "robot-r7-uc01-division", "status": "ACTIVE"})
+    result, value = captured(jq_shell, LOOKUP, [answer], "DIVISION_ID")
+    assert result.returncode == 0, result.stderr
+    assert value == "d-new" and jq_shell.calls() == 1
+
+
+@pytest.mark.parametrize("rows", [
+    [],                                                                     # not there (yet)
+    [{"id": "a", "name": "robot-r7-uc01-division"}, {"id": "b", "name": "robot-r7-uc01-division"}],  # ambiguous
+    [{"id": "a", "name": "robot-r7-uc01-division", "status": "deleted"}],  # only a soft-deleted one
+])
+def test_lookup_stops_the_script_unless_exactly_one_matches(jq_shell, rows):
+    result, value = captured(jq_shell, LOOKUP, [records(*rows)] * 5, "DIVISION_ID")
+    assert result.returncode != 0 and value is None  # the guard ended the script before the next line
+    assert "DIVISION_ID: not found in the answer" in result.stderr
+    assert jq_shell.calls() == 5  # asked again – DTM lists lag behind a create
+
+
+def test_lookup_waits_for_a_lagging_list(jq_shell):
+    late = records({"id": "d-new", "name": "robot-r7-uc01-division"})
+    result, value = captured(jq_shell, LOOKUP, [records(), records(), late], "DIVISION_ID")
+    assert result.returncode == 0 and value == "d-new" and jq_shell.calls() == 3
+
+
+def profile_lookup():
+    """The spec as the real recorder writes it."""
+    api, variables = ApiCalls(), {}
+
+    class Client:
+        async def shared_profile(self, spec):
+            return "p", "used"
+
+    import asyncio
+    asyncio.run(evergreen.use_shared_profile(Client(), api, dtm.PROFILE_EVERGREEN, variables, lambda *a: None))
+    return api.calls[0]["spec"]
+
+
+def test_profile_lookup_is_scoped_to_the_account_and_active(jq_shell):
+    name = dtm.PROFILE_EVERGREEN.name
+    answer = records({"id": "foreign", "name": name, "status": "ACTIVE", "account_id": "another-account"},
+                     {"id": "retired", "name": name, "status": "DISABLED", "account_id": ACCOUNT},
+                     {"id": "mine", "name": name, "status": "ACTIVE", "account_id": ACCOUNT})
+    result, value = captured(jq_shell, profile_lookup(), [answer], "PROFILE_ID")
+    assert result.returncode == 0, result.stderr
+    assert value == "mine"
+    # only the other account has it active – never take theirs
+    only_foreign = records(answer["records"][0], answer["records"][1])
+    result, value = captured(jq_shell, profile_lookup(), [only_foreign] * 5, "PROFILE_ID")
+    assert result.returncode != 0 and value is None
+    assert "PROFILE_ID: not found or retired" in result.stderr
+    assert jq_shell.calls() == 1  # an existing object – asked once, not retried
+
+
+def test_create_capture_sets_the_id_or_stops(jq_shell):
+    result, value = captured(jq_shell, CREATE, [{"id": "ap-1"}], "AUTH_POLICY_ID")
+    assert result.returncode == 0 and value == "ap-1" and (jq_shell.work / "a.json").exists()
+    result, value = captured(jq_shell, CREATE, [{"errors": [{"message": "name already exists"}]}], "AUTH_POLICY_ID")
+    assert result.returncode != 0 and value is None and jq_shell.calls() == 1  # a create is not repeated
+
+
+@pytest.mark.parametrize("statuses,polls,stderr", [
+    (["in_progress", "in_progress", "completed", "completed"], 3, ""),
+    (["in_progress", "failed"], 2, "job failed"),
+    (["in_progress", None], 2, "job null"),   # an answer without status (e.g. an error) ends the loop
+])
+def test_until_polls_until_a_final_state(jq_shell, statuses, polls, stderr):
+    poll = {"method": "GET", "path": f"{JOBS}/{{JOB_ID}}", "until": {"status": "completed"}}
+    answers = [{"status": s} if s else {"errors": []} for s in statuses]
+    result = jq_shell(snippets.render(poll, "curl"), answers)
+    assert result.returncode == 0 and jq_shell.calls() == polls
+    assert stderr in result.stderr
+    assert result.stdout.splitlines()[-1].startswith("status: ")
+
+
+def test_until_gives_up_after_300_polls(jq_shell):
+    poll = {"method": "GET", "path": f"{JOBS}/{{JOB_ID}}", "until": {"status": "completed"}}
+    result = jq_shell(snippets.render(poll, "curl"), [{"status": "in_progress"}] * 400)
+    assert result.returncode == 0 and jq_shell.calls() == 300
+
+
+def test_csv_batch_command_writes_the_runs_csv(tmp_path):
+    if not (shutil.which("bash") and shutil.which("zip") and shutil.which("unzip")):
+        pytest.skip("needs bash, zip and unzip")
+    import io
+    import zipfile
+    work = tmp_path / "csv"
+    work.mkdir()
+    # a second replay in the same directory (other name, fewer devices) leaves only its own CSV
+    for run_name, count in (("robot-r4-uc01", 5), ("robot-r5-uc01", 3)):
+        subprocess.run(["bash", "-c", snippets.render({"command": evergreen.csv_batch_command(count)}, "curl")],
+                       cwd=work, env={"PATH": os.environ["PATH"], "RUN_NAME": run_name}, check=True,
+                       capture_output=True, timeout=30)
+    expected = zipfile.ZipFile(io.BytesIO(evergreen.batch_zip(evergreen.common_names("r5", "batch", 3, "uc01"))))
+    replayed = zipfile.ZipFile(work / "batch.zip")
+    assert replayed.namelist() == ["batch.csv"]
+    assert replayed.read("batch.csv") == expected.read("batch.csv")
+
+
+def test_csr_batch_command_packs_one_csr_per_device(tmp_path):
+    real = shutil.which("openssl")
+    if not (real and shutil.which("bash") and shutil.which("zip")):
+        pytest.skip("needs bash, openssl and zip")
+    from cryptography import x509 as _x509
+    import zipfile
+    work = tmp_path / "csr"
+    (work / "csrs").mkdir(parents=True)
+    (work / "csrs" / "stale.csr").write_text("from an earlier replay")
+    env = {"PATH": os.environ["PATH"], "RUN_NAME": "robot-r6-uc02", "HOME": str(tmp_path)}
+    result = subprocess.run(["bash", "-c", snippets.render({"command": evergreen.csr_batch_command(2, "P_256")}, "curl")],
+                            cwd=work, env=env, capture_output=True, text=True, timeout=60)
+    if result.returncode and "ec_paramgen_curve" in result.stderr:
+        pytest.skip(f"local openssl does not support the command: {result.stderr[:200]!r}")
+    assert result.returncode == 0, result.stderr
+    names = evergreen.common_names("r6", "batch", 2, "uc02")
+    archive = zipfile.ZipFile(work / "csrs.zip")
+    assert archive.namelist() == [f"{n}.csr" for n in names]  # like the run's csrs.zip, no stale file
+    for n in names:
+        csr = _x509.load_pem_x509_csr(archive.read(f"{n}.csr"))
+        assert csr.is_signature_valid and csr.subject.rfc4514_string() == f"CN={n}"
+    assert "PRIVATE KEY" not in "".join(archive.read(f"{n}.csr").decode() for n in names)
+
+
+# --- a later phase pasted on its own keeps what the replayed setup captured -------------------------
+
+KEEP_VARIABLES = VARIABLES | {"PASSCODE": "<choose a passcode>", "ICA_ID": "ca-1", "RUN_NAME": "robot-x1-uc04"}
+
+
+ZSH_LINE = '[ -n "${ZSH_VERSION:-}" ] && setopt interactivecomments'  # pasted into zsh: "#" lines are comments
+
+
+def test_keep_preamble_in_bash():
+    text = snippets.preamble(KEEP_VARIABLES, "curl", keep=True)
+    lines = text.splitlines()
+    assert lines[0] == ZSH_LINE and lines.count(ZSH_LINE) == 1
+    # every variable is only a fallback – also the key, host and passcode the user filled in for the replay
+    for name, value in (("DTM_API_KEY", "'<your API key>'"), ("DTM_HOST", HOST), ("DTM_ACCOUNT_ID", ACCOUNT),
+                        ("ICA_ID", "ca-1"), ("PASSCODE", "'<choose a passcode>'"), ("DIVISION_ID", "div-123"),
+                        ("POLICY_ID", "IOT_abc"), ("JOB_ID", "job-9")):
+        assert f'[ -n "${{{name}:-}}" ] || export {name}={value}' in lines, name
+    assert lines[-1] == '[ -n "${RUN_NAME:-}" ] || export RUN_NAME="robot-r${RANDOM}${RANDOM}-uc04"'
+    assert all(line.startswith('[ -n "${') and line.count(" || export ") == 1 for line in lines[1:])
+    assert "robot-x1-" not in text and "#" not in text  # no inline comments (zsh without interactivecomments)
+    plain = snippets.preamble(KEEP_VARIABLES, "curl").splitlines()
+    assert plain[0] == ZSH_LINE and snippets.preamble(KEEP_VARIABLES, "wget").splitlines()[0] == ZSH_LINE
+    assert "export POLICY_ID=IOT_abc" in plain and "export DTM_API_KEY='<your API key>'" in plain
+    assert not any(line.startswith("[ -n") for line in plain[1:]) and "#" not in "".join(plain)
+    assert "ZSH_VERSION" not in snippets.preamble(KEEP_VARIABLES, "powershell", keep=True)
+
+
+def test_keep_preamble_in_powershell():
+    text = snippets.preamble(KEEP_VARIABLES | {"POLICY_ID": "IOT_a'b"}, "powershell", keep=True)
+    lines = text.splitlines()
+    assert "if (-not $env:DTM_API_KEY) { $env:DTM_API_KEY = '<your API key>' }" in lines
+    assert f"if (-not $env:DTM_HOST) {{ $env:DTM_HOST = '{HOST}' }}" in lines
+    assert "if (-not $env:ICA_ID) { $env:ICA_ID = 'ca-1' }" in lines
+    assert "if (-not $env:PASSCODE) { $env:PASSCODE = '<choose a passcode>' }" in lines
+    assert "if (-not $env:POLICY_ID) { $env:POLICY_ID = 'IOT_a''b' }" in lines  # quoting kept inside the guard
+    assert "if (-not $env:DIVISION_ID) { $env:DIVISION_ID = 'div-123' }" in lines
+    assert 'if (-not $env:RUN_NAME) { $env:RUN_NAME = "robot-r$(Get-Random -Maximum 1000000000)-uc04" }' in lines
+    assert lines[-1] == '$headers = @{ "x-api-key" = $env:DTM_API_KEY }'
+    assert all(line.startswith("if (-not $env:") for line in lines[:-1]) and "#" not in text
+
+
+def _source(preamble: str, before: str, tmp_path) -> dict:
+    if not shutil.which("bash"):
+        pytest.skip("bash not available")
+    names = ("DTM_API_KEY", "DTM_HOST", "ICA_ID", "PASSCODE", "POLICY_ID", "DIVISION_ID", "RUN_NAME")
+    dump = "".join(f'printf "%s=%s\\n" {n} "${{{n}:-}}"\n' for n in names)
+    out = subprocess.run(["bash", "-c", before + "\n" + preamble + "\n" + dump], env={"PATH": "/usr/bin:/bin"},
+                         cwd=tmp_path, capture_output=True, text=True, check=True, timeout=30).stdout
+    return dict(line.split("=", 1) for line in out.splitlines())
+
+
+def test_keep_preamble_keeps_captured_ids_in_bash(tmp_path):
+    keep = snippets.preamble(KEEP_VARIABLES, "curl", keep=True)
+    replayed = ("export POLICY_ID=IOT_replay RUN_NAME=robot-r42-uc04 DTM_HOST=other.example "
+                "ICA_ID=ca-other PASSCODE=chosen DTM_API_KEY=real-key")
+    env = _source(keep, replayed, tmp_path)
+    assert env["POLICY_ID"] == "IOT_replay" and env["RUN_NAME"] == "robot-r42-uc04"  # captured by the setup
+    # what the user filled in stays – a later phase must not reset the key to its placeholder
+    assert (env["DTM_API_KEY"], env["DTM_HOST"], env["ICA_ID"], env["PASSCODE"]) == (
+        "real-key", "other.example", "ca-other", "chosen")
+    assert env["DIVISION_ID"] == "div-123"  # not set in this shell – the run's value is the fallback
+    fresh = _source(keep, "", tmp_path)
+    assert (fresh["POLICY_ID"], fresh["DIVISION_ID"], fresh["DTM_HOST"]) == ("IOT_abc", "div-123", HOST)
+    assert fresh["DTM_API_KEY"] == "<your API key>" and fresh["PASSCODE"] == "<choose a passcode>"
+    assert re.fullmatch(r"robot-r\d+-uc04", fresh["RUN_NAME"])
+    # an exported but empty variable counts as unset
+    assert _source(keep, "export POLICY_ID= DTM_API_KEY=", tmp_path)["POLICY_ID"] == "IOT_abc"
+    # the plain preamble (setup / whole script) overwrites everything
+    plain = _source(snippets.preamble(KEEP_VARIABLES, "curl"), replayed, tmp_path)
+    assert plain["POLICY_ID"] == "IOT_abc" and plain["RUN_NAME"] != "robot-r42-uc04"
+    assert plain["DTM_API_KEY"] == "<your API key>" and plain["DTM_HOST"] == HOST
+
+
+def test_csr_batch_command_rerun_keeps_only_the_latest_devices(tmp_path):
+    """Replaying twice in one directory (new RUN_NAME, fewer devices): csrs.zip holds only the
+    second replay's CSRs – no stale CSR of the first one is uploaded again."""
+    if not (shutil.which("openssl") and shutil.which("bash") and shutil.which("zip")):
+        pytest.skip("needs bash, openssl and zip")
+    import zipfile
+    work = tmp_path / "csr-rerun"
+    work.mkdir()
+    for run_name, count in (("robot-r1-uc02", 3), ("robot-r2-uc02", 2)):
+        result = subprocess.run(["bash", "-c", snippets.render({"command": evergreen.csr_batch_command(count, "P_256")},
+                                                               "curl")],
+                                cwd=work, env={"PATH": os.environ["PATH"], "RUN_NAME": run_name, "HOME": str(tmp_path)},
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode and "ec_paramgen_curve" in result.stderr:
+            pytest.skip(f"local openssl does not support the command: {result.stderr[:200]!r}")
+        assert result.returncode == 0, result.stderr
+    assert zipfile.ZipFile(work / "csrs.zip").namelist() == [
+        f"{n}.csr" for n in evergreen.common_names("r2", "batch", 2, "uc02")]
+    assert sorted(p.name for p in (work / "csrs").iterdir() if p.suffix == ".csr") == [
+        f"{n}.csr" for n in evergreen.common_names("r2", "batch", 2, "uc02")]
+
+
+def test_batch_steps_start_from_a_clean_directory():
+    csv, csr = evergreen.csv_batch_command(2)["bash"], evergreen.csr_batch_command(2, "P_256")["bash"]
+    assert csv.endswith("\nrm -f batch.zip && zip -q -j batch.zip batch.csv")
+    assert csr.split("\n")[1] == "rm -rf csrs csrs.zip && mkdir csrs"  # after the zip note
+
+
+@pytest.mark.parametrize("dialect", ["curl", "wget"])
+def test_only_the_whole_bash_script_has_a_shebang(dialect):
+    calls = [{"purpose": "a", "phase": "setup", "spec": DIVISION}, {"purpose": "b", "phase": "recurring", "spec": SINGLE}]
+    whole = snippets.script(VARIABLES, calls, dialect)
+    assert whole.startswith(f"#!/usr/bin/env bash\n\n{ZSH_LINE}\nexport DTM_API_KEY=") and whole.count("#!") == 1
+    for phase in ("setup", "recurring", "renewal"):
+        assert not snippets.script(VARIABLES, calls, dialect, phase).startswith("#!")
+    assert "#!" not in snippets.script(VARIABLES, calls, "powershell")
+
+
+def test_retry_only_for_lookups_right_after_a_create():
+    single = {"method": "GET", "path": DIV_PATH, "capture": {"var": "RZONE_ID", "jq": ".records[0].id",
+                                                             "ps": "$r.records[0].id"}}
+    for dialect in snippets.DIALECTS:
+        text = snippets.render(single, dialect)
+        assert "for i in" not in text and "foreach" not in text and "sleep" not in text.lower(), dialect
+        retried = snippets.render(single | {"capture": single["capture"] | {"retry": True}}, dialect)
+        first = retried.splitlines()[0]
+        assert first == ("foreach ($i in 1..5) {" if dialect == "powershell" else "for i in 1 2 3 4 5; do")
+        assert "#" not in retried  # no inline comments (zsh without interactivecomments)
+    assert evergreen.by_name("POLICY_ID", "{RUN_NAME}-policy")["retry"] is True
+    assert "retry" not in profile_lookup()["capture"]  # the shared profile exists before – asked once
+
+
+# pasted into an interactive zsh (macOS default; interactivecomments is off there) ----------------------
+
+PASTE_CALLS = [{"purpose": "Create the division", "phase": "setup", "spec": DIVISION},
+               {"purpose": "Generate the CSR (local)", "phase": "recurring",
+                "spec": {"command": "# needs openssl\necho step-ran > step.txt"}},
+               {"purpose": "Request the certificate", "phase": "recurring", "spec": SINGLE}]
+
+
+def _stub_tools(tmp_path):
+    """curl/wget that only log – the paste must run every line without reaching a network."""
+    bin_dir = tmp_path / "paste-bin"
+    bin_dir.mkdir()
+    for tool in ("curl", "wget"):
+        (bin_dir / tool).write_text(f"#!/bin/sh\necho {tool} >> \"$PWD/tools.log\"\n")
+        (bin_dir / tool).chmod(0o755)
+    return f"{bin_dir}:/usr/bin:/bin"
+
+
+@pytest.mark.parametrize("dialect,phase", [("curl", "recurring"), ("curl", "setup"), ("wget", "recurring")])
+def test_phase_script_pasted_into_interactive_zsh_has_no_comment_errors(tmp_path, dialect, phase):
+    zsh = shutil.which("zsh")
+    if not zsh:
+        pytest.skip("zsh not installed")
+    text = snippets.script(VARIABLES | {"RUN_NAME": "robot-x1-uc01"}, PASTE_CALLS, dialect, phase)
+    assert "\n# " in text  # the step headings are "#" lines
+    work = tmp_path / "zsh"
+    work.mkdir()
+    result = subprocess.run([zsh, "-f", "-i"], input=text + 'print -r -- "RUN=$RUN_NAME" > done.txt\nexit\n',
+                            cwd=work, env={"PATH": _stub_tools(tmp_path), "HOME": str(tmp_path), "TERM": "dumb"},
+                            capture_output=True, text=True, timeout=60)
+    out = result.stdout + result.stderr
+    assert "command not found" not in out and "not found: #" not in out, out[-1500:]
+    assert re.fullmatch(r"RUN=robot-r\d+-uc01\n", (work / "done.txt").read_text())  # every line ran
+    assert (work / "tools.log").read_text().splitlines() == [dialect]  # one request per phase here
+    assert (work / "step.txt").exists() == (phase == "recurring")
+
+
+def test_the_same_paste_without_the_zsh_line_would_fail(tmp_path):
+    """The check above can fail: without the setopt line zsh runs "#" as a command."""
+    zsh = shutil.which("zsh")
+    if not zsh:
+        pytest.skip("zsh not installed")
+    text = snippets.script(VARIABLES, PASTE_CALLS, "curl", "recurring").replace(ZSH_LINE + "\n", "")
+    result = subprocess.run([zsh, "-f", "-i"], input=text + "exit\n", cwd=tmp_path,
+                            env={"PATH": _stub_tools(tmp_path), "HOME": str(tmp_path), "TERM": "dumb"},
+                            capture_output=True, text=True, timeout=60)
+    assert "command not found: #" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("phase", [None, "setup", "recurring"])
+def test_zsh_line_is_a_no_op_in_strict_bash(tmp_path, phase):
+    if not shutil.which("bash"):
+        pytest.skip("bash not available")
+    path = tmp_path / "replay.sh"
+    path.write_text(snippets.script(VARIABLES | {"RUN_NAME": "robot-x1-uc01"}, PASTE_CALLS, "curl", phase)
+                    + 'echo "done $RUN_NAME" > done.txt\n')
+    result = subprocess.run(["bash", "-eu", str(path)], cwd=tmp_path,
+                            env={"PATH": _stub_tools(tmp_path), "HOME": str(tmp_path)},
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "setopt" not in result.stderr and "unbound" not in result.stderr
+    assert re.fullmatch(r"done robot-r\d+-uc01\n", (tmp_path / "done.txt").read_text())

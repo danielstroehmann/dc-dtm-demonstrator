@@ -138,9 +138,11 @@ async def test_live_batch_with_approval(config, tmp_path):
                                                                                          "uc01")
     assert r["success_items"] == LIVE_COUNT and not r["failed_items"]
     assert "PRIVATE KEY" not in str(run) and "BEGIN" not in str(r["api_calls"])
-    assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "POST", "GET", "LOCAL", "POST", "PUT",
-                                                    "GET", "GET", "LOCAL"]
-    assert set(r["api_variables"]) == {"DTM_HOST", "DTM_ACCOUNT_ID", "DIVISION_ID", "POLICY_ID", "JOB_ID"}
+    # rzone, division + lookup, profile, policy + lookup, CSV, key, upload, wait, approve, poll, download, decrypt
+    assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "LOCAL", "POST",
+                                                    "GET", "PUT", "GET", "GET", "LOCAL"]
+    assert set(r["api_variables"]) == {"DTM_HOST", "DTM_ACCOUNT_ID", "ICA_ID", "RZONE_ID", "DIVISION_ID", "PROFILE_ID",
+                                       "POLICY_ID", "JOB_ID", "RUN_NAME"}
     assert config.api_key not in str(run)
     assert all(c["outcome"] == "ok" for c in r["api_calls"])
     assert r["per_certificate_s"] > 0 and r["per_minute"] > 0
@@ -157,8 +159,9 @@ async def test_live_single(config, tmp_path):
     assert all(c["key_type"].startswith("ECDSA") for c in r["certificates"])
     assert r["certificate_total"] == LIVE_COUNT and r["private_keys_returned"] == LIVE_COUNT
     assert "PRIVATE KEY" not in str(run)
-    assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "POST", "GET", "POST"]
-    assert (r["api_calls"][-1]["count"], r["api_calls"][-1]["outcome"]) == (LIVE_COUNT, "ok")
+    # rzone, division + lookup, shared profile, policy + lookup, the requests, then the local extract step
+    assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "GET", "POST", "GET", "POST", "LOCAL"]
+    assert (r["api_calls"][-2]["count"], r["api_calls"][-2]["outcome"]) == (LIVE_COUNT, "ok")
     assert r["per_certificate_s"] > 0 and r["per_minute"] > 0
     assert config.api_key not in str(run)
     assert_clean(after_cleanup, events)
@@ -175,8 +178,8 @@ async def test_live_uc02_batch(config, tmp_path):
     assert all(c["key_type"].startswith("ECDSA") for c in r["certificates"])
     assert r["certificate_total"] == LIVE_COUNT and r["private_keys_returned"] == 0
     assert r["keygen_s"] is not None and r["artifact"] == "csrs.zip"
-    assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "POST", "GET", "LOCAL", "POST", "GET",
-                                                    "GET"]
+    assert [c["method"] for c in r["api_calls"]] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "POST", "GET",
+                                                    "GET", "LOCAL"]
     assert all(c["outcome"] == "ok" for c in r["api_calls"])
     assert "PRIVATE KEY" not in str(run) and config.api_key not in str(run)
     assert_clean(after_cleanup, events)

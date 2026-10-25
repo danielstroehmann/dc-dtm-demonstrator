@@ -21,6 +21,8 @@
   --dc-blue-tint-border: #b9d6f2;
   --dc-orange: #f57c00;
   --dc-orange-hover: #dc6f00;
+  --dc-orange-tint: #fff5eb;
+  --dc-orange-tint-border: #f8d5b0;
   --dc-grey-bg: #f5f5f5;
   --dc-border: #dde3e9;
   --ok: #2e7d32;
@@ -94,6 +96,14 @@ article.card { padding: var(--s5); margin: 0 0 var(--s6); border: 1px solid var(
   border-left: 4px solid var(--dc-blue); }
 .box-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
   gap: var(--s2) var(--s4); margin-bottom: var(--s3); }
+/* Phases of the reproducible steps: icon chip + colour keep factory (blue) and field (orange) apart */
+.phase-title { display: flex; align-items: center; gap: var(--s3); margin: 0; }
+.phase-icon { display: inline-grid; place-items: center; flex: none; width: 2rem; height: 2rem;
+  border-radius: 0.5rem; background: var(--dc-blue); color: #fff; }
+.phase-icon svg { width: 1.125rem; height: 1.125rem; }
+.box.field { background: var(--dc-orange-tint); border-color: var(--dc-orange-tint-border); border-left-color: var(--dc-orange); }
+.box.field .phase-icon { background: var(--dc-orange); }
+.box.accent + .box.accent { margin-top: var(--s5); }
 .box-hint { margin: 0 0 var(--s3); font-size: 0.875rem; color: var(--pico-muted-color); }
 details.box > summary { font-weight: 500; color: #333; cursor: pointer; margin: 0; }
 details.box[open] > summary { margin-bottom: var(--s3); }

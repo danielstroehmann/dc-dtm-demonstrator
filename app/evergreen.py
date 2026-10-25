@@ -3,6 +3,7 @@ factory generates keys and CSRs). Same flow: single or batch, via API or in the 
 
 import asyncio
 import io
+import re
 import time
 import zipfile
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ USE_CASES = {
         "server_side", ("Server-side keys", "Single · Batch", "API · Web UI")),
     "uc02": UseCase(
         "Evergreen Device IDs with Factory-Generated Keys",
-        "Like UC-1, but the factory generates each key pair itself and sends only a CSR – the private key never "
+        "Like server-side key generation, but the factory generates each key pair itself and sends only a CSR – the private key never "
         "leaves the factory. DTM signs long-lived device certificates individually or as a batch, via API (with "
         "time measurement) or in the DTM web UI.",
         "client_side", ("Factory CSR", "Single · Batch", "API · Web UI")),
@@ -55,6 +56,8 @@ GUIDE = UseCase(
     "flow end to end.",
     "client_side", ("Server-side or factory keys", "Batch · Single", "REST · EST · CMPv2 · SCEP"))
 CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"]}
+# What the UI calls a run's use case: the catalog entry it was started from (no internal UC numbers).
+DISPLAY_NAMES = {uc: (GUIDE if uc in ("uc01", "uc02", "uc03") else use_case).title for uc, use_case in USE_CASES.items()}
 
 
 def resolve_guide(key_location: str, mode: str, protocol: str, auth: str) -> tuple[str, str, str]:
@@ -140,6 +143,28 @@ async def factory_csrs(names: list[str], key_type: str, log) -> tuple[dict[str, 
     return csrs, seconds
 
 
+def csv_batch_command(count: int) -> dict:
+    """The batch CSV as the run built it: one name per device, derived from RUN_NAME."""
+    return {"bash": ZIP_NOTE + '{ echo subject.common_name; for i in $(seq 1 %d); do printf "%%s-batch-%%04d\\n" '
+                                 '"$RUN_NAME" "$i"; done; } > batch.csv\nrm -f batch.zip && zip -q -j batch.zip batch.csv' % count,
+            # LF line endings like the run's CSV (Set-Content would write CRLF on Windows)
+            "powershell": '$lines = @("subject.common_name") + (1..%d | ForEach-Object { "{0}-batch-{1:d4}" -f $env:RUN_NAME, $_ })\n'
+                          '[IO.File]::WriteAllText("$PWD/batch.csv", ($lines -join "`n") + "`n")\n'
+                          "Compress-Archive -Force batch.csv batch.zip" % count}
+
+
+def csr_batch_command(count: int, key_type: str) -> dict:
+    """Key + CSR per device as the factory creates them; the keys stay in csrs/, only CSRs are packed."""
+    new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
+    req = f'openssl req -new -newkey {new_key} -nodes -keyout "csrs/$cn.key" -out "csrs/$cn.csr" -subj "/CN=$cn"'
+    return {"bash": ZIP_NOTE + "rm -rf csrs csrs.zip && mkdir csrs\n"
+                    f'for i in $(seq 1 {count}); do cn="$(printf "%s-batch-%04d" "$RUN_NAME" "$i")"\n  {req}\ndone\n'
+                    "(cd csrs && zip -q ../csrs.zip *.csr)",
+            "powershell": "Remove-Item -Recurse -Force csrs -ErrorAction Ignore\nNew-Item -ItemType Directory csrs | Out-Null\n"
+                          f'1..{count} | ForEach-Object {{ $cn = "{{0}}-batch-{{1:d4}}" -f $env:RUN_NAME, $_\n  {req} }}\n'
+                          "Compress-Archive -Force csrs/*.csr csrs.zip"}
+
+
 def keygen_command(cn: str, key_type: str) -> dict:
     """Per-dialect local step: key + CSR, and the CSR as a JSON-ready variable for the request body."""
     new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
@@ -156,21 +181,54 @@ def rates(seconds: float, count: int) -> dict:
     return {"per_certificate_s": round(seconds / count, 3), "per_minute": round(count / seconds * 60)}
 
 
+# Reproducible steps carry what DTM answers into the next step (snippets.render: capture / until).
+LIST = "limit=100"  # list endpoints page – the snippets ask for one large page
+
+
+def one_record(var: str, name: str, jq: str, ps: str, **extra) -> dict:
+    """Capture the ID of the single list record with this name that also matches jq / ps – none or
+    several matches leave the variable empty, so the step stops instead of using the wrong object."""
+    if not re.fullmatch(r"[\w{}.-]+", name):  # it lands in shell code – names are ours, keep it that way
+        raise ValueError(f"unexpected record name {name!r}")
+    return {"var": var, "arg": name,
+            "jq": f"[.records[] | select(.name == $a and {jq})] | if length == 1 then .[0].id else empty end",
+            "ps": f'$(if (($m = @($r.records | Where-Object {{ $_.name -ceq "{name}" -and {ps} }})).Count -eq 1) '
+                  "{ $m[0].id })", **extra}
+
+
+def by_name(var: str, name: str) -> dict:
+    """The record the step before just created – soft-deleted records keep their names, they don't count.
+    retry: DTM lists lag a few seconds behind a create."""
+    return one_record(var, name, '((.status // "") | ascii_downcase) != "deleted"', '$_.status -ne "DELETED"',
+                      retry=True)
+
+
+ZIP_NOTE = "# needs zip and unzip (Ubuntu: apt install zip unzip)\n"
+
+
 async def create_division(client: DTMClient, api: ApiCalls, store: Store, run_id: str, use_case: str,
                           variables: dict, log) -> str:
     """The run's own division – every DTM object of the run lives in it (shared by all use cases)."""
     division_name = f"{prefix(run_id, use_case)}-division"
     log(f"Creating division {division_name}")
-    rzone_id = await api.timed("Find a rendezvous zone for the division", "GET", RZONE_PATH,
-                               client.rendezvous_zone(), spec={"method": "GET", "path": RZONE_PATH}, phase="setup")
+    # Every object name of the run starts with RUN_NAME; the recorded steps use the variable instead.
+    api.run_name = variables["RUN_NAME"] = prefix(run_id, use_case)
+    rzone_id = await api.timed(
+        "Find a rendezvous zone for the division", "GET", RZONE_PATH, client.rendezvous_zone(),
+        spec={"method": "GET", "path": RZONE_PATH, "query": LIST, "capture": {
+            "var": "RZONE_ID", "jq": '[.records[] | select(.status == "ENABLED")] | sort_by(.name) | .[0].id',
+            "ps": "($r.records | Where-Object status -eq 'ENABLED' | Sort-Object name | Select-Object -First 1).id"}},
+        phase="setup")
+    variables["RZONE_ID"] = rzone_id
     division_id = await api.timed(
         "Create a division for this run (the response has no ID)", "POST", DIVISION_PATH,
         client.create_division(division_name, DIVISION_DESCRIPTION, rzone_id),
         spec={"method": "POST", "path": DIVISION_PATH, "body_file": "division.json",
-              "json": dtm.division_body(division_name, DIVISION_DESCRIPTION, "{DTM_ACCOUNT_ID}", rzone_id)},
+              "json": dtm.division_body("{RUN_NAME}-division", DIVISION_DESCRIPTION, "{DTM_ACCOUNT_ID}", "{RZONE_ID}")},
         phase="setup")
     api.add("Look up the division ID by its name", "GET", DIVISION_PATH, None,
-            spec={"method": "GET", "path": DIVISION_PATH}, phase="setup")
+            spec={"method": "GET", "path": DIVISION_PATH, "query": LIST,
+                  "capture": by_name("DIVISION_ID", "{RUN_NAME}-division")}, phase="setup")
     variables["DIVISION_ID"] = division_id
     store.add_object(run_id, "division", division_id, division_name)
     return division_id
@@ -180,8 +238,15 @@ async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.Profile
     """The purpose's shared profile (validity etc.) – created by the first run, reused afterwards."""
     validity = f"{spec.value} {spec.unit}"
     profile_id, how = await api.timed(
-        f"Find the shared profile {spec.name} ({validity}) – created once, reused by every run", "GET",
-        dtm.PROFILES, client.shared_profile(spec), spec={"method": "GET", "path": dtm.PROFILES}, phase="setup")
+        f"Find the shared profile {spec.name} ({validity}) – the demonstrator creates it once per account", "GET",
+        dtm.PROFILES, client.shared_profile(spec),
+        # The profile list spans every account the key sees – the account filter is essential.
+        spec={"method": "GET", "path": dtm.PROFILES, "query": LIST, "capture": one_record(
+            "PROFILE_ID", spec.name, '.account_id == $ENV.DTM_ACCOUNT_ID and .status == "ACTIVE"',
+            '$_.account_id -eq $env:DTM_ACCOUNT_ID -and $_.status -eq "ACTIVE"',
+            missing="not found or retired – run this use case once in the demonstrator, it creates or enables "
+                    "the shared profile")},
+        phase="setup")
     log({"created": "Created", "enabled": "Enabled again"}.get(how, "Using")
         + f" the shared certificate profile {spec.name} ({validity}) – DTM keeps it permanently")
     variables["PROFILE_ID"] = profile_id
@@ -195,7 +260,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     log = lambda msg, level="step": store.add_event(run_id, msg, level)  # noqa: E731
     api = ApiCalls()
     # Variables for the copyable command-line snippets; IDs are added as DTM hands them out.
-    variables = {"DTM_HOST": p["dtm_host"], "DTM_ACCOUNT_ID": p["account_id"]}
+    variables = {"DTM_HOST": p["dtm_host"], "DTM_ACCOUNT_ID": p["account_id"], "ICA_ID": p["ca_id"]}
     result: dict = {"api_calls": api.calls, "api_variables": variables}
     store.update_run(run_id, status="running")
     try:
@@ -211,11 +276,12 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             f"Create the certificate policy (single + batch, {keys_by})", "POST", POLICY_PATH,
             client.create_policy(name=policy_name, division_id=division_id, **policy_args),
             spec={"method": "POST", "path": POLICY_PATH, "body_file": "policy.json",
-                  "json": dtm.policy_body(name=policy_name, division_id="{DIVISION_ID}", **policy_args
-                                          | {"profile_id": "{PROFILE_ID}"})},
+                  "json": dtm.policy_body(name="{RUN_NAME}-policy", division_id="{DIVISION_ID}", **policy_args
+                                          | {"profile_id": "{PROFILE_ID}", "ica_id": "{ICA_ID}"})},
             phase="setup")
         api.add("Look up the policy ID by its name", "GET", POLICY_PATH, None,
-                spec={"method": "GET", "path": POLICY_PATH}, phase="setup")
+                spec={"method": "GET", "path": POLICY_PATH, "query": LIST,
+                      "capture": by_name("POLICY_ID", "{RUN_NAME}-policy")}, phase="setup")
         variables["POLICY_ID"] = policy_id
         store.add_object(run_id, "policy", policy_id, policy_name)
         log("DTM is configured for this run", "success")
@@ -286,6 +352,12 @@ async def _single(client: DTMClient, api: ApiCalls, store: Store, run_id: str, p
                 spec={"method": "POST", "path": SINGLE_PATH, "body_file": "certificate.json",
                       "json": dtm.single_body("{POLICY_ID}", names[0], "{CSR}" if client_side else None),
                       "output": "certificate.json.out"})
+        api.add("Extract the certificate" + ("" if client_side else " and the server-generated key")
+                + " from the JSON answer (local)", "LOCAL", "jq", None, spec={"command": {
+                    "bash": "jq -r .pem certificate.json.out > device.crt"
+                            + ("" if client_side else "\njq -r .private_key certificate.json.out > device.key"),
+                    "powershell": "$r = Get-Content certificate.json.out -Raw | ConvertFrom-Json\n"
+                                  "Set-Content device.crt $r.pem" + ("" if client_side else "\nSet-Content device.key $r.private_key")}})
     duration = time.monotonic() - start
     log(f"{len(issued)} certificate(s) issued in {duration:.1f}s", "success")
     return {"duration_s": round(duration, 2), **rates(duration, len(issued)), "response": shown,
@@ -305,16 +377,18 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
         store.update_run(run_id, progress={"label": f"Factory generates {len(names)} key pairs", "started": time.time()})
         csrs, keygen_s = await factory_csrs(names, p["key_type"], log)
         payload, artifact = csr_zip(csrs), "csrs.zip"
-        api.add("Generate key + CSR per device (example: first device) – or use csrs.zip from the Payload", "LOCAL",
-                "openssl", None, spec={"command": keygen_command(names[0], p["key_type"])})
-        upload |= {"form": dtm.csr_batch_fields(f"{pre}-batch", "{POLICY_ID}"),
+        api.add(f"Generate key + CSR for each of the {len(names)} devices and pack the CSRs (local)", "LOCAL",
+                "openssl", None, spec={"command": csr_batch_command(len(names), p["key_type"])})
+        upload |= {"form": dtm.csr_batch_fields("{RUN_NAME}-batch", "{POLICY_ID}"),
                    "files": {"data": "@csrs.zip;type=application/zip"}}
     else:
         payload, artifact = batch_zip(names), "batch.zip"
         cert_pem, key_pem = certs.encryption_keypair(f"{pre}-encryption")
+        api.add(f"Write the CSV with the {len(names)} device names and pack it (local)", "LOCAL", "zip", None,
+                spec={"command": csv_batch_command(len(names))})
         api.add("Create a one-time RSA key pair DTM encrypts the result to (local)", "LOCAL", "openssl", None,
                 spec={"command": ENC_CERT_COMMAND})
-        upload |= {"form": dtm.batch_fields(f"{pre}-batch", "{POLICY_ID}", p["key_type"]),
+        upload |= {"form": dtm.batch_fields("{RUN_NAME}-batch", "{POLICY_ID}", p["key_type"]),
                    "files": {"encryption_certificate": "<enc.crt", "data": "@batch.zip;type=application/zip"}}
     (run_dir / artifact).write_bytes(payload)  # offered for download, to replay the call manually
     log(f"Uploading a ZIP with {len(names)} " + ("CSRs" if client_side else "certificate requests (CSV)"))
@@ -324,7 +398,7 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
         f"{JOBS_PATH}/certificate-enroll",
         client.submit_batch(name=f"{pre}-batch", policy_id=policy_id, payload=payload, key_type=p["key_type"],
                             encryption_cert_pem=None if client_side else cert_pem.decode()),
-        spec=upload)
+        spec=upload | {"capture": {"var": "JOB_ID", "jq": ".id", "ps": "$r.id"}})
     upload_done = time.monotonic()  # measurement starts when the upload call has returned
     job_id = job["id"]
     variables["JOB_ID"] = job_id
@@ -353,6 +427,9 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
                 break
             if p.get("approval") and approval_s is None and status == "pending_approval":  # verified live
                 log("Approval required – approving via API (the request/approve round trip)")
+                api.add("Wait until the job awaits approval", "GET", f"{JOBS_PATH}/{{JOB_ID}}", None,
+                        spec={"method": "GET", "path": f"{JOBS_PATH}/{{JOB_ID}}",
+                              "until": {"status": "pending_approval", "stop": ["completed", "failed", "rejected"]}})
                 await api.timed("Approve the batch job", "PUT", f"{JOBS_PATH}/{{JOB_ID}}/approve",
                                 client.approve_batch(job_id),
                                 spec={"method": "PUT", "path": f"{JOBS_PATH}/{{JOB_ID}}/approve", "json": {},
@@ -368,9 +445,9 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
                 raise ValueError(f"batch job did not complete within {deadline - upload_done:.0f}s")
             await asyncio.sleep(POLL_INTERVAL)
     finally:  # also shown when the job failed or timed out
-        api.add(f"Poll the job status (every {POLL_INTERVAL:g}s) until it is completed", "GET",
+        api.add("Poll the job status until it is completed", "GET",
                 f"{JOBS_PATH}/{{JOB_ID}}", poll_seconds, count=polls,
-                spec={"method": "GET", "path": f"{JOBS_PATH}/{{JOB_ID}}"})
+                spec={"method": "GET", "path": f"{JOBS_PATH}/{{JOB_ID}}", "until": {"status": "completed"}})
     measured = time.monotonic() - upload_done
     if status != "completed":
         raise ValueError(f"batch job ended with status {status}")
@@ -382,13 +459,17 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
         inner = await api.timed("Download the result (ZIP with the certificates)", "GET", result_path,
                                 client.batch_result(job_id),
                                 spec={"method": "GET", "path": result_path, "output": "result.zip"})
+        api.add("Unpack the certificates (local)", "LOCAL", "unzip", None,
+                spec={"command": {"bash": "rm -rf result && unzip -q result.zip -d result && ls result",
+                                  "powershell": "Expand-Archive -Force result.zip result; Get-ChildItem result"}})
     else:
         store.update_run(run_id, progress={"label": "Downloading and decrypting the result", "started": time.time()})
         envelope = await api.timed("Download the encrypted result (CMS envelope)", "GET", result_path,
                                    client.batch_result(job_id),
                                    spec={"method": "GET", "path": result_path, "output": "result.p7m"})
-        api.add("Decrypt the result with the one-time key (local)", "LOCAL", "openssl", None,
-                spec={"command": DECRYPT_COMMAND})
+        api.add("Decrypt the result with the one-time key and unpack it (local)", "LOCAL", "openssl", None,
+                spec={"command": {"bash": DECRYPT_COMMAND + "\nrm -rf result && unzip -q result.zip -d result && ls result",
+                                  "powershell": DECRYPT_COMMAND + "\nExpand-Archive -Force result.zip result; Get-ChildItem result"}})
         inner = certs.decrypt_result(envelope, cert_pem, key_pem)
     issued, keys = certs.parse_batch_zip(inner)
     log(f"Result: {len(issued)} certificates" + (f", {keys} private keys (not displayed)" if keys else ""), "success")

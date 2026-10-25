@@ -1,5 +1,6 @@
 {# Reproducible steps: the DTM calls of a run (result.api_calls) as curl / wget / PowerShell –
    shared by all use cases. One-time setup (collapsed) vs. the certificate order a factory repeats. #}
+{% from "_icons.html" import icon %}
 {% set calls = (run.result or {}).get("api_calls") or [] %}
 {% if calls %}
 {% set variables = run.result.api_variables or {} %}
@@ -38,7 +39,7 @@
   {% if recurring %}
   <section class="box accent">
     <div class="box-head">
-      <h3>{{ "Factory Enrollment" if run.use_case == "uc04" else "Certificate Order" }}</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ "Factory Enrollment" if run.use_case == "uc04" else "Certificate Order" }}</h3>
       <button class="btn-sm outline" data-copy="script-recurring-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "recurring", group = recurring %}{% include "_api_call_list.html" %}{% endwith %}
@@ -46,9 +47,9 @@
   </section>
   {% endif %}
   {% if renewal %}
-  <section class="box accent">
+  <section class="box accent field">
     <div class="box-head">
-      <h3>Renewal in the Field</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Renewal in the Field</h3>
       <button class="btn-sm outline" data-copy="script-renewal-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "renewal", group = renewal %}{% include "_api_call_list.html" %}{% endwith %}

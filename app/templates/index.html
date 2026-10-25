@@ -18,9 +18,10 @@
     {% for run in runs %}
       <tr>
         <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-        <td {% if run.use_case in use_cases %}data-tip="{{ use_cases[run.use_case].title }}"{% endif %}>{{ "UC-%d" % (run.use_case[2:] | int) if run.use_case[2:].isdigit() else run.use_case }} · {{ run.params.mode }} ({{ run.params.count }})</td>
+        <td>{{ use_case_names.get(run.use_case, run.use_case) }} · {{ run.params.mode }} ({{ run.params.count }})</td>
         {% if several %}<td>{{ run.connection }}</td>{% endif %}
-        <td>{{ "API" if run.params.variant == "api" else "Web UI" }}</td>
+        {# Enrollment-protocol runs: the protocol and how the factory authenticates; otherwise API or web UI #}
+        <td>{% if run.params.protocol %}{{ protocols.get(run.params.protocol, run.params.protocol) }} · {{ auths.get(run.params.auth, run.params.auth) }}{% else %}{{ "API" if run.params.variant == "api" else "Web UI" }}{% endif %}</td>
         <td>{{ pill(run.status) }}</td>
         <td>{% if run.cleanup_status %}{{ pill(run.cleanup_status) }}{% else %}–{% endif %}</td>
         <td>{{ run.created_at[:16].replace("T", " ") }}</td>

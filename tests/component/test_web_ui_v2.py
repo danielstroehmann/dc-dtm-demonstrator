@@ -285,14 +285,18 @@ def test_connection_name_is_escaped_in_chip_select_and_run_pages(user, store):
 def test_use_case_title_is_escaped_in_tiles_and_tooltips(configured_store, user, store, monkeypatch):
     from app import main
     hostile = 'T" onmouseover="alert(1)'
-    monkeypatch.setitem(main.USE_CASES, "uc01", evergreen.UseCase(hostile, "S", "server_side"))  # runs table
+    monkeypatch.setitem(main.USE_CASES, "uc01", evergreen.UseCase(hostile, "S", "server_side"))  # run page
+    monkeypatch.setitem(evergreen.DISPLAY_NAMES, "uc01", hostile)  # runs table
     monkeypatch.setitem(evergreen.CATALOG, "evergreen", evergreen.UseCase(hostile, "S", "server_side"))  # tile
     store.create_run("t1", "uc01", BASE_PARAMS)
     html = user.get("/").text
     assert hostile not in html and 'onmouseover="alert(1)' not in html
     escaped = "T&#34; onmouseover=&#34;alert(1)"
     assert f'aria-label="Start {escaped}"' in html  # tile button attribute
-    assert f'data-tip="{escaped}"' in html  # runs table use-case tooltip
+    assert f"<td>{escaped} · batch (3)</td>" in html  # runs table use-case cell (text, no tooltip attribute)
+    page = user.get("/runs/t1").text
+    assert hostile not in page and 'onmouseover="alert(1)' not in page
+    assert f"<p>{escaped} · Batch (3)" in page  # run page title line
 
 
 # --- CSS contract: buttons are never full width ------------------------------------------------------

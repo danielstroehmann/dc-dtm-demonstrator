@@ -29,7 +29,9 @@ def assert_one_request_per_element(run: dict) -> int:
             if call["method"] == "LOCAL":
                 assert requests_in(text) == 0, label
             elif dialect == "wget" and text.startswith(WGET_MULTIPART):
-                assert requests_in(text) == 0, label  # documented fallback: wget has no multipart
+                # documented fallback: wget has no multipart – the element is the curl request instead
+                assert text == f"{WGET_MULTIPART} – this step uses curl\n" + snippets.render(call["spec"], "curl"), label
+                assert requests_in(text) == 1, label
             else:
                 assert requests_in(text) == 1, label + "\n" + text
     return len(calls)

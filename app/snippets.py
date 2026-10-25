@@ -10,9 +10,24 @@ import shlex
 DIALECTS = {"curl": "curl", "wget": "wget", "powershell": "PowerShell 7"}
 # Only the variables the snippets define are tokens – other "{TEXT}" in DTM values stays as is.
 VARIABLES = ("DTM_HOST", "DTM_ACCOUNT_ID", "DIVISION_ID", "POLICY_ID", "JOB_ID", "CSR",
-             "AUTH_POLICY_ID", "PROFILE_ID", "PASSCODE", "FACTORY_CERT")
+             "AUTH_POLICY_ID", "PROFILE_ID", "PASSCODE", "FACTORY_CERT", "RUN_NAME", "ICA_ID", "RZONE_ID")
 TOKEN = re.compile(r"\{(" + "|".join(VARIABLES) + r")\}")
+# In local commands the shell variables are written out already – only bare {VAR} tokens are replaced.
+COMMAND_TOKEN = re.compile(r"(?<![$\w])\{(" + "|".join(VARIABLES) + r")\}")
 API_KEY_PLACEHOLDER = "<your API key>"
+WGET_NO_MULTIPART = "# wget cannot send multipart/form-data"
+
+
+def tokenize(value, run_name: str):
+    """The run's literal name (in bodies, common names, local commands) becomes {RUN_NAME}, so a
+    replay under another RUN_NAME creates its own objects instead of reusing the original names."""
+    if isinstance(value, str):
+        return value.replace(run_name, "{RUN_NAME}")
+    if isinstance(value, dict):
+        return {k: tokenize(v, run_name) for k, v in value.items()}
+    if isinstance(value, list):
+        return [tokenize(v, run_name) for v in value]
+    return value
 
 
 # Values come from DTM, so they are escaped for the target shell before the {VAR} tokens are
@@ -29,30 +44,114 @@ def _ps(text: str, herestring: bool = False) -> str:
     return TOKEN.sub(r"$($env:\1)", escaped)
 
 
-def preamble(variables: dict, dialect: str) -> str:
+def preamble(variables: dict, dialect: str, keep: bool = False) -> str:
+    """keep: for a later phase pasted on its own – what this shell already has (the key and passcode
+    the user filled in, the IDs and RUN_NAME a replayed setup captured) stays; the run's values are
+    only the fallback."""
     values = {"DTM_API_KEY": API_KEY_PLACEHOLDER}
     values |= {k: v for k, v in variables.items() if k != "DTM_API_KEY"}  # the key is never rendered
-    if dialect == "powershell":
-        lines = [f"$env:{k} = '{str(v).replace(chr(39), chr(39) * 2)}'" for k, v in values.items()]
+    # A fresh RUN_NAME per replay: DTM keeps the names of deleted policies reserved, and a lookup by
+    # name must find the replay's objects, not the run's.
+    use_case = str(values.pop("RUN_NAME", "")).rpartition("-")[2]
+    use_case = use_case if re.fullmatch(r"uc\d\d", use_case) else ""
+    ps = dialect == "powershell"
+    # macOS' interactive zsh treats pasted "# …" lines as commands unless comments are switched on.
+    lines = [] if ps else ['[ -n "${ZSH_VERSION:-}" ] && setopt interactivecomments']
+    for k, v in values.items():
+        value = "'" + str(v).replace("'", "''") + "'" if ps else shlex.quote(str(v))
+        line = f"$env:{k} = {value}" if ps else f"export {k}={value}"
+        if keep:
+            line = f"if (-not $env:{k}) {{ {line} }}" if ps else f'[ -n "${{{k}:-}}" ] || {line}'
+        lines.append(line)
+    if use_case:
+        line = (f'$env:RUN_NAME = "robot-r$(Get-Random -Maximum 1000000000)-{use_case}"' if ps
+                else f'export RUN_NAME="robot-r${{RANDOM}}${{RANDOM}}-{use_case}"')
+        if keep:
+            line = f"if (-not $env:RUN_NAME) {{ {line} }}" if ps else f'[ -n "${{RUN_NAME:-}}" ] || {line}'
+        lines.append(line)
+    if ps:
         lines.append('$headers = @{ "x-api-key" = $env:DTM_API_KEY }')
-    else:
-        lines = [f"export {k}={shlex.quote(str(v))}" for k, v in values.items()]
     return "\n".join(lines)
 
 
 def render(call: dict, dialect: str) -> str:
-    """call: {method, path, json?, form?, files?, output?, body_file?, command?}"""
+    """call: {method, path, json?, form?, files?, output?, body_file?, command?, capture?, until?}
+    capture: {var, jq, arg?, ps} – set a variable from the answer (bash: jq with $a = arg; PowerShell:
+             an expression on $r), so the next steps use what DTM just created.
+             missing: what to tell the user when the answer has no match (plain text).
+    until:   {status, stop?} – repeat the request until .status reaches it (polling)."""
     command = call.get("command")
     if command:  # local step, e.g. openssl – a string, or per shell {"bash": …, "powershell": …}
         if isinstance(command, dict):
-            return command["powershell" if dialect == "powershell" else "bash"]
-        return command
+            command = command["powershell" if dialect == "powershell" else "bash"]
+        return COMMAND_TOKEN.sub(r"${env:\1}" if dialect == "powershell" else r"${\1}", command)
+    if dialect == "wget" and (call.get("form") or call.get("files")):
+        return f"{WGET_NO_MULTIPART} – this step uses curl\n" + render(call, "curl")
+    request = _request(call, dialect)
+    if call.get("until"):
+        return _until(request, call["until"], dialect)
+    if call.get("capture"):
+        return _capture(request, call["capture"], dialect)
+    return request
+
+
+def _jq(capture: dict) -> str:
+    arg = f' --arg a "{_bash(capture["arg"])}"' if capture.get("arg") else ""
+    return f"jq -r{arg} '({capture['jq']}) // empty'"
+
+
+def _split(request: str) -> tuple[str, str]:
+    """Body heredoc / here-string first, then the command itself."""
+    for marker in ("\nEOF\n", '\n"@\n'):
+        if marker in request:
+            head, _, cmd = request.rpartition(marker)
+            return head + marker, cmd
+    return "", request
+
+
+def _capture(request: str, capture: dict, dialect: str) -> str:
+    """capture["retry"]: a lookup right after a create – asked again a few times, DTM lists lag behind."""
+    var, missing = capture["var"], capture.get("missing", "not found in the answer")
+    if not re.fullmatch(r"[\w\s.,–-]+", missing):  # it lands in a shell string unescaped
+        raise ValueError(f"capture hint must be plain text: {missing!r}")
+    head, cmd = _split(request)
+    if dialect == "powershell":
+        # The expression is ours (constant); only the {VAR} tokens become environment variables.
+        step = f"$r = {cmd}\n$env:{var} = {TOKEN.sub(r'$($env:\1)', capture['ps'])}"
+        if capture.get("retry"):
+            step = ("foreach ($i in 1..5) {\n  "
+                    + step.replace("\n", "\n  ") + f"\n  if ($env:{var}) {{ break }}\n  Start-Sleep 2\n}}")
+        return f'{head}{step}\nif (-not $env:{var}) {{ throw "{var} {missing}" }}'
+    step = f'export {var}="$({cmd} \\\n  | {_jq(capture)})"'
+    if capture.get("retry"):
+        step = ("for i in 1 2 3 4 5; do\n  "
+                + step.replace("\n", "\n  ") + f'\n  [ -n "${var}" ] && break; sleep 2\ndone')
+    return f'{head}{step}\n: "${{{var}:?{missing}}}"'
+
+
+def _until(request: str, until: dict, dialect: str) -> str:
+    target, stop = until["status"], until.get("stop", ["failed", "rejected"])
+    head, cmd = _split(request)
+    # Bounded like the run itself (10 minutes), and an unreadable answer ends the loop, too –
+    # an endless poll would keep loading DTM.
+    if dialect == "powershell":
+        states = ", ".join(f"'{s}'" for s in [target, *stop])
+        cmd = cmd.replace("\n", "\n  ")
+        return (f"{head}foreach ($i in 1..300) {{\n  try {{ $r = {cmd} }}\n"
+                '  catch { Write-Host "request failed: $($_.Exception.Message)"; break }\n'
+                f'  Write-Host "status: $($r.status)"\n  if ($r.status -in {states}) {{ break }}\n  Start-Sleep 2\n}}')
+    return (f'{head}for i in $(seq 1 300); do\n  STATUS="$({cmd} \\\n    | jq -r .status)"\n  echo "status: $STATUS"\n'
+            f'  case "$STATUS" in {target}) break ;; {"|".join(stop)}|""|null) echo "job ${{STATUS:-not readable}}" >&2; break ;; esac\n'
+            f"  sleep 2\ndone")
+
+
+def _request(call: dict, dialect: str) -> str:
     method, path = call["method"], call["path"]
-    url = f"https://{{DTM_HOST}}{path}?account_id={{DTM_ACCOUNT_ID}}"
+    url = f"https://{{DTM_HOST}}{path}?account_id={{DTM_ACCOUNT_ID}}" + (f"&{call['query']}" if call.get("query") else "")
     body = json.dumps(call["json"], indent=2) if call.get("json") is not None else None
     body_file = call.get("body_file", "body.json")
     if dialect == "curl":
-        parts = [f'curl -sS -X {method} "{_bash(url)}"', '-H "x-api-key: ${DTM_API_KEY}"']
+        parts = [f'curl -sS --fail-with-body -X {method} "{_bash(url)}"', '-H "x-api-key: ${DTM_API_KEY}"']
         prefix = ""
         if body is not None:
             prefix = f"cat > {body_file} <<EOF\n{_bash(body, heredoc=True)}\nEOF\n"
@@ -65,9 +164,6 @@ def render(call: dict, dialect: str) -> str:
             parts.append(f"-o {call['output']}")
         return prefix + " \\\n  ".join(parts)
     if dialect == "wget":
-        if call.get("form") or call.get("files"):
-            return ("# wget cannot send multipart/form-data – use the curl variant here\n"
-                    "# (curl ships with Ubuntu, macOS and Windows 10+).")
         parts = [f"wget --method={method}", '--header="x-api-key: ${DTM_API_KEY}"']
         prefix = ""
         if body is not None:
@@ -94,7 +190,9 @@ def render(call: dict, dialect: str) -> str:
 
 
 def script(variables: dict, calls: list[dict], dialect: str, phase: str | None = None) -> str:
-    blocks = [preamble(variables, dialect)]
+    # bash, not sh: the preamble draws RUN_NAME from $RANDOM
+    blocks = ([] if dialect == "powershell" or phase else ["#!/usr/bin/env bash"])
+    blocks.append(preamble(variables, dialect, keep=phase not in (None, "setup")))
     blocks += [f"# {c['purpose']}\n{render(c['spec'], dialect)}" for c in calls
                if c.get("spec") and phase in (None, c.get("phase", "recurring"))]
     return "\n\n".join(blocks) + "\n"
