@@ -25,13 +25,16 @@ from cryptography.hazmat.primitives import serialization
 from . import certs, dtm
 from .apicalls import ApiCalls
 from .dtm import DTMClient, DTMError
-from .evergreen import LIST, by_name, common_names, create_division, prefix, rates, use_shared_profile
+from .evergreen import LIST, by_name, common_names, create_division, prefix, rates, use_profile
 from .snippets import tokenize
 from .store import Store, now
 
 PROTOCOLS = {"est": "EST", "cmpv2": "CMPv2", "scep": "SCEP", "rest": "REST API"}
 AUTHS = {"passcode": "Passcode", "certificate": "Factory certificate"}
 ESTIMATE_DEVICES = 1000
+# UC-5 batch: every device costs a passcode, an enrollment and – in the rollback – a revoke plus a
+# passcode delete, all one after another; kept small for DTM's sake (CLAUDE.md "minimise load").
+MAX_PASSCODE_BATCH = 100
 REQUEST_TIMEOUT = 30.0
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # DTM IDs that end up in openssl argv / URLs
 
@@ -217,6 +220,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     result: dict = {"api_calls": api.calls, "api_variables": variables}
     store.update_run(run_id, status="running")
     base = prefix(run_id, p["use_case"])
+    field = p["use_case"] == "uc05"  # enrollment in the field with a one-time passcode
     station = None
     try:
         with tempfile.TemporaryDirectory(prefix="dtm-uc03-") as tmp:
@@ -232,8 +236,10 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             store.add_object(run_id, "auth_policy", auth_policy_id, f"{base}-auth")
             variables["AUTH_POLICY_ID"] = auth_policy_id
 
-            passcode = passcode_ref = factory = None
-            if auth == "passcode":
+            passcode = passcode_ref = factory = credentials = None
+            if field:
+                pass  # UC-5: the device passcodes follow once the policy exists – nothing is created for nothing
+            elif auth == "passcode":
                 passcode = secrets.token_hex(16)
                 log(f"Creating passcode {base}-passcode – what the factory receives from the CA operator")
                 created = await api.timed(
@@ -241,9 +247,8 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     client.create_passcode(f"{base}-passcode", auth_policy_id, passcode),
                     spec={"method": "POST", "path": PASSCODE_PATH, "body_file": "passcode.json",
                           "output": "passcode.json.out",
-                          "json": {"name": "{RUN_NAME}-passcode", "account_id": "{DTM_ACCOUNT_ID}",
-                                   "authentication_policy_id": "{AUTH_POLICY_ID}",
-                                   "enable_username_for_passcode": False, "passcode": "{PASSCODE}"}},
+                          "json": dtm.passcode_body("{RUN_NAME}-passcode", "{DTM_ACCOUNT_ID}", "{AUTH_POLICY_ID}",
+                                                    "{PASSCODE}")},
                     phase="setup")
                 store.add_object(run_id, "passcode", created["id"], f"{base}-passcode")
                 passcode_ref = created["alternate_id"]
@@ -251,11 +256,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                     if not SAFE_ID.fullmatch(passcode_ref or ""):
                         raise EnrollmentError("DTM returned no usable passcode reference")
                     variables["PASSCODE_REF"] = passcode_ref
-                    api.add("Read the passcode reference CMPv2 sends as sender ID (local)", "LOCAL", "jq", None,
-                            spec={"command": {
-                                "bash": "export PASSCODE_REF=\"$(jq -r .alternate_id passcode.json.out)\"",
-                                "powershell": "$env:PASSCODE_REF = (Get-Content passcode.json.out -Raw | ConvertFrom-Json).alternate_id"}},
-                            phase="setup")
+                    _record_passcode_ref(api, "setup")
             else:
                 log("The factory creates its own client certificate (self-signed) and registers it in DTM")
                 factory = certs.factory_certificate(f"{base}-factory")
@@ -275,7 +276,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             renewal = p["use_case"] == "uc04"
             spec = {(False, False): dtm.PROFILE_EVERGREEN, (False, True): dtm.PROFILE_EVERGREEN_CMP,
                     (True, False): dtm.PROFILE_RENEWAL, (True, True): dtm.PROFILE_RENEWAL_CMP}[(renewal, protocol == "cmpv2")]
-            profile_id = await use_shared_profile(client, api, spec, variables, log)
+            profile_id = await use_profile(client, api, store, run_id, p["use_case"], spec, variables, log)
 
             policy_name = f"{base}-policy"
             log(f"Creating certificate policy {policy_name} ({PROTOCOLS[protocol]}, {p['key_type']}, {p['ca_name']})")
@@ -314,9 +315,16 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             log("DTM is configured for this run", "success")
             result |= {"division": f"{base}-division", "policy": policy_name, "protocol": protocol, "auth": auth}
 
+            if field:  # UC-5 factory: one one-time passcode per device, bound to its common name
+                credentials, result["provisioning"] = await _provision(client, api, store, run_id, base, auth_policy_id,
+                                                                       p, log)
+                passcode, passcode_ref = next(iter(credentials.values()))
+                if protocol == "cmpv2":
+                    variables["PASSCODE_REF"] = passcode_ref
+                    _record_passcode_ref(api, "recurring")
             station = Station(p["dtm_host"], protocol, auth, policy_id, cmp_id, passcode, passcode_ref, factory,
                               Path(tmp), ca_chain_pem)
-            result |= await _enroll(station, api, store, run_id, p, log)
+            result |= await _enroll(station, api, store, run_id, p, log, credentials)
             if p["use_case"] == "uc04":  # the device in the field: its key and certificate
                 _save_device(run_dir, station.last_key, result["certificates"][-1]["pem"])
                 if protocol == "cmpv2":  # CMPv2 key update: same endpoint, answers signed by the issuing CA
@@ -327,6 +335,24 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                                       p["key_type"], None, None)
                 for key in ("estimate_min", "estimate_devices"):  # one device – nothing to extrapolate
                     result.pop(key, None)
+            if field:
+                wrong = [c["common_name"] for c in result["certificates"] if c["common_name"] not in credentials]
+                if wrong:
+                    raise EnrollmentError(f"certificates carry other names than their passcodes: {wrong[:3]}")
+                bound_cn = next(iter(credentials))
+                result["bound_cn"] = bound_cn
+                if p["count"] == 1:  # one device – nothing to extrapolate
+                    for key in ("estimate_min", "estimate_devices"):
+                        result.pop(key, None)
+                if p.get("checks"):  # optional – a failing check must not cost the enrolled devices
+                    station.passcode, station.passcode_ref = credentials[bound_cn]
+                    try:
+                        result["checks"] = await _passcode_checks(client, store, station, run_id, base, auth_policy_id,
+                                                                  p, bound_cn, log)
+                    except (DTMError, EnrollmentError) as exc:
+                        log(f"The checks could not run: {exc}", "error")
+                        result["checks"] = [{"check": "Checks", "expected": "run", "ok": False,
+                                             "outcome": f"could not run – {exc}"}]
         certs.save_certificates(run_dir, result.get("certificates") or [])
         store.update_run(run_id, status="completed", result=result, progress=None, finished_at=now())
         log("Run completed", "success")
@@ -508,17 +534,118 @@ def _record_renewal_steps(calls: list[dict], protocol: str, cn: str, run_name: s
                       "spec": {"command": step["command"]}, "phase": "renewal"})
 
 
+def _record_passcode_ref(api: ApiCalls, phase: str) -> None:
+    api.add("Read the passcode reference CMPv2 sends as sender ID (local)", "LOCAL", "jq", None, spec={"command": {
+        "bash": "export PASSCODE_REF=\"$(jq -r .alternate_id passcode.json.out)\"",
+        "powershell": "$env:PASSCODE_REF = (Get-Content passcode.json.out -Raw | ConvertFrom-Json).alternate_id"}},
+        phase=phase)
+
+
+async def _provision(client: DTMClient, api: ApiCalls, store: Store, run_id: str, base: str, auth_policy_id: str,
+                     p: dict, log) -> tuple[dict, dict]:
+    """UC-5 factory: one one-time passcode per device, bound to its common name, one request after
+    another – timed like the enrollment. Returns (common name → (passcode, reference), statistics)."""
+    names = common_names(run_id, p["protocol"], p["count"], p["use_case"])
+    log(f"The factory provisions {len(names)} one-time passcode(s), each bound to its device's common name")
+    credentials, seconds, started_wall, outcome, attempts = {}, [], time.time(), "error", 0
+    try:
+        for done, cn in enumerate(names, 1):
+            passcode, name = secrets.token_hex(16), f"{base}-passcode-{done:04d}"
+            start = time.monotonic()
+            attempts += 1
+            created = await client.create_passcode(name, auth_policy_id, passcode, cn)
+            seconds.append(time.monotonic() - start)
+            store.add_object(run_id, "passcode", created["id"], name)
+            if p["protocol"] == "cmpv2" and not SAFE_ID.fullmatch(created["alternate_id"] or ""):
+                raise EnrollmentError("DTM returned no usable passcode reference")
+            credentials[cn] = (passcode, created["alternate_id"])
+            store.update_run(run_id, progress={"label": f"Factory provisions {len(names)} one-time passcodes",
+                                               "started": started_wall, "total": len(names), "done": done})
+        outcome = "ok"
+    finally:
+        api.add("Create the device's one-time passcode, bound to its common name (factory, once per device)",
+                "POST", PASSCODE_PATH, sum(seconds) or None, outcome, count=attempts,
+                spec={"method": "POST", "path": PASSCODE_PATH, "body_file": "passcode.json",
+                      "output": "passcode.json.out",
+                      "json": dtm.passcode_body(f"{base}-passcode-0001", "{DTM_ACCOUNT_ID}", "{AUTH_POLICY_ID}",
+                                                "{PASSCODE}", names[0])},
+                phase="recurring")
+    total, median = sum(seconds), statistics.median(seconds)
+    log(f"{len(names)} passcode(s) created in {total:.2f}s – {median:.2f}s each (median)", "success")
+    stats = {"count": len(names), "duration_s": round(total, 2), **rates(total, len(names)),
+             "median_s": round(median, 3)}
+    if len(names) > 1:
+        stats |= {"estimate_devices": ESTIMATE_DEVICES, "estimate_min": round(ESTIMATE_DEVICES * median / 60, 1)}
+    return credentials, stats
+
+
+# DTM's answer, not a timeout, network error or missing tool: an EST 4xx or a CMPv2 rejection.
+REJECTED = re.compile(r"returned 4\d\d|PKIStatus: rejection")
+# The reason each check is about, as DTM words it (verified live 2026-10-25, EST and CMPv2).
+USAGE_LIMIT = re.compile(r"reached its usage limit|Protection is not valid")
+REGISTERED_VALUE = re.compile(r"Invalid registered value")
+
+
+async def _attempt(station: Station, cn: str, key_type: str, check: str, broken: str, reason: re.Pattern) -> dict:
+    """One enrollment that DTM is expected to reject for `reason` – a check row. Only that rejection
+    counts: another one (e.g. a wrong passcode) means the rule under test was never reached."""
+    key_pem, csr = await asyncio.to_thread(certs.device_request, cn, key_type)
+    try:
+        await station.enroll(cn, key_pem, csr)
+    except EnrollmentError as exc:
+        text = str(exc)
+        if not REJECTED.search(text):
+            return {"check": check, "expected": "rejected", "ok": False, "outcome": f"inconclusive – {text}"}
+        ok = bool(reason.search(text))
+        return {"check": check, "expected": "rejected", "ok": ok,
+                "outcome": text if ok else f"rejected for another reason – {text}"}
+    return {"check": check, "expected": "rejected", "ok": False, "outcome": f"issued – {broken} did not hold"}
+
+
+async def _passcode_checks(client: DTMClient, store: Store, station: Station, run_id: str, base: str,
+                           auth_policy_id: str, p: dict, bound_cn: str, log) -> list[dict]:
+    """UC-5: what the passcode enforces – shown, not assumed. A certificate a check gets anyway lands
+    under the run's policy and is revoked by the rollback."""
+    checks = []
+    log("Check 1: the device enrolls a second time with the same passcode")
+    checks.append(await _attempt(station, bound_cn, p["key_type"], "Second enrollment with the used passcode",
+                                 "the usage limit", USAGE_LIMIT))
+    log(checks[-1]["outcome"], "success" if checks[-1]["ok"] else "error")
+
+    # a device outside this run's batch: its own passcode, a CSR with another name
+    other_cn, wrong_cn = common_names(run_id, p["protocol"], p["count"] + 1, p["use_case"])[-1], f"{base}-wrong-name"
+    log(f"Check 2: a second device's passcode (bound to {other_cn}) with a CSR for {wrong_cn}")
+    passcode = secrets.token_hex(16)
+    created = await client.create_passcode(f"{base}-passcode-check", auth_policy_id, passcode, other_cn)
+    store.add_object(run_id, "passcode", created["id"], f"{base}-passcode-check")
+    if p["protocol"] == "cmpv2" and not SAFE_ID.fullmatch(created["alternate_id"] or ""):
+        raise EnrollmentError("DTM returned no usable passcode reference")
+    station.passcode, station.passcode_ref = passcode, created["alternate_id"]
+    checks.append(await _attempt(station, wrong_cn, p["key_type"], "CSR with another common name than the passcode's",
+                                 "the registered common name", REGISTERED_VALUE))
+    log(checks[-1]["outcome"], "success" if checks[-1]["ok"] else "error")
+    used = await client.passcode_usage(created["id"])
+    # Live (2026-10-25) DTM counts a rejected request as a use – shown as observed, not as wanted.
+    checks.append({"check": "Usage of that passcode afterwards", "expected": "used up (current DTM behaviour)",
+                   "ok": used >= 1, "outcome": f"usage {used} of 1" + (" – this device could not enroll any more" if used else "")})
+    log(checks[-1]["outcome"], "wait")
+    return checks
+
+
 async def _record(store: Store, run_id: str, kind: str, name: str, create) -> str:
     object_id = await create
     store.add_object(run_id, kind, object_id, name)
     return object_id
 
 
-async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p: dict, log) -> dict:
+async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p: dict, log,
+                  credentials: dict | None = None) -> dict:
     """The fake batch: one device after another, each with its own key pair. Only the protocol
-    round trip is measured; key generation is reported separately."""
+    round trip is measured; key generation is reported separately.
+    credentials (UC-5): common name → (passcode, reference) – every device has its own passcode."""
     names = common_names(run_id, p["protocol"], p["count"], p["use_case"])
-    log(f"Enrolling the device via {PROTOCOLS[p['protocol']]} ({AUTHS[p['auth']].lower()})")
+    log(f"Enrolling {'the device' if len(names) == 1 else f'{len(names)} devices one after another'} via "
+        f"{PROTOCOLS[p['protocol']]} ({AUTHS[p['auth']].lower()})")
     issued, seconds, keygen, per_device, keys = [], [], 0.0, [], 0
     started_wall = time.time()
     outcome = "error"
@@ -530,11 +657,14 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
             generated = time.monotonic()
             keygen += generated - start
             keys += 1
+            if credentials:
+                station.passcode, station.passcode_ref = credentials[cn]
             issued.append(await station.enroll(cn, key_pem, csr))
             seconds.append(time.monotonic() - generated)
             per_device.append(time.monotonic() - start)
             log(f"{cn} enrolled in {seconds[-1]:.2f}s", "success" if done == len(names) else "step")
-            store.update_run(run_id, progress={"label": "Enrolling the device",
+            store.update_run(run_id, progress={"label": "Enrolling the device" if len(names) == 1 else
+                                               f"Enrolling {len(names)} devices in the field",
                                                "started": started_wall, "total": len(names), "done": done})
         outcome = "ok"
     finally:
@@ -542,13 +672,15 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
                   "call": (sum(seconds) or None, outcome, len(issued) + (outcome != "ok"))}
         for step in enroll_steps(p["protocol"], p["auth"], names[0], p["key_type"]):
             seconds_, outcome_, count = timing.get(step["kind"], (None, "ok", 1))
+            phase = "field" if p["use_case"] == "uc05" and step["phase"] == "recurring" else step["phase"]
             api.add(step["purpose"], step["method"], step["path"], seconds_, outcome_, count=count,
-                    spec={"command": step["command"]}, phase=step["phase"])
+                    spec={"command": step["command"]}, phase=phase)
     total = sum(seconds)
     # A station also generates every key pair – the extrapolation uses the median per device of
     # key generation + round trip (robust against one slow request).
     median_device = statistics.median(per_device)
-    log(f"Device enrolled – {total / len(seconds):.2f}s for the request", "success")
+    log(f"{'Device' if len(seconds) == 1 else f'{len(seconds)} devices'} enrolled – {total / len(seconds):.2f}s "
+        "per request", "success")
     return {"duration_s": round(total, 2), **rates(total, len(issued)), "median_device_s": round(median_device, 3),
             "keygen_s": round(keygen, 2), "estimate_devices": ESTIMATE_DEVICES,
             "estimate_min": round(ESTIMATE_DEVICES * median_device / 60, 1),

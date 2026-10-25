@@ -6,7 +6,7 @@ import io
 import re
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import certs, dtm
@@ -48,6 +48,11 @@ USE_CASES = {
         "click – authenticated by the certificate it already holds. No device group, so the Essentials license "
         "is enough.",
         "client_side", ("EST · CMPv2", "Single device", "Renewal per click")),
+    "uc05": UseCase(
+        "Passcode-bound device certificates",
+        "The factory only writes a one-time passcode to the device, bound to its common name. In the field the "
+        "device enrolls via EST or CMPv2 – DTM checks the request against the passcode and accepts it once.",
+        "client_side", ("EST · CMPv2", "Single · Batch", "One-time passcode")),
 }
 # The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.
 GUIDE = UseCase(
@@ -55,7 +60,7 @@ GUIDE = UseCase(
     "Long-lived device certificates for the factory – answer a few questions and the run shows the matching "
     "flow end to end.",
     "client_side", ("Server-side or factory keys", "Batch · Single", "REST · EST · CMPv2 · SCEP"))
-CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"]}
+CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"], "uc05": USE_CASES["uc05"]}
 # What the UI calls a run's use case: the catalog entry it was started from (no internal UC numbers).
 DISPLAY_NAMES = {uc: (GUIDE if uc in ("uc01", "uc02", "uc03") else use_case).title for uc, use_case in USE_CASES.items()}
 
@@ -143,25 +148,29 @@ async def factory_csrs(names: list[str], key_type: str, log) -> tuple[dict[str, 
     return csrs, seconds
 
 
-def csv_batch_command(count: int) -> dict:
-    """The batch CSV as the run built it: one name per device, derived from RUN_NAME."""
-    return {"bash": ZIP_NOTE + '{ echo subject.common_name; for i in $(seq 1 %d); do printf "%%s-batch-%%04d\\n" '
-                                 '"$RUN_NAME" "$i"; done; } > batch.csv\nrm -f batch.zip && zip -q -j batch.zip batch.csv' % count,
+def csv_batch_command(count: int, mode: str = "batch") -> dict:
+    """The batch CSV as the run built it: one name per device, derived from RUN_NAME (see common_names)."""
+    if mode not in ("batch", "single"):
+        raise ValueError(f"unexpected mode {mode!r}")
+    return {"bash": ZIP_NOTE + '{ echo subject.common_name; for i in $(seq 1 %d); do printf "%%s-%s-%%04d\\n" '
+                                 '"$RUN_NAME" "$i"; done; } > batch.csv\nrm -f batch.zip && zip -q -j batch.zip batch.csv' % (count, mode),
             # LF line endings like the run's CSV (Set-Content would write CRLF on Windows)
-            "powershell": '$lines = @("subject.common_name") + (1..%d | ForEach-Object { "{0}-batch-{1:d4}" -f $env:RUN_NAME, $_ })\n'
+            "powershell": '$lines = @("subject.common_name") + (1..%d | ForEach-Object { "{0}-%s-{1:d4}" -f $env:RUN_NAME, $_ })\n'
                           '[IO.File]::WriteAllText("$PWD/batch.csv", ($lines -join "`n") + "`n")\n'
-                          "Compress-Archive -Force batch.csv batch.zip" % count}
+                          "Compress-Archive -Force batch.csv batch.zip" % (count, mode)}
 
 
-def csr_batch_command(count: int, key_type: str) -> dict:
+def csr_batch_command(count: int, key_type: str, mode: str = "batch") -> dict:
     """Key + CSR per device as the factory creates them; the keys stay in csrs/, only CSRs are packed."""
+    if mode not in ("batch", "single"):
+        raise ValueError(f"unexpected mode {mode!r}")
     new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
     req = f'openssl req -new -newkey {new_key} -nodes -keyout "csrs/$cn.key" -out "csrs/$cn.csr" -subj "/CN=$cn"'
     return {"bash": ZIP_NOTE + "rm -rf csrs csrs.zip && mkdir csrs\n"
-                    f'for i in $(seq 1 {count}); do cn="$(printf "%s-batch-%04d" "$RUN_NAME" "$i")"\n  {req}\ndone\n'
+                    f'for i in $(seq 1 {count}); do cn="$(printf "%s-{mode}-%04d" "$RUN_NAME" "$i")"\n  {req}\ndone\n'
                     "(cd csrs && zip -q ../csrs.zip *.csr)",
             "powershell": "Remove-Item -Recurse -Force csrs -ErrorAction Ignore\nNew-Item -ItemType Directory csrs | Out-Null\n"
-                          f'1..{count} | ForEach-Object {{ $cn = "{{0}}-batch-{{1:d4}}" -f $env:RUN_NAME, $_\n  {req} }}\n'
+                          f'1..{count} | ForEach-Object {{ $cn = "{{0}}-{mode}-{{1:d4}}" -f $env:RUN_NAME, $_\n  {req} }}\n'
                           "Compress-Archive -Force csrs/*.csr csrs.zip"}
 
 
@@ -234,6 +243,29 @@ async def create_division(client: DTMClient, api: ApiCalls, store: Store, run_id
     return division_id
 
 
+async def use_profile(client: DTMClient, api: ApiCalls, store: Store, run_id: str, use_case: str,
+                      spec: dtm.ProfileSpec, variables: dict, log) -> str:
+    """The run's certificate profile – per run on NL (the full rollback deletes it), shared on US (DTM
+    there refuses to delete a profile a deleted policy used). See dtm.PLATFORMS."""
+    if dtm.profile_mode(client.config.host) == "shared":
+        return await use_shared_profile(client, api, spec, variables, log)
+    name = f"{prefix(run_id, use_case)}-profile"
+    own = replace(spec, name=name)
+    validity = f"{spec.value} {spec.unit}"
+    log(f"Creating certificate profile {name} ({validity}) – the full rollback deletes it again")
+    body = await client.run_profile_body(own)
+    profile_id = await api.timed(
+        f"Create the certificate profile for this run ({validity}, copied from the account's client profile)",
+        "POST", dtm.PROFILES, client.create_run_profile(own, body),
+        spec={"method": "POST", "path": dtm.PROFILES, "body_file": "profile.json",
+              "json": body | {"account_id": "{DTM_ACCOUNT_ID}"},
+              "capture": {"var": "PROFILE_ID", "jq": ".id", "ps": "$r.id"}},
+        phase="setup")
+    store.add_object(run_id, "profile", profile_id, name)
+    variables["PROFILE_ID"] = profile_id
+    return profile_id
+
+
 async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.ProfileSpec, variables: dict, log) -> str:
     """The purpose's shared profile (validity etc.) – created by the first run, reused afterwards."""
     validity = f"{spec.value} {spec.unit}"
@@ -247,7 +279,7 @@ async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.Profile
             missing="not found or retired – run this use case once in the demonstrator, it creates or enables "
                     "the shared profile")},
         phase="setup")
-    log({"created": "Created", "enabled": "Enabled again"}.get(how, "Using")
+    log({"created": "Created", "enabled": "Enabled again", "restored": "Restored"}.get(how, "Using")
         + f" the shared certificate profile {spec.name} ({validity}) – DTM keeps it permanently")
     variables["PROFILE_ID"] = profile_id
     return profile_id
@@ -266,7 +298,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     try:
         division_id = await create_division(client, api, store, run_id, p["use_case"], variables, log)
 
-        profile_id = await use_shared_profile(client, api, dtm.PROFILE_EVERGREEN, variables, log)
+        profile_id = await use_profile(client, api, store, run_id, p["use_case"], dtm.PROFILE_EVERGREEN, variables, log)
         policy_name = f"{prefix(run_id, p['use_case'])}-policy"
         log(f"Creating certificate policy {policy_name} ({p['key_type']}, issuing CA {p['ca_name']})")
         policy_args = {"profile_id": profile_id, "ica_id": p["ca_id"], "key_type": p["key_type"],
@@ -288,7 +320,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
 
         result |= {"division": f"{prefix(run_id, p['use_case'])}-division", "policy": policy_name}
         if p["variant"] == "webui":
-            result |= await _prepare_portal(run_id, p, run_dir, log)
+            result |= await _prepare_portal(api, run_id, p, run_dir, log)
             store.update_run(run_id, status="waiting", result=result)
             log("Setup done – continue in the DTM portal", "success")
             return
@@ -483,19 +515,32 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
             "private_keys_returned": keys, "artifact": artifact}
 
 
-async def _prepare_portal(run_id: str, p: dict, run_dir: Path, log) -> dict:
+async def _prepare_portal(api: ApiCalls, run_id: str, p: dict, run_dir: Path, log) -> dict:
+    """The web UI variant: the factory's local steps run here; the order itself is placed in the DTM web
+    UI – the reproducible steps say so as a manual step."""
     names = common_names(run_id, p["mode"], p["count"], p["use_case"])
-    result = {}
+    result, artifact = {}, None
     if p["mode"] == "single":
         result["portal_values"] = ({"Common name": names[0]} if len(names) == 1
                                    else {"Common names": f"{names[0]} … {names[-1]}"})
     run_dir.mkdir(parents=True, exist_ok=True)
     if p["key_generation"] == "client_side":  # the portal needs the factory's CSRs
-        csrs, _ = await factory_csrs(names, p["key_type"], log)
+        csrs, keygen_s = await factory_csrs(names, p["key_type"], log)
         (run_dir / "csrs.zip").write_bytes(csr_zip(csrs))
-        return result | {"artifact": "csrs.zip"}
-    if p["mode"] == "batch":
+        artifact = "csrs.zip"
+        devices = f"each of the {len(names)} devices" if len(names) > 1 else "the device"
+        api.add(f"Generate key + CSR for {devices} and pack the CSRs (local)", "LOCAL",
+                "openssl", keygen_s, spec={"command": csr_batch_command(len(names), p["key_type"], p["mode"])})
+    elif p["mode"] == "batch":
         (run_dir / "batch.zip").write_bytes(batch_zip(names))
         log(f"Batch upload file with {p['count']} entries ready for download", "success")
-        return result | {"artifact": "batch.zip"}
-    return result
+        artifact = "batch.zip"
+        api.add(f"Write the CSV with the {len(names)} device names and pack it (local)", "LOCAL", "zip", None,
+                spec={"command": csv_batch_command(len(names))})
+    task = (f"upload {artifact} as a batch request" if p["mode"] == "batch"
+            else ("request the certificates one by one" if len(names) > 1 else "request the certificate")
+                 + (" with the CSRs from csrs.zip" if artifact else ""))
+    note = "# Certificate policy: {RUN_NAME}-policy – no API call, the portal places the order"
+    api.add(f"Order in the DTM web UI – {task}", "MANUAL", "DTM web UI", None,
+            spec={"command": note})
+    return result | ({"artifact": artifact} if artifact else {})

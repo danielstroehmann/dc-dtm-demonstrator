@@ -161,6 +161,7 @@ table.compact .c-key { width: 7rem; }
 .method.put { background: #6f42c1; }
 .method.delete { background: var(--bad); }
 .method.local { background: #6b6b6b; }
+.method.manual { background: var(--dc-orange); }
 .snippet { margin-top: var(--s3); }
 .snippet-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s3);
   margin-bottom: var(--s2); font-size: 0.8rem; color: var(--pico-muted-color); }
@@ -439,6 +440,9 @@ body.auth { display: block; }
   --pico-form-element-spacing-vertical: 0.45rem;
   --pico-form-element-spacing-horizontal: 0.75rem;
   --pico-line-height: 1.45;
+  /* one height for every single-line form control (Pico's formula) – rows of controls line up */
+  --control-inner: calc(1rem * var(--pico-line-height) + var(--pico-form-element-spacing-vertical) * 2);
+  --control-h: calc(var(--control-inner) + var(--pico-border-width) * 2);
 }
 h1 { font-size: 1.5rem; }
 .site-header { margin-bottom: var(--s5); }
@@ -467,14 +471,21 @@ article.card { padding: var(--s4) var(--s5); margin-bottom: var(--s4); }
 @media (min-width: 1024px) {
   .site-header > .container, main.container, footer.container { max-width: min(1320px, calc(100% - 3rem)); }
 }
-.segmented { flex-wrap: nowrap; }
+.segmented { flex-wrap: nowrap; box-sizing: border-box; height: var(--control-h); }
+.segmented label { display: flex; align-items: center; padding-block: 0; }
 /* Grid fields: label on top, control, optional help – all cells start on the same line */
 .q-grid .field, .q-grid .seg-group { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
 .q-grid .field > select, .q-grid .field > .readonly-value, .q-grid .field > input:not(.short) { align-self: stretch; }
 .field-label, .seg-label { font-weight: 400; color: var(--pico-color); margin: 0; }
 .q-grid .field select, .q-grid .field input { margin: 0; }
-.readonly-value { padding: var(--pico-form-element-spacing-vertical) var(--pico-form-element-spacing-horizontal);
-  border: 1px solid var(--dc-border); border-radius: var(--pico-border-radius); background: var(--idle-tint);
-  color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--pico-line-height); }
+.q-grid .field select, .q-grid .field input:not([type=radio]):not([type=checkbox]) { box-sizing: border-box; height: var(--control-h); }
+/* Same height as the inputs and selects next to it, even with the smaller monospace text */
+.readonly-value { box-sizing: border-box; height: var(--control-h); line-height: var(--control-inner);
+  padding: 0 var(--pico-form-element-spacing-horizontal);
+  border: var(--pico-border-width) solid var(--dc-border); border-radius: var(--pico-border-radius); background: var(--idle-tint);
+  color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .readonly-value.mono { font-size: 0.85rem; }
 .q-grid .switch-cell { align-self: end; padding-bottom: var(--s2); }
+/* UC-5: two groups of metrics in one card (factory provisioning, enrollment in the field) */
+.metrics-title { margin: 0 0 var(--s2); font-size: 0.85rem; font-weight: 500; color: var(--pico-muted-color); }
+.metrics + .metrics-title { margin-top: var(--s3); }

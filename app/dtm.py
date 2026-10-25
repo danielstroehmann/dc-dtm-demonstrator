@@ -68,6 +68,16 @@ def policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, ke
     }}
 
 
+def passcode_body(name: str, account_id: str, auth_policy_id: str, passcode: str,
+                  common_name: str | None = None) -> dict:
+    body = {"name": name, "account_id": account_id, "authentication_policy_id": auth_policy_id,
+            "enable_username_for_passcode": False, "passcode": passcode}
+    if common_name is not None:  # registered values are documented for auth certificates only – accepted live
+        body |= {"usage_limit": 1, "registered_values": [
+            {"certificate_field": "subject.common_name", "matcher": "equals", "value": common_name}]}
+    return body
+
+
 def enrollment_policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, key_type: str,
                            auth_policy_id: str, protocol: str) -> dict:
     """UC-3: one enrollment protocol, client-side keys, authenticated by an authentication policy
@@ -90,9 +100,9 @@ def enrollment_policy_body(*, name: str, division_id: str, profile_id: str, ica_
 
 @dataclass(frozen=True)
 class ProfileSpec:
-    """A shared, reused certificate profile per account and purpose. DTM refuses to delete a profile
-    that a (deleted) policy referenced, so per-run profiles would pile up – these are created once,
-    found by name later and never deleted (the only accepted residue)."""
+    """The settings of a certificate profile per purpose. On US (see PLATFORMS) it is shared per
+    account – DTM there refuses to delete a profile a (deleted) policy referenced, so it is created
+    once, found by name later and never deleted; on NL each run gets its own copy with these settings."""
     name: str
     unit: str  # validity.duration_unit, e.g. "years", "months"
     value: int
@@ -130,6 +140,18 @@ def shared_profile_body(base: dict, spec: ProfileSpec, account_id: str) -> dict:
                      "sources": ["user_supplied", "allow_bare_public_key"], "value": None})
     return {"name": spec.name, "account_id": account_id, "certificate_template_id": base["certificate_template"]["id"],
             "body": body, "divisions": [], "certificate_type": "end_entity", "ca_connector_type": "digicert_one"}
+
+
+# The supported DTM platforms and how certificate profiles are handled there (author, 2026-10-25):
+# NL deletes a profile once its policy is gone – one profile per run, removed by the full rollback;
+# US still refuses that (DTM bug) – shared profiles per account until it is fixed. Other hosts are refused.
+PLATFORMS = {"one.nl.digicert.com": "per_run", "one.digicert.com": "shared"}
+
+
+def profile_mode(host: str) -> str:
+    if host not in PLATFORMS:
+        raise DTMError(f"unsupported DTM platform {host} – only {' and '.join(PLATFORMS)}")
+    return PLATFORMS[host]
 
 
 LEGACY_PROFILES = ("robot-uc03-cmp-profile",)  # names of earlier releases – retired with the shared ones
@@ -322,12 +344,18 @@ class DTMClient:
                                          json={"name": name, "account_id": self.config.account_id}))
         return data["id"]
 
-    async def create_passcode(self, name: str, auth_policy_id: str, passcode: str) -> dict:
-        """Returns id and alternate_id – the reference CMPv2 sends as sender KID."""
-        data = _json(await self._request("POST", f"{AUTH}/passcode", expect=(200, 201), json={
-            "name": name, "account_id": self.config.account_id, "authentication_policy_id": auth_policy_id,
-            "enable_username_for_passcode": False, "passcode": passcode}))
+    async def create_passcode(self, name: str, auth_policy_id: str, passcode: str,
+                              common_name: str | None = None) -> dict:
+        """Returns id and alternate_id – the reference CMPv2 sends as sender KID.
+        common_name (UC-5): a one-time passcode bound to that CN – usage limit 1 and a registered value.
+        Verified live: DTM checks the CSR's CN against it (rejects, never overrides), and a rejected
+        request already uses up the passcode."""
+        body = passcode_body(name, self.config.account_id, auth_policy_id, passcode, common_name)
+        data = _json(await self._request("POST", f"{AUTH}/passcode", expect=(200, 201), json=body))
         return {"id": data["id"], "alternate_id": data.get("alternate_id")}
+
+    async def passcode_usage(self, passcode_id: str) -> int:
+        return int(_json(await self._request("GET", f"{AUTH}/passcode/{passcode_id}")).get("number_of_usage") or 0)
 
     async def create_auth_certificate(self, name: str, auth_policy_id: str, pem: str) -> str:
         data = _json(await self._request("POST", f"{AUTH}/authentication-certificate", expect=(200, 201), json={
@@ -337,8 +365,14 @@ class DTMClient:
 
     async def auth_object_ids(self, kind: str, name: str) -> list[str]:
         """Live objects only – soft-deleted ones keep their name (e.g. of an earlier run with this ID)."""
-        return [r["id"] for r in await self._list(f"{AUTH}/{AUTH_KINDS[kind]}")
-                if r.get("name") == name and r.get("status") != "DELETED"]
+        return [object_id for object_id, _name in await self.auth_objects_named(kind, name)]
+
+    async def auth_objects_named(self, kind: str, name: str, prefix: bool = False) -> list[tuple[str, str]]:
+        """(id, name) of the live objects with this name – or, with prefix, every name starting with it
+        (UC-5: one passcode per device)."""
+        return [(r["id"], r["name"]) for r in await self._list(f"{AUTH}/{AUTH_KINDS[kind]}")
+                if (str(r.get("name", "")).startswith(name) if prefix else r.get("name") == name)
+                and r.get("status") != "DELETED" and r.get("account_id") == self.config.account_id]
 
     async def delete_auth_object(self, kind: str, object_id: str) -> None:
         """Soft delete: the object stays with status DELETED (verified live)."""
@@ -383,11 +417,55 @@ class DTMClient:
                     record["status"] = "DISABLED"
             return {spec.name: "DISABLED" if self._ours(records, spec.name) else "missing" for spec in SHARED_PROFILES}
 
+    async def _base_profile(self, records: list[dict]) -> dict:
+        """The account's profile to copy (preferably the basic client profile), with template and body."""
+        bases = [r for r in records if r.get("status") == "ACTIVE" and r.get("id") and r.get("account_id")
+                 in (None, self.config.account_id) and not str(r.get("name", "")).startswith("robot-")]
+        if not bases:
+            raise DTMError("the account has no active certificate profile to copy")
+        base = next((r for r in bases if "client" in str(r.get("name", "")).lower()), bases[0])
+        detail = _json(await self._request("GET", f"{PROFILES}/{base['id']}"))
+        if not isinstance(detail.get("certificate_template"), dict) or not isinstance(detail.get("body"), list):
+            raise DTMError(f"profile {base.get('name')} cannot be copied (no template or body)")
+        return detail
+
+    async def run_profile_body(self, spec: ProfileSpec) -> dict:
+        """NL: the body of a profile for one run – a copy of the account's base profile."""
+        return shared_profile_body(await self._base_profile(await self._profiles()), spec, self.config.account_id)
+
+    async def create_run_profile(self, spec: ProfileSpec, body: dict) -> str:
+        """NL: creates the run's own profile; one DTM did not take the settings of is deleted again."""
+        data = _json(await self._request("POST", PROFILES, expect=(200, 201), json=body))
+        if not _profile_matches(data, spec):
+            message = (f"DTM did not accept the settings of {spec.name} ({spec.value} {spec.unit}) – the template "
+                       "of the account's base profile may limit them")
+            try:
+                await self.delete_profile(data["id"])
+            except DTMError as exc:  # the rollback finds it by name later – keep the useful message
+                raise DTMError(f"{message}; deleting the profile failed: {exc}") from exc
+            raise DTMError(f"{message}; the profile was deleted")
+        return data["id"]
+
+    async def delete_profile(self, profile_id: str) -> None:
+        """Soft delete (status DELETED, the name stays reserved) – NL only, US refuses used profiles.
+        Idempotent: an already deleted profile (retry after a partial cleanup, or deleted in the portal)
+        answers 400/404 but is gone from the list – only a profile still listed is an error."""
+        response = await self._request("PUT", f"{PROFILES}/{profile_id}/delete", json={}, expect=(200, 204, 400, 404))
+        if profile_id in [r.get("id") for r in await self._profiles()]:
+            reason = f": {_error_text(response)}" if response.status_code >= 400 else ""
+            raise DTMError(f"profile {profile_id} still exists after delete{reason}")
+
+    async def profile_ids(self, name: str) -> list[str]:
+        return [r["id"] for r in await self._profiles() if r.get("name") == name
+                and r.get("account_id") == self.config.account_id and r.get("status") != "DELETED"]
+
     async def shared_profile(self, spec: ProfileSpec) -> tuple[str, str]:
-        """The account's profile for this purpose: found by name (enabled again if it was retired),
-        else copied once from a base profile of the account (preferably the basic client profile).
-        Returns (id, "used" | "enabled" | "created")."""
+        """The account's profile for this purpose: found by name (restored if it was deleted, enabled again
+        if it was retired), else copied once from a base profile of the account (preferably the basic
+        client profile).
+        Returns (id, "used" | "enabled" | "restored" | "created")."""
         async with _profile_lock:  # two runs at once must not both create it – it can never be deleted
+            restored, clash = False, ""
             for attempt in (1, 2):
                 records = await self._profiles()
                 found = self._ours(records, spec.name)
@@ -397,18 +475,27 @@ class DTMClient:
                                        "DTM portal")
                     if found["status"] != "ACTIVE":
                         await self._request("PUT", f"{PROFILES}/{found['id']}/enable", json={}, expect=(200, 204))
-                        return found["id"], "enabled"
-                    return found["id"], "used"
+                        return found["id"], "restored" if restored else "enabled"
+                    return found["id"], "restored" if restored else "used"
                 if attempt == 2:
+                    if restored:  # the list may lag behind the undelete
+                        raise DTMError(f"profile {spec.name} was restored but is not listed yet – start the run again")
                     break
-                bases = [r for r in records if r.get("status") == "ACTIVE" and r.get("id") and r.get("account_id")
-                         in (None, self.config.account_id) and not str(r.get("name", "")).startswith("robot-")]
-                if not bases:
-                    raise DTMError("the account has no active certificate profile to copy")
-                base = next((r for r in bases if "client" in str(r.get("name", "")).lower()), bases[0])
-                detail = _json(await self._request("GET", f"{PROFILES}/{base['id']}"))
-                if not isinstance(detail.get("certificate_template"), dict) or not isinstance(detail.get("body"), list):
-                    raise DTMError(f"profile {base.get('name')} cannot be copied (no template or body)")
+                # Deleted in the portal: DTM keeps the name reserved (verified live), so a new profile of
+                # that name is refused – restore it instead and look again.
+                deleted = [r for r in await self._list(PROFILES, params={"status": "DELETED"})
+                           if r.get("name") == spec.name and r.get("account_id") == self.config.account_id
+                           and r.get("status") == "DELETED"]
+                if deleted:
+                    if not _profile_matches(deleted[0], spec):  # never bring back a profile we would not use
+                        raise DTMError(f"profile {spec.name} was deleted with other settings – restore it in the DTM "
+                                       "portal, then fix or rename it")
+                    # 400/409: another installation restored it meanwhile – the next look finds it
+                    await self._request("PUT", f"{PROFILES}/{deleted[0]['id']}/undelete", json={},
+                                        expect=(200, 204, 400, 409))
+                    restored = True
+                    continue
+                detail = await self._base_profile(records)
                 response = await self._request("POST", PROFILES, expect=(200, 201, 400, 409),
                                                json=shared_profile_body(detail, spec, self.config.account_id))
                 if response.status_code in (400, 409):
@@ -419,7 +506,7 @@ class DTMClient:
                     # e.g. the base profile's template caps the validity – never leave a wrong profile active
                     await self._request("PUT", f"{PROFILES}/{data['id']}/disable", json={}, expect=(200, 204))
                     raise DTMError(f"DTM did not accept the settings of {spec.name} ({spec.value} {spec.unit}) – the "
-                                   f"template of {base.get('name')} may limit them; the profile was disabled")
+                                   f"template of {detail.get('name')} may limit them; the profile was disabled")
                 return data["id"], "created"
         raise DTMError(f"could not create profile {spec.name}: {clash}")
 
@@ -447,6 +534,13 @@ class DTMClient:
         return _json(await self._request("GET", f"/devicetrustmanager/certificate-batch-service/api/v1/jobs/{job_id}",
                                          quiet=quiet))
 
+    async def batch_jobs_of(self, policy_ids: set[str]) -> list[dict]:
+        """Batch jobs of this account under these policies – also those started in the DTM portal.
+        The list ignores a policy filter (verified live), so it is filtered here."""
+        records = await self._list("/devicetrustmanager/certificate-batch-service/api/v1/jobs")
+        return [r for r in records if r.get("certificate_policy_id") in policy_ids
+                and r.get("account_id") == self.config.account_id]
+
     async def approve_batch(self, job_id: str) -> None:
         await self._request("PUT", f"/devicetrustmanager/certificate-batch-service/api/v1/jobs/{job_id}/approve",
                             json={}, expect=(200, 204))
@@ -464,6 +558,13 @@ class DTMClient:
     async def issued_certificates(self, policy_id: str) -> list[dict]:
         return await self._list("/devicetrustmanager/certificate-issuance-service/api/v2/certificate",
                                 params={"certificate_policy_id": policy_id, "status": "issued"})
+
+    async def certificates_named(self, common_name: str) -> list[dict]:
+        """This account's certificates with exactly this common name, under any policy (DTM filters exactly)."""
+        records = await self._list("/devicetrustmanager/certificate-issuance-service/api/v2/certificate",
+                                   params={"common_name": common_name})
+        return [r for r in records if r.get("common_name") == common_name
+                and r.get("account_id") == self.config.account_id]
 
     async def count_certificates(self, policy_id: str, status: str) -> int:
         data = _json(await self._request(

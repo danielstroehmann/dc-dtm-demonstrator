@@ -84,8 +84,12 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
   login, cleanup). Further use cases stay in design until the author starts them.
 - UC-1 and UC-2 share `app/evergreen.py`; `uc01`/`uc02` stay the IDs in run data and object names.
 - UC-3 (`uc03`, enrollment protocols EST/CMPv2/REST) lives in `app/enrollment.py`; CMPv2 uses `openssl cmp`.
-- UC-1..UC-3 are offered as one guided entry (`evergreen.resolve_guide`). Certificate profiles are shared per
-  account and never deleted (DTM refuses it) – see `docs/design/05-guide-and-shared-profiles.md`.
+- UC-1..UC-3 are offered as one guided entry (`evergreen.resolve_guide`).
+- Only two DTM platforms: `one.nl.digicert.com` (a certificate profile per run, deleted by the full rollback)
+  and `one.digicert.com` (shared profiles per account – DTM there refuses deleting used profiles, until the
+  bug is fixed); other hosts are refused. See `docs/design/05-guide-and-shared-profiles.md`.
+- UC-5 (`uc05`, one-time passcode bound to the device's CN, enrollment in the field via EST/CMPv2; DTM
+  checks the CN, it never overrides it) – see `docs/design/uc-05-passcode-bound-enrollment.md`.
 - UC-4 (`uc04`, one device: EST enrollment + renewal in the field per click) also runs on
   `app/enrollment.py` (`renew`); the simulated device's key lives in the run dir until the rollback.
 

@@ -24,13 +24,15 @@ def dtm_writes(fake) -> list[str]:
 
 # --- tiles and redirects -----------------------------------------------------------------------
 
-def test_two_tiles_without_uc_ids(configured_user, fake):
+def test_three_tiles_without_uc_ids(configured_user, fake):
     html = configured_user.get("/").text
-    assert html.count('<article class="tile">') == 2 == len(evergreen.CATALOG)
-    assert html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
+    assert html.count('<article class="tile">') == 3 == len(evergreen.CATALOG)
+    assert (html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
+            < html.index('formaction="/runs/new/uc05"'))
     for key in ("uc01", "uc02", "uc03"):
         assert f'formaction="/runs/new/{key}"' not in html
-    assert 'class="uc-id"' not in html and "UC-1" not in html and "UC-4" not in html
+    assert 'class="uc-id"' not in html and not re.search(r"UC-?\d", html)
+    assert f"<h3>{evergreen.USE_CASES['uc05'].title}</h3>" in html and "<li>One-time passcode</li>" in html
     assert f"<h3>{evergreen.GUIDE.title}</h3>" in html and f"<h3>{evergreen.USE_CASES['uc04'].title}</h3>" in html
     for tag in evergreen.GUIDE.tags:
         assert f"<li>{tag}</li>" in html
@@ -55,7 +57,7 @@ def test_redirect_query_is_urlencoded(configured_user):
     assert location.startswith("/runs/new/evergreen?connection=") and '"' not in location and "&x=" not in location
 
 
-@pytest.mark.parametrize("path", ["/runs/new/uc05", "/runs/new/UC01", "/runs/new/Evergreen", "/runs/new/evergreen."])
+@pytest.mark.parametrize("path", ["/runs/new/uc06", "/runs/new/UC05", "/runs/new/UC01", "/runs/new/Evergreen", "/runs/new/evergreen."])
 def test_unknown_entries_are_404(configured_user, fake, path):
     assert configured_user.get(path).status_code == 404 and fake.requests == []
 
@@ -317,7 +319,7 @@ def test_profile_hints(configured_user, fake):
     assert hint(html, EVERGREEN) == "5 years"
     assert hint(html, CMP) == "5 years · bare key – retired, this run enables it again"
     uc04 = configured_user.get("/runs/new/uc04").text
-    assert hint(uc04, RENEWAL) == "6 months · renew any time – created once by this run, DTM keeps it"
+    assert hint(uc04, RENEWAL) == "6 months · renew any time – created or restored by this run, DTM keeps it"
     assert EVERGREEN not in uc04
     assert dtm_writes(fake) == []  # the form only reads the status
 
@@ -326,7 +328,7 @@ def test_hints_ignore_a_foreign_account(configured_user, fake):
     from tests.fakedtm import OTHER_ACCOUNT_ID
     from tests.integration.test_shared_profiles import shared
     shared(fake, dtm.PROFILE_EVERGREEN, account_id=OTHER_ACCOUNT_ID)
-    assert hint(configured_user.get("/runs/new/evergreen").text, EVERGREEN).endswith("created once by this run, DTM keeps it")
+    assert hint(configured_user.get("/runs/new/evergreen").text, EVERGREEN).endswith("created or restored by this run, DTM keeps it")
 
 
 def test_form_with_dtm_error_is_502(configured_user, fake):

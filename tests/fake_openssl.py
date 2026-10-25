@@ -78,6 +78,7 @@ def main() -> None:
     if "-newkey" not in files or not str(options.get("-subject", "")).startswith("/CN="):
         fail("missing -newkey or -subject")
 
+    passcode_rules(config, options)
     device_key = serialization.load_pem_private_key(files["-newkey"].encode(), None)
     ca_cert = x509.load_pem_x509_certificate(config["ca_cert"].encode())
     ca_key = serialization.load_pem_private_key(config["ca_key"].encode(), None)
@@ -97,6 +98,33 @@ def main() -> None:
         alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1]
         state.setdefault(alternative_id, []).append(format(cert.serial_number, "x"))
         state_file.write_text(json.dumps(state))
+
+
+def passcode_rules(config: dict, options: dict) -> None:
+    """UC-5 one-time passcodes, like DTM (verified live): the usage limit is checked first, every
+    request counts as a use (also a rejected one), then the registered common name. The fake DTM
+    publishes its passcodes into config.json and reads the uses back from the usage file."""
+    rule = (config.get("passcodes") or {}).get(options.get("-ref"))
+    if not rule:
+        return
+    import hashlib
+    secret = os.environ.get(str(options.get("-secret", ""))[4:], "")
+    if hashlib.sha256(secret.encode()).hexdigest() != rule["secret_sha256"]:  # MAC with another passcode
+        fail('request rejected by server:PKIStatus: rejection; StatusString: "MAC verification failed"; '
+             "PKIFailureInfo: badMessageCheck")
+    if not (rule.get("limit") or rule.get("cn")):
+        return
+    usage_file = Path(config["usage_file"])
+    usage = json.loads(usage_file.read_text()) if usage_file.exists() else {}
+    ref = options["-ref"]
+    if rule["enforce"] and rule.get("limit") and usage.get(ref, 0) + rule.get("used", 0) >= rule["limit"]:
+        fail('request rejected by server:PKIStatus: rejection; StatusString: "Passcode has reached its usage limit"; '
+             "PKIFailureInfo: badRequest")
+    usage[ref] = usage.get(ref, 0) + 1
+    usage_file.write_text(json.dumps(usage))
+    if rule["enforce"] and rule.get("cn") and options["-subject"][4:] != rule["cn"]:
+        fail('request rejected by server:PKIStatus: rejection; StatusString: "Invalid registered value provided in '
+             'attribute: subject.common_name"; PKIFailureInfo: badRequest')
 
 
 REJECTION = ('request rejected by server:PKIStatus: rejection; StatusString: "certificate not yet valid for '

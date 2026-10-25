@@ -28,6 +28,8 @@ def assert_one_request_per_element(run: dict) -> int:
             label = f"{call['purpose']!r} ({dialect})"
             if call["method"] == "LOCAL":
                 assert requests_in(text) == 0, label
+            elif call["method"] == "MANUAL":  # the order happens in the DTM web UI: a comment, no request
+                assert requests_in(text) == 0 and all(line.startswith("# ") for line in text.splitlines()), label
             elif dialect == "wget" and text.startswith(WGET_MULTIPART):
                 # documented fallback: wget has no multipart – the element is the curl request instead
                 assert text == f"{WGET_MULTIPART} – this step uses curl\n" + snippets.render(call["spec"], "curl"), label
@@ -88,3 +90,33 @@ async def test_uc04_elements_including_the_renewal_block(store, enroll_net, cmp_
     renewal = [c for c in run["result"]["api_calls"] if c["phase"] == "renewal"]
     assert len(renewal) == 3 and sum(c["method"] != "LOCAL" for c in renewal) == 1
     assert assert_one_request_per_element(run) == len(run["result"]["api_calls"])
+
+
+@pytest.mark.parametrize("use_case", ["uc01", "uc02"])
+@pytest.mark.parametrize("mode,count", [("single", 1), ("single", 2), ("batch", 2)])
+async def test_webui_elements_end_with_the_manual_order(store, fake, tmp_path, monkeypatch, use_case, mode, count):
+    monkeypatch.setattr(evergreen, "STORY_INTERVAL", 0.0)
+    flow = test_uc01_flow if use_case == "uc01" else test_uc02_flow
+    run = await flow.start(store, fake, "e5", tmp_path, variant="webui", mode=mode, count=count)
+    assert run["status"] == "waiting", run["error"]
+    assert assert_one_request_per_element(run) == len(run["result"]["api_calls"])
+    recurring = [c for c in run["result"]["api_calls"] if c["phase"] == "recurring"]
+    assert recurring[-1]["method"] == "MANUAL" and recurring[-1]["path"] == "DTM web UI"
+    assert all(c["method"] in ("LOCAL", "MANUAL") for c in recurring)  # no API call places the order
+
+
+@pytest.mark.parametrize("protocol", ["est", "cmpv2"])
+@pytest.mark.parametrize("count,checks", [(1, True), (3, False)])
+async def test_uc05_elements(store, enroll_net, cmp_openssl, tmp_path, protocol, count, checks):
+    from tests.integration import test_uc05_flow
+    run = await test_uc05_flow.start(store, enroll_net, "e5", tmp_path, protocol=protocol, checks=checks,
+                                     **test_uc05_flow.batch(count))
+    assert run["status"] == "completed", run["error"]
+    assert assert_one_request_per_element(run) == len(run["result"]["api_calls"])
+    by_phase = {}
+    for c in run["result"]["api_calls"]:
+        by_phase.setdefault(c["phase"], []).append(c)
+    assert set(by_phase) == {"setup", "recurring", "field"}
+    # the factory creates the passcodes (one element for all), the device makes exactly one request
+    assert [c["method"] for c in by_phase["recurring"] if c["method"] != "LOCAL"] == ["POST"]
+    assert sum(c["method"] != "LOCAL" for c in by_phase["field"]) == 1

@@ -23,7 +23,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import cleanup, enrollment, evergreen, snippets
+from . import cleanup, dtm, enrollment, evergreen, snippets
 from .auth import COOKIE, Auth
 from .config import APP_VERSION, DATA_DIR
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -62,6 +62,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["asset_v"] = _asset_hash(HERE / "static")
     templates.env.globals["use_cases"] = USE_CASES
     templates.env.globals["use_case_names"] = evergreen.DISPLAY_NAMES
+    templates.env.globals["platforms"] = dtm.PLATFORMS
     templates.env.globals["catalog"] = evergreen.CATALOG
     templates.env.globals["snippets"] = snippets
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
@@ -250,6 +251,9 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             error = f"A connection named {name!r} already exists."
         elif not HOST.fullmatch(host):
             error = "Invalid host name."
+        elif host not in dtm.PLATFORMS and not (existing and host == existing["host"]):
+            # An older connection on another host stays editable (e.g. a new key) – its runs must roll back.
+            error = "Only one.digicert.com (US) and one.nl.digicert.com (NL) are supported."
         elif not _is_uuid(account_id):
             error = "The account ID must be a UUID."
         elif existing and (host, account_id) != (existing["host"], existing["account_id"]) and in_use(existing["id"]):
@@ -300,6 +304,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     async def shared_profiles(request: Request, connection_id: int):
         """Loaded lazily per connection: which shared profiles exist in that account (read only)."""
         conn = connection_or_404(connection_id)
+        mode = dtm.PLATFORMS.get(conn["host"])
+        if mode != "shared":  # NL: one profile per run; other hosts: no new runs – nothing shared to show
+            return render(request, "_shared_profiles.html", connection=_public(conn), status={}, error=None,
+                          busy=False, per_run=mode == "per_run", unsupported=mode is None)
         client = client_for(connection_id=conn["id"])
         try:
             status, error = await client.shared_profile_status(), None
@@ -353,17 +361,23 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if use_case not in evergreen.CATALOG:
             raise HTTPException(404, "Unknown use case")
         conn = selected_connection(connection)
+        profile_mode = dtm.PLATFORMS.get(conn["host"])
+        if not profile_mode:
+            return render(request, "error.html", 400,
+                          message="Only one.digicert.com (US) and one.nl.digicert.com (NL) are supported – "
+                                  "change the connection in Settings.")
         client = client_for(connection_id=conn["id"])
         try:
-            cas, profile_status = await client.issuing_cas(), await client.shared_profile_status()
+            cas = await client.issuing_cas()
+            profile_status = await client.shared_profile_status() if profile_mode == "shared" else {}
         except DTMError as exc:
             return render(request, "error.html", 502, message=f"Could not load data from DTM: {exc}")
         finally:
             await client.aclose()
         return render(request, "run_new.html", use_case=evergreen.CATALOG[use_case], use_case_id=use_case, cas=cas,
-                      profile_status=profile_status, connection=_public(conn),
+                      profile_status=profile_status, profile_mode=profile_mode, connection=_public(conn),
                       default_connection=_public(conn), several=len(store.connections()) > 1,
-                      max_batch=evergreen.MAX_BATCH,
+                      max_batch=evergreen.MAX_BATCH, max_passcode_batch=enrollment.MAX_PASSCODE_BATCH,
                       default_run_id=new_run_id())
 
     @app.post("/runs")
@@ -371,7 +385,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                          mode: str = Form(...), count: int = Form(10), ca_id: str = Form(...),
                          approval: bool = Form(False),
                          use_case: str = Form("uc01"), connection_id: str = Form(""),
-                         protocol: str = Form(""), auth_method: str = Form(""), key_location: str = Form("")):
+                         protocol: str = Form(""), auth_method: str = Form(""), key_location: str = Form(""),
+                         checks: bool = Form(False)):
         run_id = run_id.strip().lower() or new_run_id()
         if use_case == "evergreen":
             if key_location not in ("server", "factory") or mode not in ("single", "batch"):
@@ -381,21 +396,28 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(400, "Unknown use case")
         if mode == "single":  # a single device is exactly one certificate
             count = 1
-        enrolled = use_case in ("uc03", "uc04")  # both run on the enrollment engine
-        if use_case == "uc04":  # one device; renewal later per click (EST simplereenroll or CMPv2 kur)
-            protocol, count = protocol or "est", 1
+        enrolled = use_case in ("uc03", "uc04", "uc05")  # all run on the enrollment engine
+        if use_case in ("uc04", "uc05"):  # renewal per click (uc04) / one-time passcodes in the field (uc05)
+            protocol = protocol or "est"
             if protocol not in ("est", "cmpv2"):
-                raise HTTPException(400, "Renewal in the field: EST or CMPv2.")
+                raise HTTPException(400, "Enrollment in the field: EST or CMPv2.")
+        if use_case == "uc05":
+            auth_method = "passcode"
         if enrolled:  # enrollment protocols: API only, sequential single requests, no approval
-            variant, mode, approval = "api", "single", False
+            variant, approval = "api", False
+            if use_case != "uc05":  # UC-5 batch: one passcode per device, enrolled one after another
+                mode = "single"
             # Checked before DTM is asked for anything.
             if protocol not in enrollment.PROTOCOLS or auth_method not in enrollment.AUTHS:
                 raise HTTPException(400, "An API key works only with the REST API." if auth_method == "apikey"
                                     else "Select an enrollment protocol and an authentication method.")
             if protocol == "scep" and auth_method != "passcode":
                 raise HTTPException(400, "SCEP authenticates with a passcode (challenge password).")
-            count = 1
+            if mode == "single":
+                count = 1
         conn = selected_connection(connection_id)
+        if conn["host"] not in dtm.PLATFORMS:  # a connection saved before the platforms were limited
+            raise HTTPException(400, "Only one.digicert.com (US) and one.nl.digicert.com (NL) are supported.")
         client = client_for(connection_id=conn["id"])
         try:
             cas = {c["id"]: c for c in await client.issuing_cas()}
@@ -412,6 +434,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             error = "Invalid variant or mode."
         elif not 1 <= count <= evergreen.MAX_BATCH:
             error = f"Number of certificates: 1–{evergreen.MAX_BATCH}."
+        elif use_case == "uc05" and count > enrollment.MAX_PASSCODE_BATCH:
+            error = f"Number of devices: 1–{enrollment.MAX_PASSCODE_BATCH} (one passcode each)."
         elif ca_id not in cas or cas[ca_id]["key_type"] not in evergreen.KEY_TYPES:
             error = "Select an issuing CA of this account."
         elif protocol == "scep" and cas[ca_id]["key_type"] != "rsa":
@@ -429,6 +453,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                   "approval": approval and mode == "batch" and variant == "api"}
         if enrolled:
             params |= {"protocol": protocol, "auth": auth_method}
+        if use_case == "uc05":
+            params["checks"] = checks
         # A reused run ID must not inherit files of a deleted run (e.g. an old batch.zip).
         shutil.rmtree(data_dir / "runs" / run_id, ignore_errors=True)
         store.create_run(run_id, use_case, params)

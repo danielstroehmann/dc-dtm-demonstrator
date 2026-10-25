@@ -32,7 +32,7 @@ from app.dtm import DTMClient, DTMConfig
 
 _real_sleep = asyncio.sleep  # captured before tests patch asyncio.sleep
 
-HOST = "dtm.test"
+HOST = "one.digicert.com"  # a supported platform (dtm.PLATFORMS) – shared profiles; never contacted
 BASE = f"https://{HOST}"
 ACCOUNT_ID = "0a1b2c3d-0000-4000-8000-00000000a001"
 OTHER_ACCOUNT_ID = "0a1b2c3d-0000-4000-8000-00000000b002"
@@ -48,6 +48,7 @@ AUTH_PATH = f"{DTM}/authentication-service/api/v1"
 AUTH_COLLECTIONS = {"auth_policy": "authentication-policy", "passcode": "passcode",
                     "auth_certificate": "authentication-certificate"}
 CLIENTAUTH_HOST = f"clientauth.{HOST}"
+NL_HOST = "one.nl.digicert.com"  # the other supported platform – one profile per run (dtm.PLATFORMS)
 EST_PATH_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/simpleenroll"
 REENROLL_PATH_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/simplereenroll"
 CMP_PATH_PREFIX = f"{DTM}/certificate-issuance-service/api/v1/cmp/DIOT_"
@@ -159,10 +160,19 @@ def renews_anytime(profile: dict) -> bool:
 class FakeDTM:
     def __init__(self, *, account_id: str = ACCOUNT_ID, api_key: str = API_KEY,
                  ica_cn: str = "Fake ECDSA Issuing CA", ca_name: str = "Fake ECDSA ICA",
-                 profile_name: str = "Basic client certificate profile"):
+                 profile_name: str = "Basic client certificate profile", host: str = HOST):
         self.account_id = account_id
         self.api_key = api_key
-        self.router = respx.Router(base_url=BASE, assert_all_called=False, assert_all_mocked=True)
+        # host: US (shared profiles) or NL (per-run profiles) – they differ in deleting profiles
+        self.host, self.clientauth_host = host, f"clientauth.{host}"
+        self.router = respx.Router(base_url=f"https://{host}", assert_all_called=False, assert_all_mocked=True)
+        # Profiles a policy ever referenced: US refuses to delete them even after the policy is gone.
+        self.profiles_referenced: set[str] = set()
+        # UC-5 one-time passcodes (verified live): usage limit and registered common name are enforced
+        # on enrollment; a rejected request counts as a use. False = a DTM that wrongly accepts.
+        self.passcode_rules = True
+        self.passcode_listeners: list = []  # called on every passcode create (the fake openssl cmp)
+        self.external_passcode_usage = None  # Path: uses counted by the fake openssl cmp, per alternate_id
         self.requests: list[httpx.Request] = []
         self.calls: list[tuple[str, str]] = []  # (route name, object id or "")
         self.violations: list[str] = []
@@ -250,7 +260,7 @@ class FakeDTM:
         return httpx.MockTransport(self.router.async_handler)
 
     def config(self) -> DTMConfig:
-        return DTMConfig(HOST, self.api_key, self.account_id)
+        return DTMConfig(self.host, self.api_key, self.account_id)
 
     def client(self, on_call=None) -> DTMClient:
         return DTMClient(self.config(), on_call, transport=self.transport())
@@ -283,6 +293,8 @@ class FakeDTM:
             ("profile_enable", "PUT", rf"{PROFILE_PATH}/(?P<oid>[^/]+)/enable", self._set_profile_status("ACTIVE")),
             ("profile_disable", "PUT", rf"{PROFILE_PATH}/(?P<oid>[^/]+)/disable",
              self._set_profile_status("DISABLED")),
+            ("profile_undelete", "PUT", rf"{PROFILE_PATH}/(?P<oid>[^/]+)/undelete", self._undelete_profile),
+            ("profile_delete", "PUT", rf"{PROFILE_PATH}/(?P<oid>[^/]+)/delete", self._delete_profile),
             ("policy_list", "GET", rf"{POLICY_PATH}", self._list_policies),
             ("policy_delete", "DELETE", rf"{POLICY_DELETE_PATH}/(?P<oid>[^/]+)", self._delete_policy),
             ("issue", "POST", rf"{CERT_PATH}", self._issue),
@@ -293,6 +305,7 @@ class FakeDTM:
             ("reject", "PUT", rf"{JOBS_PATH}/(?P<oid>[^/]+)/reject", self._reject),
             ("result", "GET", rf"{JOBS_PATH}/(?P<oid>[^/]+)/download/result", self._result),
             ("job", "GET", rf"{JOBS_PATH}/(?P<oid>[^/]+)", self._job),
+            ("jobs_list", "GET", rf"{JOBS_PATH}", self._list_jobs),
         ]
         for kind, collection in AUTH_COLLECTIONS.items():
             routes += [
@@ -351,7 +364,11 @@ class FakeDTM:
         return self._page(request, self.cas, "items")
 
     def _list_profiles(self, request):
-        return self._page(request, self.profiles)
+        # Verified live: deleted profiles are hidden from the list and come back only with status=DELETED.
+        status = (request.url.params.get("status") or "").upper()
+        if status:
+            return self._page(request, [p for p in self.profiles if str(p.get("status")).upper() == status])
+        return self._page(request, [p for p in self.profiles if p.get("status") != "DELETED"])
 
     def _list_zones(self, request):
         return self._page(request, self.zones)
@@ -410,6 +427,7 @@ class FakeDTM:
             return _error(400, "certificate profile not found")
         policy_id = f"IOT_{uuid.uuid4()}"
         self.policies[policy_id] = {"id": policy_id, **policy, "alternative_id": uuid.uuid4().hex[:12]}
+        self.profiles_referenced.add(policy["certificate_profile_id"])
         return _json_response(201, {})
 
     def _get_policy(self, request, oid):
@@ -434,9 +452,12 @@ class FakeDTM:
             return _error(400, "account_id in body does not match")
         if not body.get("certificate_template_id") or not isinstance(body.get("body"), list):
             return _error(400, "certificate_template_id and body are required")
-        # unique per account; assumption: a DELETED profile's name is free again (unverified)
-        if any(p["name"] == body.get("name") and p.get("account_id") == self.account_id
-               and p.get("status") != "DELETED" for p in self.profiles):
+        # unique per account – verified live: a DELETED profile keeps its name reserved
+        clash = next((p for p in self.profiles if p["name"] == body.get("name")
+                      and p.get("account_id") == self.account_id), None)
+        if clash and clash.get("status") == "DELETED":
+            return _error(400, f"Certificate profile with name {body['name']} already exists")
+        if clash:
             return _error(400, "certificate profile name already exists")  # unique per account
         entries = [dict(e) for e in body["body"]]
         cap = self.template_validity_cap.get(body["certificate_template_id"])
@@ -464,6 +485,32 @@ class FakeDTM:
             return httpx.Response(204)
         return handler
 
+    def _undelete_profile(self, request, oid):
+        profile = next((p for p in self.profiles if p["id"] == oid), None)
+        if not profile or profile.get("account_id") != self.account_id:
+            return _error(404, "entity_not_found")
+        if profile.get("status") != "DELETED":
+            return _error(400, "certificate profile is not deleted")
+        profile["status"] = profile.pop("status_before_delete", "ACTIVE")  # back to ACTIVE or DISABLED
+        return httpx.Response(204)
+
+    def _delete_profile(self, request, oid):
+        """Soft delete. NL (verified live): allowed once no remaining policy uses the profile. US: refused
+        for any profile a policy ever used, even a deleted one – hence shared profiles there."""
+        profile = next((p for p in self.profiles if p["id"] == oid), None)
+        if not profile or profile.get("account_id") != self.account_id or profile.get("status") == "DELETED":
+            return _error(404, "entity_not_found")
+        in_use = (any(pol.get("certificate_profile_id") == oid for pol in self.policies.values())
+                  if self.host == NL_HOST else oid in self.profiles_referenced)
+        if in_use:
+            return _error(400, "Certificate profile is referenced by a certificate management policy")
+        self.delete_profile(profile)
+        return httpx.Response(204)
+
+    def delete_profile(self, profile: dict) -> None:
+        """Deleted in the DTM portal (the app never deletes profiles): undelete restores the status."""
+        profile["status_before_delete"], profile["status"] = profile["status"], "DELETED"
+
     def profile(self, name: str) -> dict | None:
         return next((p for p in self.profiles if p["name"] == name and p.get("account_id") == self.account_id), None)
 
@@ -484,19 +531,29 @@ class FakeDTM:
                 if not 6 <= len(body.get("passcode") or "") <= 64:
                     return _error(400, "passcode must be 6–64 characters")
                 record["alternate_id"] = f"ref-{uuid.uuid4().hex[:10]}"
+                registered = [v for v in body.get("registered_values") or []
+                              if v.get("certificate_field") == "subject.common_name" and v.get("matcher") == "equals"]
+                record |= {"usage_limit": body.get("usage_limit"), "number_of_usage": 0,
+                           "registered_cn": registered[0]["value"] if registered else None,
+                           "registered_values": body.get("registered_values") or []}
             if kind == "auth_certificate":
                 try:
                     x509.load_pem_x509_certificate((body.get("pem") or "").encode())
                 except ValueError:
                     return _error(400, "invalid certificate")
             self.auth_objects[kind][record["id"]] = record
+            if kind == "passcode":
+                for listener in self.passcode_listeners:
+                    listener()
             return _json_response(201, {k: v for k, v in record.items() if k != "body"}
                                   | {"authentication_policy_id": body.get("authentication_policy_id")})
         return create
 
     def _auth_list(self, kind):
         def list_(request):  # soft-deleted objects stay listed with status DELETED
-            return self._page(request, [{"id": o["id"], "name": o["name"], "status": o["status"]}
+            # verified live: list records carry account_id
+            return self._page(request, [{"id": o["id"], "name": o["name"], "status": o["status"],
+                                         "account_id": o.get("account_id", self.account_id)}
                                         for o in self.auth_objects[kind].values()])
         return list_
 
@@ -505,7 +562,11 @@ class FakeDTM:
             record = self.auth_objects[kind].get(oid)
             if not record:
                 return _error(404, "entity_not_found")
-            return _json_response(200, {"id": oid, "name": record["name"], "status": record["status"]})
+            data = {"id": oid, "name": record["name"], "status": record["status"]}
+            if kind == "passcode":
+                data |= {"usage_limit": record.get("usage_limit"), "number_of_usage": self.passcode_usage(record),
+                         "registered_values": record.get("registered_values") or []}
+            return _json_response(200, data)
         return get
 
     def _auth_delete(self, kind):
@@ -529,12 +590,12 @@ class FakeDTM:
 
     def _register_enrollment(self) -> None:
         r = self.enroll_router
-        for host in (HOST, CLIENTAUTH_HOST):
+        for host in (self.host, self.clientauth_host):
             r.route(method="POST", host=host, path__regex=rf"^{EST_PATH_RE}$").mock(
                 side_effect=self._enroll_wrap("est", self._est))
             r.route(method="POST", host=host, path__regex=rf"^{CERT_PATH}$").mock(
                 side_effect=self._enroll_wrap("rest", self._rest))
-        r.route(method="POST", host=CLIENTAUTH_HOST, path__regex=rf"^{REENROLL_PATH_RE}$").mock(
+        r.route(method="POST", host=self.clientauth_host, path__regex=rf"^{REENROLL_PATH_RE}$").mock(
             side_effect=self._enroll_wrap("reenroll", self._reenroll))
         r.route().mock(side_effect=self._unknown)
 
@@ -555,7 +616,7 @@ class FakeDTM:
     def _authenticate(self, request: httpx.Request, policy: dict, passcode: str | None):
         """None if authenticated, else the error response DTM would send."""
         auth_policy_id = policy.get("authentication_policy_id")
-        if request.url.host == CLIENTAUTH_HOST:
+        if request.url.host == self.clientauth_host:
             if not self.tls_client_cert:
                 return _error(401, "client certificate required")
             if not any(o["body"]["pem"].strip() == self.tls_client_cert.strip()
@@ -569,11 +630,35 @@ class FakeDTM:
             return _error(401, "invalid passcode")
         return None
 
+    def passcode_usage(self, record: dict) -> int:
+        external = 0
+        if self.external_passcode_usage is not None and self.external_passcode_usage.exists():
+            external = json.loads(self.external_passcode_usage.read_text()).get(record.get("alternate_id"), 0)
+        return record.get("number_of_usage", 0) + external
+
+    def _use_passcode(self, policy: dict, passcode: str, cn: str):
+        """UC-5 rules after authentication: usage limit first, then the use is counted (also for a
+        request that is rejected next), then the registered common name. None = go on and issue."""
+        record = next((o for o in self.active_auth("passcode") if o["body"]["passcode"] == passcode
+                       and o["body"]["authentication_policy_id"] == policy.get("authentication_policy_id")), None)
+        if record is None:
+            return None
+        limit = record.get("usage_limit")
+        if self.passcode_rules and limit and self.passcode_usage(record) >= limit:
+            return _json_response(400, {"errors": [{"code": "invalid_input",
+                                                    "message": "Passcode has reached its usage limit"}]})
+        record["number_of_usage"] = record.get("number_of_usage", 0) + 1
+        if self.passcode_rules and record.get("registered_cn") not in (None, cn):
+            return _json_response(400, {"errors": [{"code": "invalid_input", "message":
+                                                    "Invalid registered value provided in attribute: subject.common_name"}]})
+        return None
+
     def register_certificate(self, policy_id: str, cert: x509.Certificate) -> dict:
         """A certificate issued outside the fake's handlers (fake openssl cmp) – listed like any other."""
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         record = {"id": str(uuid.uuid4()), "policy_id": policy_id, "common_name": cn, "status": "ISSUED",
-                  "serial_number": format(cert.serial_number, "x")}
+                  "serial_number": format(cert.serial_number, "x"),
+                  "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         self.certificates[record["id"]] = record
         return record
 
@@ -596,6 +681,8 @@ class FakeDTM:
         if not csr.is_signature_valid:
             return _error(400, "CSR signature invalid")
         cn = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        if passcode and (refused := self._use_passcode(policy, passcode, cn)) is not None:
+            return refused
         _record, cert, _key = self._new_certificate(oid, cn, csr.public_key())
         p7 = pkcs7.serialize_certificates([cert], serialization.Encoding.DER)
         return httpx.Response(200, content=base64.b64encode(p7),
@@ -646,6 +733,9 @@ class FakeDTM:
         csr = self._check_csr(body.get("csr") or "", cn)
         if isinstance(csr, httpx.Response):
             return csr
+        passcode = request.headers.get("x-passcode")
+        if passcode and (refused := self._use_passcode(policy, passcode, cn)) is not None:
+            return refused
         record, cert, _key = self._new_certificate(policy["id"], cn, csr.public_key())
         return _json_response(200, {"certificate_id": record["id"], "serial_number": record["serial_number"],
                                     "status": "ISSUED", "pem": cert_pem(cert), "device": None,
@@ -676,7 +766,8 @@ class FakeDTM:
             cert, key = make_cert(cn, issuer_cert=self.ica_cert, issuer_key=self.ica_key)
         cert_id = str(uuid.uuid4())
         record = {"id": cert_id, "policy_id": policy_id, "common_name": cn, "status": "ISSUED",
-                  "serial_number": format(cert.serial_number, "x")}
+                  "serial_number": format(cert.serial_number, "x"),
+                  "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}  # live format
         self.certificates[cert_id] = record
         return record, cert, key
 
@@ -723,15 +814,24 @@ class FakeDTM:
             return _error(400, "CSR subject does not match the common name")
         return csr
 
+    def _list_jobs(self, request):
+        # Verified live: the list ignores a certificate_policy_id filter – every job of the account comes back.
+        return self._page(request, [{"id": j["id"], "name": j.get("name"), "status": j["status"],
+                                     "job_type": "certificate_enroll", "certificate_policy_id": j["policy_id"],
+                                     "account_id": j.get("account_id", self.account_id)} for j in self.jobs.values()])
+
     def _list_certs(self, request):
         policy_id = request.url.params.get("certificate_policy_id")
+        common_name = request.url.params.get("common_name")  # verified live: exact match, across policies
         status = request.url.params.get("status")
         if status and status.upper() == "REVOKED" and self.revoked_count_lag > 0:
             self.revoked_count_lag -= 1
             return self._page(request, [])
         items = []
         for c in self.certificates.values():
-            if c["policy_id"] != policy_id:
+            if policy_id is not None and c["policy_id"] != policy_id:
+                continue
+            if common_name is not None and c["common_name"] != common_name:
                 continue
             if c["id"] in self.issued_list_hidden:
                 continue
@@ -740,7 +840,8 @@ class FakeDTM:
                 listed = "ISSUED"
             if status and listed != status.upper():
                 continue
-            items.append({"id": c["id"], "common_name": c["common_name"], "status": listed})
+            items.append({"id": c["id"], "common_name": c["common_name"], "status": listed, "created_at": c.get("created_at"),
+                          "certificate_policy_id": c["policy_id"], "account_id": c.get("account_id", self.account_id)})
         self.issued_list_hidden.clear()
         self.issued_list_stale.clear()
         return self._page(request, items)

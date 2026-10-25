@@ -48,20 +48,36 @@
   <section class="form-section">
     <header><h3>Enrollment</h3></header>
     <div class="fields q-grid">
+      {% if use_case_id == "uc05" %}
+      {{ choice("mode", "How many devices?", [("single", "Single device", ""), ("batch", "Batch", "")], "single") }}
+      <div class="field" data-when="mode=batch">
+        <label for="count" class="field-label">Number of devices (one passcode each)</label>
+        <input id="count" type="number" name="count" class="short" value="10" min="1" max="{{ max_passcode_batch }}">
+      </div>
+      {{ choice("protocol", "Protocol in the field", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
+      <label class="switch-cell"><input type="checkbox" name="checks" value="true" role="switch" checked> Show what the passcode enforces</label>
+      <input type="hidden" name="variant" value="api">
+      {% else %}
       {{ choice("protocol", "Protocol (enrollment and renewal)", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
       {{ choice("auth_method", "How does the factory authenticate?",
                 [("passcode", "Passcode", ""), ("certificate", "Factory certificate", "")], "passcode") }}
       <input type="hidden" name="count" value="1">
       <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
+      {% endif %}
     </div>
   </section>
   {% endif %}
-  {# The profile is not chosen – it is the shared one for the purpose; shown as a read-only field. #}
+  {# The profile is not chosen – the run's own (NL) or the shared one for the purpose (US); read only. #}
   {% macro profile_field(name, validity, when="") -%}
   <div class="field" {% if when %}data-when="{{ when }}"{% endif %}>
     <span class="field-label">Certificate profile</span>
-    <div class="readonly-value mono" tabindex="0" data-tip="Shared per account and reused by every run – DTM does not allow deleting used profiles">{{ name }}</div>
-    <small class="field-help">{{ validity }}{% if profile_status.get(name) == "missing" %} – created once by this run, DTM keeps it{% elif profile_status.get(name) == "DISABLED" %} – retired, this run enables it again{% endif %}</small>
+    {% if profile_mode == "per_run" %}
+    <div class="readonly-value" tabindex="0" data-tip="Created for this run and deleted again by the full rollback">Own profile for this run</div>
+    <small class="field-help">{{ validity }} – deleted by the full rollback</small>
+    {% else %}
+    <div class="readonly-value mono" tabindex="0" data-tip="Shared per account and reused by every run – DTM on this platform does not allow deleting used profiles">{{ name }}</div>
+    <small class="field-help">{{ validity }}{% if profile_status.get(name) == "missing" %} – created or restored by this run, DTM keeps it{% elif profile_status.get(name) == "DISABLED" %} – retired, this run enables it again{% endif %}</small>
+    {% endif %}
   </div>
   {%- endmacro %}
   <section class="form-section">
@@ -77,6 +93,9 @@
       {% if guide %}
       {{ profile_field("robot-evergreen-5y-profile", "5 years", "mode=batch | key_location=server | protocol=rest | protocol=est | protocol=scep") }}
       {{ profile_field("robot-evergreen-cmp-5y-profile", "5 years · bare key", "mode=single key_location=factory protocol=cmpv2") }}
+      {% elif use_case_id == "uc05" %}
+      {{ profile_field("robot-evergreen-5y-profile", "5 years", "protocol=est") }}
+      {{ profile_field("robot-evergreen-cmp-5y-profile", "5 years · bare key", "protocol=cmpv2") }}
       {% else %}
       {{ profile_field("robot-renewal-6m-profile", "6 months · renew any time", "protocol=est") }}
       {{ profile_field("robot-renewal-cmp-6m-profile", "6 months · renew any time · bare key", "protocol=cmpv2") }}

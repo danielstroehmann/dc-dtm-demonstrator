@@ -189,11 +189,26 @@ class FakeOpenSSL:
         self.bin_dir, self.fake = bin_dir, fake
         self.record = bin_dir / f"{self.TOOL}-calls.jsonl"
         self.config = {"ca_cert": cert_pem(fake.ica_cert), "ca_key": key_pem(fake.ica_key),
-                       "record": str(self.record), "fail": None}
+                       "record": str(self.record), "fail": None,
+                       "usage_file": str(bin_dir / f"{self.TOOL}-passcode-usage.json")}
         self._write()
+        if self.TOOL == "openssl":  # CMPv2: the fake DTM's one-time passcodes are enforced by `openssl cmp`
+            fake.external_passcode_usage = bin_dir / f"{self.TOOL}-passcode-usage.json"
+            fake.passcode_listeners.append(self.publish_passcodes)
         script = bin_dir / self.TOOL
         script.write_text(f"#!{sys.executable}\n" + (Path(__file__).parent / self.SCRIPT).read_text())
         script.chmod(0o755)
+
+    def publish_passcodes(self) -> None:
+        """Every active passcode by its reference: a hash of the secret (CMPv2 MAC – the secret must
+        belong to the -ref) and the UC-5 rules (usage limit, registered common name)."""
+        import hashlib
+        self.config["passcodes"] = {
+            o["alternate_id"]: {"secret_sha256": hashlib.sha256(o["body"]["passcode"].encode()).hexdigest(),
+                                "limit": o.get("usage_limit"), "cn": o.get("registered_cn"),
+                                "enforce": self.fake.passcode_rules, "used": o.get("number_of_usage", 0)}
+            for o in self.fake.active_auth("passcode")}
+        self._write()
 
     def _write(self):
         (self.bin_dir / "config.json").write_text(json.dumps(self.config))

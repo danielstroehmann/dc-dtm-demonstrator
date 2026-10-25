@@ -126,6 +126,18 @@ Spec deviations and details found (all calls with `account_id`):
   parallel load; use the failsafe pass approach (R-4).
 - **Cleanup revokes every certificate under the run's policy** (not only `robot-<run>-` CNs):
   the policy belongs to the run, so portal-issued certificates with other names are included.
+- **Web UI runs (2026-10-25):** the demo assumes the order was really placed in the portal. Before
+  revoking, the cleanup finds portal batch jobs under the run's policy (`GET /jobs` ignores a policy
+  filter – filtered client-side by `certificate_policy_id` and `account_id`), waits for them and rejects
+  those pending approval. Afterwards it looks up the run's device names (`common_name` filters exactly,
+  across policies) and revokes issued ones under other policies – an order placed under the wrong
+  policy. Batches above 20 devices: 10 names from each end first, all names only on a hit.
+  Only for a run that reached the portal step with its own policy, and only certificates created after
+  the run started – an older run may have used the same run ID. Record fields verified live: certificate
+  list records carry `account_id`, `certificate_policy_id`, `job_id`, `created_at` at the top level; job-list
+  records carry `account_id` and `certificate_policy_id`.
+  Limits (accepted): a stray only in the unsampled middle of a large batch is not found; a portal job
+  under a *wrong* policy is neither waited for nor rejected (not ours to touch).
 - **Policy delete via `api-ui` works with revoked certificates attached**; then division delete.
   Verified cleanup order: revoke certificates → delete policy (`api-ui`) → delete division.
 - Batch jobs cannot be deleted; they expire after 30 days (`expire_at`) – accepted residue (history).

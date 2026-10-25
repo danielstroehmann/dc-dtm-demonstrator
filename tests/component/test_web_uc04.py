@@ -77,7 +77,7 @@ def test_uc04_cmp_renewal_through_the_web(configured_user, store, enroll_net, cm
 @pytest.mark.parametrize("protocol", ["scep", "rest", "EST", "cmp"])
 def test_uc04_refuses_other_protocols(configured_user, store, fake, protocol):
     response = configured_user.post("/runs", data=uc04_form(protocol=protocol), follow_redirects=False)
-    assert response.status_code == 400 and "Renewal in the field: EST or CMPv2." in response.text
+    assert response.status_code == 400 and "Enrollment in the field: EST or CMPv2." in response.text
     assert store.list_runs() == [] and fake.route_order() == []  # checked before DTM is asked
 
 

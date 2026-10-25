@@ -8,6 +8,7 @@
 {% set setup = calls | selectattr("phase", "equalto", "setup") | list if has_phase else [] %}
 {% set recurring = calls | selectattr("phase", "equalto", "recurring") | list if has_phase else calls %}
 {% set renewal = calls | selectattr("phase", "equalto", "renewal") | list if has_phase else [] %}
+{% set field = calls | selectattr("phase", "equalto", "field") | list if has_phase else [] %}
 <article class="card api-calls" id="api-calls">
   <div class="card-head">
     <h2>Reproducible Steps</h2>
@@ -39,11 +40,21 @@
   {% if recurring %}
   <section class="box accent">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ "Factory Enrollment" if run.use_case == "uc04" else "Certificate Order" }}</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory Enrollment", "uc05": "Factory Provisioning"}.get(run.use_case, "Certificate Order") }}</h3>
       <button class="btn-sm outline" data-copy="script-recurring-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "recurring", group = recurring %}{% include "_api_call_list.html" %}{% endwith %}
     <pre id="script-recurring-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "recurring") }}</pre>
+  </section>
+  {% endif %}
+  {% if field %}
+  <section class="box accent field">
+    <div class="box-head">
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Enrollment in the Field</h3>
+      <button class="btn-sm outline" data-copy="script-field-{{ dialect }}">Copy as script</button>
+    </div>
+    {% with phase = "field", group = field %}{% include "_api_call_list.html" %}{% endwith %}
+    <pre id="script-field-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "field") }}</pre>
   </section>
   {% endif %}
   {% if renewal %}

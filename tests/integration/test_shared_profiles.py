@@ -111,10 +111,77 @@ async def test_active_preferred_over_retired_duplicate(fake):
     assert active["status"] == "ACTIVE"
 
 
-async def test_deleted_profile_of_that_name_is_ignored(fake):
-    shared(fake, EVERGREEN, status="DELETED")
+# Deleted in the portal: DTM hides the profile but keeps its name reserved (verified live) – restore it.
+
+async def test_deleted_shared_profile_is_restored_not_recreated(fake):
+    old = shared(fake, EVERGREEN)
+    fake.delete_profile(old)
+    assert fake.profile(EVERGREEN.name)["status"] == "DELETED"
+    assert await call(fake, "shared_profile", EVERGREEN) == (old["id"], "restored")
+    assert old["status"] == "ACTIVE" and fake.names("profile_undelete") == [old["id"]]
+    assert fake.names("profile_create") == [] and fake.created_profiles == []
+    assert writes(fake) == ["profile_undelete"]
+    lists = [r.url.params.get("status") for r in fake.requests if r.url.path == dtm.PROFILES and r.method == "GET"]
+    assert lists == [None, "DELETED", None]  # look, find it among the deleted, look again
+
+
+async def test_deleted_and_retired_profile_is_restored_and_enabled(fake):
+    old = shared(fake, CMP, status="DISABLED")
+    fake.delete_profile(old)
+    assert await call(fake, "shared_profile", CMP) == (old["id"], "restored")
+    assert old["status"] == "ACTIVE"
+    assert writes(fake) == ["profile_undelete", "profile_enable"] and fake.created_profiles == []
+
+
+@pytest.mark.parametrize("spec,changes", [(EVERGREEN, {"value": 1}), (EVERGREEN, {"unit": "months"}),
+                                          (CMP, {"allow_bare_public_key": False})])
+async def test_deleted_profile_with_other_settings_stays_deleted(fake, spec, changes):
+    """The deleted record is checked first: a mismatching profile is neither restored nor replaced."""
+    old = shared(fake, spec, **changes)
+    fake.delete_profile(old)
+    with pytest.raises(DTMError) as error:
+        await call(fake, "shared_profile", spec)
+    assert str(error.value) == (f"profile {spec.name} was deleted with other settings – restore it in the DTM portal, "
+                                "then fix or rename it")
+    assert writes(fake) == [] and fake.created_profiles == []  # no undelete, no create, no enable
+    assert old["status"] == "DELETED"
+
+
+async def test_deleted_profile_of_another_account_is_ignored(fake):
+    foreign = shared(fake, EVERGREEN, account_id=OTHER_ACCOUNT_ID)
+    fake.delete_profile(foreign)
+    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    assert how == "created" and profile_id != foreign["id"]
+    assert fake.names("profile_undelete") == [] and foreign["status"] == "DELETED"
+    assert fake.profile(EVERGREEN.name)["id"] == profile_id
+
+
+async def test_deleted_profile_of_another_name_is_ignored(fake):
+    other = shared(fake, CMP)
+    fake.delete_profile(other)
     _profile_id, how = await call(fake, "shared_profile", EVERGREEN)
-    assert how == "created"
+    assert how == "created" and fake.names("profile_undelete") == [] and other["status"] == "DELETED"
+
+
+async def test_no_deleted_record_creates_as_before(fake):
+    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    assert how == "created" and fake.names("profile_undelete") == []
+    lists = [r.url.params.get("status") for r in fake.requests if r.url.path == dtm.PROFILES and r.method == "GET"]
+    assert lists == [None, "DELETED"] and fake.profile(EVERGREEN.name)["id"] == profile_id
+
+
+async def test_fake_keeps_deleted_names_reserved(fake):
+    """The fake models the live behaviour the app relies on: a new profile of a deleted name is refused."""
+    old = shared(fake, EVERGREEN)
+    fake.delete_profile(old)
+    client = fake.client()
+    try:
+        response = await client._request("POST", dtm.PROFILES, expect=(400,),
+                                         json=dtm.shared_profile_body(fake.profiles[0], EVERGREEN, ACCOUNT_ID))
+    finally:
+        await client.aclose()
+    assert f"Certificate profile with name {EVERGREEN.name} already exists" in response.text
+    assert old["id"] not in [p["id"] for p in await call(fake, "_profiles")]  # hidden from the normal list
 
 
 async def test_string_values_from_dtm_still_match(fake):
@@ -283,3 +350,87 @@ async def test_run_stops_cleanly_when_the_profile_is_unusable(store, fake, tmp_p
     assert run["status"] == "failed" and "exists with other settings – fix or rename it" in run["error"]
     assert fake.policies == {} and len(fake.divisions) == 1  # the division is in the ledger for the rollback
     assert [o["kind"] for o in store.objects("x1")] == ["division"]
+
+
+@pytest.mark.parametrize("before", ["ACTIVE", "DISABLED"])
+async def test_run_restores_a_deleted_shared_profile_and_says_so(store, fake, tmp_path, before):
+    from tests.integration import test_uc01_flow
+    old = shared(fake, EVERGREEN, status=before)
+    fake.delete_profile(old)
+    run = await test_uc01_flow.start(store, fake, "rs1", tmp_path)
+    assert run["status"] == "completed", run["error"]
+    (policy_obj,) = store.objects("rs1", "policy")
+    assert fake.policies[policy_obj["dtm_id"]]["certificate_profile_id"] == old["id"] and old["status"] == "ACTIVE"
+    assert fake.created_profiles == [] and fake.names("profile_undelete") == [old["id"]]
+    assert fake.names("profile_enable") == ([old["id"]] if before == "DISABLED" else [])
+    messages = [e["message"] for e in store.events("rs1")]
+    assert (f"Restored the shared certificate profile {EVERGREEN.name} (5 years) – DTM keeps it permanently"
+            in messages)
+    assert not any(m.startswith(("Using the shared", "Created the shared", "Enabled again the shared"))
+                   for m in messages)
+
+
+async def test_run_fails_cleanly_on_a_deleted_profile_with_other_settings(store, fake, tmp_path):
+    from tests.integration import test_uc01_flow
+    old = shared(fake, EVERGREEN, value=2)
+    fake.delete_profile(old)
+    run = await test_uc01_flow.start(store, fake, "rs2", tmp_path)
+    assert run["status"] == "failed" and "was deleted with other settings" in run["error"]
+    assert old["status"] == "DELETED" and fake.created_profiles == [] and fake.policies == {}
+
+
+
+async def test_restored_profile_not_listed_yet_is_a_clear_error(fake, monkeypatch):
+    """Undelete answers 204, but the list still lags: a clear DTMError, nothing created."""
+    old = shared(fake, EVERGREEN)
+    fake.delete_profile(old)
+    monkeypatch.setattr(fake, "_undelete_profile", lambda request, oid: httpx.Response(204))
+    fake._register()  # the routes bind the handler at registration
+    with pytest.raises(DTMError) as error:
+        await call(fake, "shared_profile", EVERGREEN)
+    assert str(error.value) == f"profile {EVERGREEN.name} was restored but is not listed yet – start the run again"
+    assert fake.names("profile_undelete") == [old["id"]] and fake.created_profiles == []
+    assert old["status"] == "DELETED"
+
+
+async def test_undelete_refused_because_another_installation_restored_it(store, fake, tmp_path):
+    """Between our look and our undelete someone else restored it: DTM answers 400, the next look
+    finds the ACTIVE profile and the run goes on with it."""
+    from tests.integration import test_uc01_flow
+    old = shared(fake, EVERGREEN)
+    fake.delete_profile(old)
+    original = fake._list_profiles
+
+    def list_then_restore(request):
+        response = original(request)
+        if request.url.params.get("status") == "DELETED":
+            old["status"] = old.pop("status_before_delete")  # the other installation's undelete
+        return response
+
+    fake._list_profiles = list_then_restore
+    fake._register()
+    run = await test_uc01_flow.start(store, fake, "ud1", tmp_path)
+    assert run["status"] == "completed", run["error"]
+    assert fake.names("profile_undelete") == [old["id"]]  # ours was refused (not deleted any more)
+    (policy_obj,) = store.objects("ud1", "policy")
+    assert fake.policies[policy_obj["dtm_id"]]["certificate_profile_id"] == old["id"]
+    assert fake.created_profiles == [] and old["status"] == "ACTIVE"
+
+
+async def test_deleted_list_record_with_another_status_is_not_undeleted(fake, monkeypatch):
+    """Should the status filter ever be ignored, only records really marked DELETED are restored."""
+    import copy
+    odd = shared(fake, EVERGREEN, id="odd-status")
+    fake.profiles.remove(odd)  # only the DELETED listing returns it – with a status that is not DELETED
+    retired_elsewhere = copy.deepcopy(odd) | {"status": "DISABLED"}
+    original = fake._list_profiles
+
+    def unfiltered(request):
+        if request.url.params.get("status") == "DELETED":
+            return fake._page(request, [retired_elsewhere])  # name matches, status does not
+        return original(request)
+
+    fake._list_profiles = unfiltered
+    fake._register()
+    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    assert how == "created" and fake.names("profile_undelete") == [] and profile_id != "odd-status"

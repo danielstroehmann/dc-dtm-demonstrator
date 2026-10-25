@@ -85,3 +85,104 @@ async def test_uc04_steps_incl_renewal_are_replayable(store, enroll_net, cmp_ope
     if protocol == "est":  # the renewal CSR keeps the device's identity – named after RUN_NAME
         assert '-subj "/CN={RUN_NAME}-est-0001"' in renewal[0]["spec"]["command"]["bash"]
     assert_replayable(run, enroll_net)
+
+
+# --- web UI variant: the local steps rebuild the run's upload file; the order itself is manual -------
+
+def _run_local(spec: dict, work, run_name: str):
+    import os
+    import subprocess
+    return subprocess.run(["bash", "-c", snippets.render(spec, "curl")], cwd=work, capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"], "RUN_NAME": run_name, "HOME": str(work)}, timeout=60)
+
+
+@pytest.mark.parametrize("use_case", ["uc01", "uc02"])
+@pytest.mark.parametrize("mode,count", [("single", 1), ("single", 3), ("batch", 3)])
+async def test_webui_steps_are_replayable(store, fake, tmp_path, monkeypatch, use_case, mode, count):
+    import shutil
+    import zipfile
+    monkeypatch.setattr(evergreen, "STORY_INTERVAL", 0.0)
+    flow = test_uc01_flow if use_case == "uc01" else test_uc02_flow
+    run = await flow.start(store, fake, "wr1", tmp_path, variant="webui", mode=mode, count=count)
+    assert run["status"] == "waiting", run["error"]
+    assert_replayable(run, fake)
+    calls = run["result"]["api_calls"]
+    recurring = [c for c in calls if c["phase"] == "recurring"]
+    manual = recurring[-1]
+    assert (manual["method"], manual["path"], manual["seconds"]) == ("MANUAL", "DTM web UI", None)
+    assert manual["spec"] == {"command": "# Certificate policy: {RUN_NAME}-policy – no API call, the portal places the order"}
+    client_side = use_case == "uc02"
+    artifact = "csrs.zip" if client_side else "batch.zip" if mode == "batch" else None
+    task = (f"upload {artifact} as a batch request" if mode == "batch"
+            else ("request the certificates one by one" if count > 1 else "request the certificate")
+            + (" with the CSRs from csrs.zip" if client_side else ""))
+    assert manual["purpose"] == f"Order in the DTM web UI – {task}"
+    assert run["result"].get("artifact") == artifact
+    names = evergreen.common_names("wr1", mode, count, use_case)
+    run_name = evergreen.prefix("wr1", use_case)
+    work = tmp_path / "replay"
+    work.mkdir()
+    if artifact is None:  # server-side single: nothing to prepare, only the manual order
+        assert [c["method"] for c in recurring] == ["MANUAL"]
+        return
+    (local,) = recurring[:-1]
+    assert local["method"] == "LOCAL"
+    run_zip = zipfile.ZipFile(tmp_path / "runs" / "wr1" / artifact)
+    if client_side:
+        devices = "the device" if count == 1 else f"each of the {count} devices"
+        assert local["purpose"] == f"Generate key + CSR for {devices} and pack the CSRs (local)"
+        assert local["spec"]["command"] == evergreen.csr_batch_command(count, "P_256", mode)
+        assert local["seconds"] is not None  # the factory's key generation is measured
+        assert run_zip.namelist() == [f"{n}.csr" for n in names]
+        if not (shutil.which("openssl") and shutil.which("zip") and shutil.which("bash")):
+            pytest.skip("needs bash, openssl and zip to replay the CSR step")
+        result = _run_local(local["spec"], work, run_name)
+        assert result.returncode == 0, result.stderr
+        assert zipfile.ZipFile(work / "csrs.zip").namelist() == run_zip.namelist()  # same device names
+    else:
+        assert local["purpose"] == f"Write the CSV with the {count} device names and pack it (local)"
+        assert local["spec"]["command"] == evergreen.csv_batch_command(count)
+        if not (shutil.which("zip") and shutil.which("bash")):
+            pytest.skip("needs bash and zip to replay the CSV step")
+        result = _run_local(local["spec"], work, run_name)
+        assert result.returncode == 0, result.stderr
+        replayed = zipfile.ZipFile(work / "batch.zip")
+        assert replayed.namelist() == run_zip.namelist() == ["batch.csv"]
+        assert replayed.read("batch.csv") == run_zip.read("batch.csv")  # byte-identical to the run's CSV
+
+
+@pytest.mark.parametrize("mode", ["single", "batch"])
+def test_batch_commands_name_devices_like_common_names(tmp_path, mode):
+    import shutil
+    import zipfile
+    if not (shutil.which("zip") and shutil.which("unzip") and shutil.which("bash")):
+        pytest.skip("needs bash, zip and unzip")
+    result = _run_local({"command": evergreen.csv_batch_command(4, mode)}, tmp_path, "robot-n1-uc01")
+    assert result.returncode == 0, result.stderr
+    csv = zipfile.ZipFile(tmp_path / "batch.zip").read("batch.csv").decode()
+    assert csv.splitlines() == ["subject.common_name", *evergreen.common_names("n1", mode, 4, "uc01")]
+    with pytest.raises(ValueError):
+        evergreen.csv_batch_command(2, "bulk")
+    with pytest.raises(ValueError):
+        evergreen.csr_batch_command(2, "P_256", "x; rm -rf ~")
+
+
+# --- NL: the run creates its own profile – the replay creates one, too (captured, never the run's ID) ----
+
+@pytest.mark.parametrize("use_case,mode", [("uc01", "single"), ("uc02", "batch")])
+async def test_nl_steps_are_replayable(store, tmp_path, monkeypatch, use_case, mode):
+    from app import dtm
+    from tests.fakedtm import NL_HOST, FakeDTM
+    monkeypatch.setattr(evergreen, "STORY_INTERVAL", 0.0)
+    nl = FakeDTM(host=NL_HOST)
+    flow = test_uc01_flow if use_case == "uc01" else test_uc02_flow
+    run = await flow.start(store, nl, "nr1", tmp_path, dtm_host=NL_HOST, mode=mode, count=2)
+    assert run["status"] == "completed", run["error"]
+    assert_replayable(run, nl)
+    calls = run["result"]["api_calls"]
+    (profile_step,) = [c for c in calls if c["path"] == dtm.PROFILES]
+    assert profile_step["method"] == "POST" and profile_step["spec"]["capture"]["var"] == "PROFILE_ID"
+    assert profile_step["spec"]["json"]["name"] == "{RUN_NAME}-profile"
+    for dialect in snippets.DIALECTS:
+        text = snippets.script(run["result"]["api_variables"], calls, dialect)
+        assert "robot-evergreen" not in text  # no shared profile lookup on NL

@@ -99,12 +99,13 @@ def test_failed_later_save_stays_on_settings(configured_user, store, fake):
 def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fake):
     html = configured_user.get("/").text
     assert "<h1>Start a demo</h1>" in html and "<h1>Welcome</h1>" not in html
-    assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 2
+    assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 3
     for key, use_case in evergreen.CATALOG.items():
         assert html.count(f'formaction="/runs/new/{key}"') == 1
         assert f'aria-label="Start {use_case.title}"' in html
-    assert html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
-    assert "Server-side or factory keys" in html and "Renewal per click" in html
+    assert (html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
+            < html.index('formaction="/runs/new/uc05"'))
+    assert "Server-side or factory keys" in html and "Renewal per click" in html and "One-time passcode" in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html
     assert '<select name="connection"' not in html
@@ -327,3 +328,14 @@ def test_buttons_are_auto_width_and_override_pico():
 def test_app_css_loads_after_pico(configured_user):
     html = configured_user.get("/").text
     assert html.index("/static/pico.min.css") < html.index("/static/app.css")
+
+
+def test_single_line_controls_share_one_height():
+    """Controls in one question row line up: inputs, selects, read-only values and segmented
+    buttons all take --control-h (a CSS contract; the look itself was verified in Chrome)."""
+    rules = css_rules((STATIC / "app.css").read_text())
+    sized = {sel for selectors, decls in rules if decls.get("height") == "var(--control-h)" for sel in selectors}
+    for selector in (".segmented", ".readonly-value", ".q-grid .field select",
+                     ".q-grid .field input:not([type=radio]):not([type=checkbox])"):
+        assert selector in sized, selector
+    assert any("--control-h" in decls for _, decls in rules)  # defined once, not hard-coded per control

@@ -387,8 +387,9 @@ async def test_genuinely_wrong_passcode_is_rejected_by_the_fake(store, enroll_ne
     """Not an injected failure: the station sends a passcode DTM does not know."""
     original = dtm.DTMClient.create_passcode
 
-    async def create_passcode(self, name, auth_policy_id, passcode):
-        return await original(self, name, auth_policy_id, passcode + "-other")
+    async def create_passcode(self, name, auth_policy_id, passcode, common_name=None):
+        assert common_name is None  # UC-3: a factory passcode, not bound to a device
+        return await original(self, name, auth_policy_id, passcode + "-other", common_name)
     monkeypatch.setattr(dtm.DTMClient, "create_passcode", create_passcode)
     run = await start(store, enroll_net, "wp1", tmp_path, protocol="rest")
     assert run["status"] == "failed" and run["error"].startswith("REST API returned 401")

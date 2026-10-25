@@ -5,7 +5,7 @@ import re
 import httpx
 import pytest
 
-from tests.fakedtm import ACCOUNT_ID, API_KEY, HOST, OTHER_ACCOUNT_ID
+from tests.fakedtm import ACCOUNT_ID, API_KEY, HOST, NL_HOST, OTHER_ACCOUNT_ID
 
 XSS = '<img src=x onerror="alert(1)">'
 
@@ -149,9 +149,26 @@ def test_stored_key_is_never_sent_to_a_new_host(user, store, fake):
     assert save(user).status_code == 303
     conn = only(store)
     fake.requests.clear()
-    response = save(user, id=str(conn["id"]), host="attacker.example", api_key="")
+    # switching between the two supported platforms (US → NL) without a key: the stored key stays home
+    response = save(user, id=str(conn["id"]), host=NL_HOST, api_key="")
     assert response.status_code == 400 and "Enter the API key again" in response.text
     assert fake.requests == [] and only(store)["host"] == HOST
+
+
+@pytest.mark.parametrize("host", ["attacker.example", "one.digicert.com.attacker.example", "demo.one.digicert.com",
+                                  "ONE.EU.DIGICERT.COM"])
+def test_only_the_two_platforms_can_be_saved(user, store, fake, host):
+    response = save(user, host=host)
+    assert response.status_code == 400
+    assert ("Only one.digicert.com (US) and one.nl.digicert.com (NL) are supported." in response.text
+            or "Invalid host name." in response.text)
+    assert store.connections() == [] and fake.requests == []  # refused before the key is sent anywhere
+    assert API_KEY not in response.text
+
+
+def test_unsupported_host_text(user, store, fake):
+    response = save(user, host="attacker.example")
+    assert "Only one.digicert.com (US) and one.nl.digicert.com (NL) are supported." in response.text
 
 
 def test_failed_check_on_edit_keeps_previous_values(user, store, fake):

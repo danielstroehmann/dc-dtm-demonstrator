@@ -66,18 +66,19 @@ def test_catalog_without_connection(user, fake):
     assert '<form method="post" action="/settings/connections">' in html and "formaction" not in html
 
 
-def test_catalog_lists_the_guide_and_uc04(configured_user, store, fake):
+def test_catalog_lists_the_guide_uc04_and_uc05(configured_user, store, fake):
     response = configured_user.get("/runs/new")
     assert response.status_code == 200
     html = response.text
-    assert html.count('formaction="/runs/new/') == len(evergreen.CATALOG) == 2
+    assert html.count('formaction="/runs/new/') == len(evergreen.CATALOG) == 3
     for key, use_case in evergreen.CATALOG.items():
         assert f'formaction="/runs/new/{key}"' in html and use_case.title in html
         assert use_case.summary[:40] not in html  # tiles show title and tags only (UI design v2)
         assert f'aria-label="Start {use_case.title}"' in html
         for tag in use_case.tags:
             assert f"<li>{tag}</li>" in html
-    assert html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
+    assert (html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
+            < html.index('formaction="/runs/new/uc05"'))
     assert '<form method="get">' in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html and "<select" not in html
@@ -97,7 +98,7 @@ def test_use_case_form_shows_title_and_breadcrumb_only(configured_user, store):
         assert 'action="/runs"' in html
 
 
-@pytest.mark.parametrize("use_case", ["uc05", "uc00", "UC04", "UC03", "UC01", "uc01x", "uc01.", "%2e%2e%2fsettings"])
+@pytest.mark.parametrize("use_case", ["uc06", "UC05", "uc00", "UC04", "UC03", "UC01", "uc01x", "uc01.", "%2e%2e%2fsettings"])
 def test_unknown_use_case_is_404_without_dtm_call(configured_user, fake, use_case):
     assert configured_user.get(f"/runs/new/{use_case}").status_code == 404
     assert fake.requests == []
@@ -763,7 +764,9 @@ PHASE_TITLE = re.compile(r'<section class="(box accent[^"]*)">\s*<div class="box
                          r'<h3 class="phase-title"><span class="phase-icon">(.*?)</span>([^<]+)</h3>', re.S)
 
 
-PHASE_ICONS = {"factory": 'd="M3 21V10l6 4V10l6 4V6l6 3v12z"', "refresh": 'd="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"'}  # _icons.html
+PHASE_ICONS = {"factory": 'd="M3 21V10l6 4V10l6 4V6l6 3v12z"', "refresh": 'd="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"',
+               "key": 'd="M11 12l9-9M17 6l3 3M15 8l2 2"'}  # _icons.html
+FIELD_PHASES = ("Renewal in the Field", "Enrollment in the Field")  # the orange "in the field" boxes
 
 
 def phase_titles(html: str) -> list[tuple[str, str, str]]:
@@ -779,7 +782,7 @@ def assert_phase_titles(html: str, expected: list[tuple[str, str]]) -> None:
     for (classes, icon_html, title), (_, name) in zip(found, expected):
         assert icon_html.count("<svg") == 1 and icon_html.count("</svg>") == 1, title
         assert PHASE_ICONS[name] in icon_html and all(p not in icon_html for n, p in PHASE_ICONS.items() if n != name)
-        assert classes == ("box accent field" if title == "Renewal in the Field" else "box accent"), title
+        assert classes == ("box accent field" if title in FIELD_PHASES else "box accent"), title
 
 
 def section(html: str, phase: str) -> str:
@@ -880,7 +883,32 @@ def test_webui_single_has_no_payload_section(configured_user, store):
     finished(store, "r1")
     html = configured_user.get("/runs/r1").text
     assert "<h2>Payload</h2>" not in html and "Enter in DTM web UI" in html
-    assert '<details class="box neutral">' in html and phase_titles(html) == [] and "Certificate Order" not in html
+    assert '<details class="box neutral">' in html
+    # the order itself is a manual step in the DTM web UI – shown in the certificate order, no request
+    assert_phase_titles(html, [("Certificate Order", "factory")])
+    recurring = section(html, "recurring")
+    assert '<span class="method manual">MANUAL</span>' in recurring and '<code class="path">DTM web UI</code>' in recurring
+    assert '<p class="call-purpose">Order in the DTM web UI – request the certificate</p>' in recurring
+    script = hidden_script(html, "script-recurring-curl")
+    assert script.endswith("# Order in the DTM web UI – request the certificate\n"
+                           "# Certificate policy: ${RUN_NAME}-policy – no API call, the portal places the order\n")
+    assert "curl " not in script.split("\n\n", 1)[1]  # nothing but the comment after the preamble
+
+
+def test_overview_card_only_when_there_is_something_to_show(configured_user, store):
+    overview = '<div class="card-head"><h2>Overview</h2></div>'
+    configured_user.post("/runs", data=form(variant="webui", mode="batch", count="2"))
+    run = finished(store, "r1")
+    assert run["status"] == "waiting" and not run["result"].get("portal_values")
+    assert overview not in configured_user.get("/runs/r1").text  # waiting for the portal: no empty card
+    configured_user.post("/runs", data=form(run_id="r2", variant="webui"))
+    assert finished(store, "r2")["status"] == "waiting"
+    html = configured_user.get("/runs/r2").text
+    assert html.count(overview) == 1 and "Enter in DTM web UI" in html  # the portal values
+    configured_user.post("/runs", data=form(run_id="r3"))
+    assert finished(store, "r3")["status"] == "completed"
+    html = configured_user.get("/runs/r3").text
+    assert html.count(overview) == 1 and "<small>All requests</small>" in html
 
 
 def test_legacy_calls_without_phase_count_as_recurring(configured_store, user, store):
@@ -975,9 +1003,10 @@ def test_cta_only_for_start_run_and_first_connection(user, store):
 
 def test_page_structure_cards(configured_user, store):
     catalog = configured_user.get("/runs/new").text
-    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 2
+    assert "<h1>Start a demo</h1>" in catalog and catalog.count('<article class="tile">') == 3
     assert "<h3>Evergreen device certificates</h3>" in catalog and 'class="uc-id"' not in catalog
     assert "<h3>Renewable device certificates</h3>" in catalog
+    assert "<h3>Passcode-bound device certificates</h3>" in catalog
     assert evergreen.GUIDE.title == "Evergreen device certificates"
     assert evergreen.USE_CASES["uc04"].title == "Renewable device certificates"
     assert re.search(r'<button type="submit" formaction="/runs/new/evergreen" class="btn-sm btn-icon"\s+'
