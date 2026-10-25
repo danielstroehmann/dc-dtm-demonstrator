@@ -63,7 +63,8 @@ async def test_uc05_provisions_bound_passcodes_and_enrolls_in_the_field(store, e
         assert fake.passcode_usage(record) == 1, (cn, fake.passcode_usage(record))
     # provisioning statistics
     prov = r["provisioning"]
-    assert prov["count"] == count and prov["median_s"] > 0
+    # the fake answers in well under a millisecond – rounded to 3 decimals the median may be 0.0 (CI)
+    assert prov["count"] == count and prov["median_s"] >= 0
     assert_rates(prov, count, prov["duration_s"], slack=0.005)
     assert ("estimate_devices" in prov) == ("estimate_min" in prov) == (count > 1)
     assert ("estimate_devices" in r) == (count > 1)  # the enrollment estimate only for several devices
