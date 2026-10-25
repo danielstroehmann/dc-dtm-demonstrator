@@ -44,6 +44,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
   (12 h). Rotating `JWT_SECRET` invalidates all sessions.
 - CI deviation from commons git-workflow: a push to `dev` runs tests **and** publishes a
   preview image `:branch-dev` (no version, no release). Releases still only via `v*` tag (NFR-2).
+- Every release ships with release notes `docs/releases/vX.Y.Z.md` (the GitHub release body – CI refuses a
+  tag without it). Flow: tests green → review → dev → main → `release/vX.Y.Z` + tag → back to `dev`.
 
 ### DTM account scoping (global, all use cases)
 
@@ -62,6 +64,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - Test credentials live only in the local, gitignored `.env` – never in chat logs, docs or commits.
 
 ### UI (overrides commons ui-ux "unified look across projects")
+- Style guide and **quality bar** (one grid per row, phase boxes, no raw API text, less text, done = seen in the
+  browser): `docs/design/04-ui-design.md` – binding for every screen.
 - **Desktop browsers only** (author, 2026-10-25) – overrides the commons' iPhone target (and the mobile
   PageSpeed score): compact vertical spacing, fields and questions side by side; no mobile layout work.
 - Look & feel recognisable from **docs.digicert.com**: Roboto (self-hosted, OFL), DigiCert

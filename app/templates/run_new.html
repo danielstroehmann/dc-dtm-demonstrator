@@ -22,44 +22,47 @@
   {% if guide %}
   <section class="form-section">
     <header><h3>Issuance</h3></header>
+    {# Fixed slots (row/column): an answer shows or hides questions, it never moves the others #}
     <div class="fields q-grid">
-      {{ choice("key_location", "Where is the key pair generated?",
-                [("server", "In DTM (server-side)", ""), ("factory", "In the factory", "")], "server") }}
-      {{ choice("mode", "How many devices at once?", [("batch", "Batch", ""), ("single", "Single device", "")], "batch") }}
-      <div class="field" data-when="mode=batch">
-        <label for="count" class="field-label">Number of certificates</label>
-        <input id="count" type="number" name="count" class="short" value="10" min="1" max="{{ max_batch }}">
+      <div class="slot r1c1">{{ choice("key_location", "Key generation",
+                [("server", "DTM (server-side)", ""), ("factory", "Factory", "")], "server") }}</div>
+      <div class="slot r1c2 choice-with-count">
+        {{ choice("mode", "Devices", [("single", "Single", ""), ("batch", "Batch", "")], "batch") }}
+        <input id="count" type="number" name="count" class="short" value="2" min="1" max="{{ max_batch }}"
+               aria-label="Number of certificates" data-when="mode=batch">
       </div>
-      <div data-when="mode=single key_location=factory">
+      <div class="slot r1c3" data-when="mode=batch | key_location=server | auth_method=apikey">
+        {{ choice("variant", "Run via", [("api", "API (measured)", ""), ("webui", "DTM web UI", "")], "api") }}
+      </div>
+      <div class="slot r2c1" data-when="mode=single key_location=factory">
         {{ choice("protocol", "Protocol", [("rest", "REST API", ""), ("est", "EST", ""), ("cmpv2", "CMPv2", ""),
                                            ("scep", "SCEP", "")], "rest") }}
       </div>
-      <div data-when="mode=single key_location=factory">
-        {{ choice("auth_method", "How does the factory authenticate?",
+      <div class="slot r2c2" data-when="mode=single key_location=factory">
+        {{ choice("auth_method", "Authentication",
                   [("apikey", "API key", "protocol=rest"), ("passcode", "Passcode", ""),
                    ("certificate", "Factory certificate", "protocol=rest | protocol=est | protocol=cmpv2")], "apikey") }}
       </div>
-      <div data-when="mode=batch | key_location=server | auth_method=apikey">
-        {{ choice("variant", "Run it", [("api", "Via API (measured)", ""), ("webui", "In the DTM web UI", "")], "api") }}
-      </div>
+      <label class="slot r2c3 switch-cell" data-when="mode=batch variant=api" data-tip="Auto-approved by the demonstrator"><input type="checkbox" name="approval" value="true" role="switch"> Require approval</label>
     </div>
   </section>
   {% else %}
   <section class="form-section">
-    <header><h3>Enrollment</h3></header>
+    <header><h3>Issuance</h3></header>
     <div class="fields q-grid">
       {% if use_case_id == "uc05" %}
-      {{ choice("mode", "How many devices?", [("single", "Single device", ""), ("batch", "Batch", "")], "single") }}
-      <div class="field" data-when="mode=batch">
-        <label for="count" class="field-label">Number of devices (one passcode each)</label>
-        <input id="count" type="number" name="count" class="short" value="10" min="1" max="{{ max_passcode_batch }}">
+      {# Fixed slots: the count sits next to the choice, so nothing moves when Batch is picked #}
+      <div class="choice-with-count">
+        {{ choice("mode", "Devices", [("single", "Single", ""), ("batch", "Batch", "")], "single") }}
+        <input id="count" type="number" name="count" class="short" value="2" min="1" max="{{ max_passcode_batch }}"
+               aria-label="Number of devices" data-when="mode=batch">
       </div>
-      {{ choice("protocol", "Protocol in the field", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
-      <label class="switch-cell"><input type="checkbox" name="checks" value="true" role="switch" checked> Show what the passcode enforces</label>
+      {{ choice("protocol", "Protocol", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
+      <label class="switch-cell"><input type="checkbox" name="checks" value="true" role="switch" checked> Run the checks</label>
       <input type="hidden" name="variant" value="api">
       {% else %}
-      {{ choice("protocol", "Protocol (enrollment and renewal)", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
-      {{ choice("auth_method", "How does the factory authenticate?",
+      {{ choice("protocol", "Protocol", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
+      {{ choice("auth_method", "Authentication",
                 [("passcode", "Passcode", ""), ("certificate", "Factory certificate", "")], "passcode") }}
       <input type="hidden" name="count" value="1">
       <input type="hidden" name="variant" value="api"><input type="hidden" name="mode" value="single">
@@ -72,11 +75,11 @@
   <div class="field" {% if when %}data-when="{{ when }}"{% endif %}>
     <span class="field-label">Certificate profile</span>
     {% if profile_mode == "per_run" %}
-    <div class="readonly-value" tabindex="0" data-tip="Created for this run and deleted again by the full rollback">Own profile for this run</div>
-    <small class="field-help">{{ validity }} – deleted by the full rollback</small>
+    <div class="readonly-value" tabindex="0" data-tip="Deleted by the full rollback">Own profile for this run</div>
+    <small class="field-help">{{ validity }}</small>
     {% else %}
-    <div class="readonly-value mono" tabindex="0" data-tip="Shared per account and reused by every run – DTM on this platform does not allow deleting used profiles">{{ name }}</div>
-    <small class="field-help">{{ validity }}{% if profile_status.get(name) == "missing" %} – created or restored by this run, DTM keeps it{% elif profile_status.get(name) == "DISABLED" %} – retired, this run enables it again{% endif %}</small>
+    <div class="readonly-value mono" tabindex="0" data-tip="Shared per account – kept by DTM">{{ name }}</div>
+    <small class="field-help">{{ validity }}{% if profile_status.get(name) == "missing" %} · new{% elif profile_status.get(name) == "DISABLED" %} · enabled again{% endif %}</small>
     {% endif %}
   </div>
   {%- endmacro %}
@@ -105,7 +108,6 @@
         <input id="run_id" name="run_id" value="{{ default_run_id }}" pattern="[a-z0-9]{1,16}" maxlength="16" aria-describedby="run-id-help">
         <small id="run-id-help" class="field-help">a–z, 0–9, max. 16</small>
       </div>
-      {% if guide %}<label class="switch-cell" data-when="mode=batch variant=api"><input type="checkbox" name="approval" value="true" role="switch"> Require approval (auto-approved)</label>{% endif %}
     </div>
   </section>
   <div class="action-bar">

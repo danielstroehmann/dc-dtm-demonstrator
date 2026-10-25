@@ -40,8 +40,8 @@ def two(store, auth, fakes, data_dir):
 def test_catalog_offers_a_connection_select(two, store):
     html = two.get("/runs/new").text
     assert '<select name="connection"' in html
-    assert re.search(rf'<option value="{two.ids["US"]}" selected>US – {HOST}</option>', html)
-    assert re.search(rf'<option value="{two.ids["NL"]}" >NL – {HOST}</option>', html)
+    assert re.search(rf'<option value="{two.ids["US"]}" selected>US · {HOST}</option>', html)
+    assert re.search(rf'<option value="{two.ids["NL"]}" >NL · {HOST}</option>', html)
     store.set_default_connection(two.ids["NL"])
     assert re.search(rf'<option value="{two.ids["NL"]}" selected>', two.get("/runs/new").text)
     assert re.search(rf'<option value="{two.ids["NL"]}" selected>', two.get(f"/runs/new?connection={two.ids['NL']}").text)
@@ -235,3 +235,18 @@ def test_tooltip_selector_covers_all_table_kinds(web):
     selector = re.search(r'const TRUNCATING = "([^"]+)"', js).group(1)
     parts = {p.strip() for p in selector.split(",")}
     assert {"table.compact td", "table.compact th", "table.data-table td", "table.data-table th"} <= parts
+
+
+
+def test_several_connections_on_the_same_host_can_be_saved(two, store, fakes):
+    """Only the name must be unique – several accounts (and keys) on one host are fine (author)."""
+    def save(**form):
+        data = {"name": "x", "host": HOST, "account_id": ACCOUNT_ID, "api_key": API_KEY} | form
+        return two.post("/settings/connections", data=data, follow_redirects=False)
+    assert save(name="US again").status_code == 303  # same host, same account, another name
+    assert save(name="NL again", account_id=OTHER_ACCOUNT_ID, api_key=KEY_B).status_code == 303
+    assert sorted((c["name"], c["host"], c["account_id"]) for c in store.connections()) == sorted([
+        ("US", HOST, ACCOUNT_ID), ("NL", HOST, OTHER_ACCOUNT_ID),
+        ("US again", HOST, ACCOUNT_ID), ("NL again", HOST, OTHER_ACCOUNT_ID)])
+    response = save(name="us AGAIN", account_id=OTHER_ACCOUNT_ID, api_key=KEY_B)
+    assert response.status_code == 400 and "already exists" in response.text and len(store.connections()) == 4

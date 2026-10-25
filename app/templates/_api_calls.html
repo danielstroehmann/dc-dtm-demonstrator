@@ -11,7 +11,7 @@
 {% set field = calls | selectattr("phase", "equalto", "field") | list if has_phase else [] %}
 <article class="card api-calls" id="api-calls">
   <div class="card-head">
-    <h2>Reproducible Steps</h2>
+    <h2>Reproducible steps</h2>
     <div class="actions">
       <nav class="tabs" aria-label="Command-line flavour">
         {% for key, label in snippets.DIALECTS.items() %}
@@ -30,7 +30,7 @@
 
   {% if setup %}
   <details class="box neutral">
-    <summary>One-Time Setup</summary>
+    <summary>One-time setup</summary>
     <div class="box-head"><span></span><button class="btn-sm outline" data-copy="script-setup-{{ dialect }}">Copy as script</button></div>
     {% with phase = "setup", group = setup %}{% include "_api_call_list.html" %}{% endwith %}
     <pre id="script-setup-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "setup") }}</pre>
@@ -40,7 +40,7 @@
   {% if recurring %}
   <section class="box accent">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory Enrollment", "uc05": "Factory Provisioning"}.get(run.use_case, "Certificate Order") }}</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory enrollment", "uc05": "Factory provisioning"}.get(run.use_case, "Certificate order") }}</h3>
       <button class="btn-sm outline" data-copy="script-recurring-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "recurring", group = recurring %}{% include "_api_call_list.html" %}{% endwith %}
@@ -50,7 +50,7 @@
   {% if field %}
   <section class="box accent field">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Enrollment in the Field</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Enrollment in the field</h3>
       <button class="btn-sm outline" data-copy="script-field-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "field", group = field %}{% include "_api_call_list.html" %}{% endwith %}
@@ -60,7 +60,7 @@
   {% if renewal %}
   <section class="box accent field">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Renewal in the Field</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Renewal in the field</h3>
       <button class="btn-sm outline" data-copy="script-renewal-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "renewal", group = renewal %}{% include "_api_call_list.html" %}{% endwith %}

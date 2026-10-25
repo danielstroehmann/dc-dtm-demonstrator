@@ -5,16 +5,23 @@
     <label>Name
       <input name="name" value="{{ form.name or '' }}" required maxlength="40" placeholder="e.g. US demo">
     </label>
+    {# Only the supported platforms; several accounts per host are fine. An older connection on another
+       host keeps it as an option, so it stays editable (e.g. a new API key) until it is deleted. #}
     <label>Host
-      <input name="host" value="{{ form.host or '' }}" required pattern="[a-z0-9.\-]+\.[a-z]{2,}">
+      <select name="host" required>
+        {% for host, region in platform_regions.items() %}<option value="{{ host }}" {% if form.host == host %}selected{% endif %}>{{ host }} · {{ region }}</option>{% endfor %}
+        {% if form.id and form.host and form.host not in platform_regions %}<option value="{{ form.host }}" selected>{{ form.host }} · unsupported</option>{% endif %}
+      </select>
     </label>
   </div>
-  <label>Account ID
-    <input name="account_id" value="{{ form.account_id or '' }}" required placeholder="UUID of the DTM account">
-  </label>
-  <label>API key {% if form.has_key %}<small class="muted">(configured – leave empty to keep it)</small>{% endif %}
-    <input type="password" name="api_key" autocomplete="off" {% if not form.has_key %}required{% endif %}>
-  </label>
+  <div class="field-row">
+    <label>Account ID
+      <input name="account_id" value="{{ form.account_id or '' }}" required placeholder="UUID of the DTM account">
+    </label>
+    <label>API key {% if form.has_key %}<small class="muted">(configured – leave empty to keep it)</small>{% endif %}
+      <input type="password" name="api_key" autocomplete="off" {% if not form.has_key %}required{% endif %}>
+    </label>
+  </div>
   <div class="action-bar">
     {% if form.id %}<a href="/settings" class="link">Cancel</a>{% endif %}
     <button type="submit" {% if not connections %}class="cta"{% endif %}>Check and save</button>

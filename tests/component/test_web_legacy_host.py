@@ -62,7 +62,7 @@ def test_legacy_connection_can_move_to_a_supported_host(user, store, legacy):
 def test_profiles_part_for_an_unsupported_platform(user, legacy, fake):
     fake.requests.clear()
     html = user.get(f"/settings/connections/{legacy['id']}/profiles").text
-    assert "Unsupported platform – no new runs; existing runs can still be rolled back." in html
+    assert "<span class=\"meta\">Unsupported platform – no new runs.</span>" in html
     assert "One profile per run" not in html and fake.requests == []
 
 
@@ -70,6 +70,6 @@ def test_profiles_part_texts_per_platform(user, store, fake):
     store.save_connection(None, "NL", NL_HOST, ACCOUNT_ID, API_KEY)
     nl = next(c for c in store.connections() if c["host"] == NL_HOST)
     html = user.get(f"/settings/connections/{nl['id']}/profiles").text
-    assert "One profile per run, deleted by the full rollback – nothing shared." in html
+    assert '<span class="meta">One profile per run.</span>' in html
     assert "Unsupported platform" not in html
     assert HOST != NL_HOST

@@ -12,15 +12,15 @@
         <div><span class="name">{{ c.name }}</span>{% if c.is_default %} <span class="badge">Default</span>{% endif %}
           <span class="meta">{{ c.host }} · <span class="mono">{{ c.account_id }}</span></span>
           <details class="shared-profiles-toggle" hx-get="/settings/connections/{{ c.id }}/profiles" hx-trigger="toggle once"
-                   hx-target="find .shared-profiles-body"><summary class="meta">{{ "Shared profiles" if platforms.get(c.host) == "shared" else "Profiles" }}</summary>
+                   hx-target="find .shared-profiles-body"><summary class="meta">Profiles: {{ "shared" if platforms.get(c.host) == "shared" else "per run" if platforms.get(c.host) else "–" }}</summary>
             <div class="shared-profiles-body"><span class="meta">Loading…</span></div></details></div>
         <div class="actions">
-          <a href="/settings?edit={{ c.id }}#connection-form" role="button" class="outline btn-sm">Edit</a>
           {% if not c.is_default %}
           <form method="post" action="/settings/connections/{{ c.id }}/default" class="inline">
             <button type="submit" class="outline btn-sm">Make default</button>
           </form>
           {% endif %}
+          <a href="/settings?edit={{ c.id }}#connection-form" role="button" class="outline btn-sm">Edit</a>
           {% if in_use[c.id] %}
           <span data-tip="Has runs that are not rolled back" tabindex="0"><button type="button" class="outline secondary btn-sm" disabled>Delete</button></span>
           {% else %}

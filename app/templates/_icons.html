@@ -2,17 +2,17 @@
 {% macro icon(name) -%}
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
 {%- if name == "shield" %}<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>
+{%- elif name == "infinity" %}<path d="M12 12c-2-2.7-4-4-6-4a4 4 0 0 0 0 8c2 0 4-1.3 6-4zm0 0c2 2.7 4 4 6 4a4 4 0 0 0 0-8c-2 0-4 1.3-6 4z"/>
 {%- elif name == "key" %}<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>
 {%- elif name == "factory" %}<path d="M3 21V10l6 4V10l6 4V6l6 3v12z"/><path d="M7 17h2M12 17h2M17 17h1"/>
 {%- elif name == "exchange" %}<path d="M4 8h14l-3-3M20 16H6l3 3"/>
 {%- elif name == "refresh" %}<path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/>
 {%- elif name == "logout" %}<path d="M15 4h4v16h-4M10 16l-4-4 4-4M6 12h10"/>
-{%- elif name == "undo" %}<path d="M4 4v6h6"/><path d="M4.6 15a8 8 0 1 0 1.9-8.3L4 10"/>
 {%- elif name == "play" %}<path d="M8 5v14l11-7z"/>
 {%- elif name == "inbox" %}<path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1 2h6l1-2h5"/>
 {%- endif %}</svg>
 {%- endmacro %}
 {% macro pill(status) -%}
-{%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "renewing": "run", "active": "ok"}.get(status, "") -%}
+{%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "renewing": "run", "active": "ok", "passed": "ok"}.get(status, "") -%}
 <span class="pill {{ kind }}">{{ status }}</span>
 {%- endmacro %}

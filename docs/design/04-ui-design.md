@@ -27,6 +27,20 @@ default full-width submit buttons on every form.
 | Icons | Inline SVG, stroke style, `currentColor`, `aria-hidden` – no icon font, no images (Lighthouse 100) |
 | Motion | Only hover lift on tiles and the running pill; all off under `prefers-reduced-motion` |
 
+## Quality bar (author, 2026-10-25 – binding, reference: the UC-5 run overview)
+
+Desktop browsers only. A screen is done when it passes these – checked on the real page, not in the code.
+
+| Rule | Detail |
+|---|---|
+| **One grid per row** | Elements side by side share one grid: same number of columns, equal widths, equal box heights, shared top and bottom edges (form controls: `--control-h`) |
+| **Phases** | Factory = blue box (`.box.accent`) with factory icon chip; field = orange box (`.box.accent.field`) with its own chip. Same look in the overview and in the reproducible steps; two phases with results stand side by side (`.phase-pair`) |
+| **Metric groups** | At most four metrics per group, in a fixed grid (`.metrics-4`); short labels ("Per minute"), the unit in the value |
+| **Outcomes** | Checks: pill *passed* / *failed* plus DTM's own message (`dtm_message`) – never raw JSON or API text; the full answer only as tooltip. Raw API lines belong in the timeline's API entries and the reproducible steps only |
+| **Less text** | No meta lines that repeat what the page already says (counts, protocol, names – the header line has the context); headings are short noun phrases ("Passcode enforced") |
+| **Labels are terms** | Expert tool: field labels are nouns ("Key generation", "Devices", "Authentication", "Run via"), never questions – the options say the rest ("DTM (server-side)" / "Factory"); no explanations that repeat a badge or the block a step is in |
+| **Done means seen** | Screenshot review on `https://localhost:8443` with real data at ~1440, 1280 and 1024 px; a new view also gets a separate UX reviewer. Tests and code review do not replace this |
+
 ## Screens
 
 | # | Screen | Concept |

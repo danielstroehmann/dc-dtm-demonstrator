@@ -99,7 +99,7 @@ class GuideForm:
                     all(values.get(c.split("=")[0]) == c.split("=", 1)[1] for c in group.split())
                     for group in node.attrs["data-when"].split("|"))
                 node.hidden = not show
-                for child in node.walk():
+                for child in (node, *node.walk()):  # as app.js: the node itself may be the input
                     if child.tag in ("input", "select"):
                         child.disabled = not show
             if [n.hidden for n in self.nodes if "data-when" in n.attrs] == before:

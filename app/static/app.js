@@ -86,7 +86,9 @@ function showQuestions(form) {
           return values[name] === value;
         }));
       el.hidden = !show;
-      el.querySelectorAll("input, select").forEach((input) => { input.disabled = !show; });
+      // the element itself may be the input (the inline count) – disable it too, so it is not submitted
+      [el, ...el.querySelectorAll("input, select")].filter((n) => n.matches("input, select"))
+        .forEach((input) => { input.disabled = !show; });
     });
     if ([...form.querySelectorAll("[data-when]")].map((el) => el.hidden).join() === before) return;
   }

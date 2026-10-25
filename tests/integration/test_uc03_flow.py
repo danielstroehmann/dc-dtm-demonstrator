@@ -276,8 +276,8 @@ async def test_local_steps_read_the_ids_from_the_previous_outputs(store, enroll_
     assert run["status"] == "completed", run["error"]
     calls = run["result"]["api_calls"]
     purposes = [c["purpose"] for c in calls]
-    ref_step = "Read the passcode reference CMPv2 sends as sender ID (local)"
-    id_step = f"Read the policy's short ID for the {enrollment.PROTOCOLS[protocol]} endpoint (local)"
+    ref_step = "Extract the passcode reference (CMPv2 sender ID)"
+    id_step = "Extract the policy's short ID"
     if protocol == "cmpv2" and auth == "passcode":
         i = purposes.index(ref_step)
         assert calls[i - 1]["path"] == enrollment.PASSCODE_PATH  # right after creating the passcode
@@ -289,7 +289,7 @@ async def test_local_steps_read_the_ids_from_the_previous_outputs(store, enroll_
         assert calls[i - 1]["method"] == "GET" and calls[i - 1]["spec"]["output"] == "policy.json"
         assert (calls[i]["method"], calls[i]["phase"], calls[i]["spec"]) == ("LOCAL", "setup", {"command": READ_CMP_ID})
     else:
-        assert not any(p.startswith("Read the policy's short ID") for p in purposes)
+        assert not any(p.startswith("Extract the policy's short ID") for p in purposes)
     if auth == "passcode":
         assert enroll_net.active_auth("passcode")[0]["body"]["passcode"] not in all_snippets(run) + db_text(store, "rid")
 

@@ -218,12 +218,13 @@ def test_progress_roundtrip_and_clear(store):
         assert db.execute("SELECT progress FROM runs WHERE id = 'p'").fetchone()[0] is None  # NULL, not 'null'
 
 
-def test_list_runs_skips_heavy_columns(store):
+def test_list_runs_skips_heavy_columns_but_keeps_progress(store):
     store.create_run("a1", "uc01", {"mode": "batch"})
     store.update_run("a1", status="completed", result={"certificates": [{"x": 1}] * 100},
                      progress={"label": "x"}, cleanup_mode="full", cleanup_status="done")
     listed = store.list_runs()[0]
-    assert listed["result"] is None and listed["progress"] is None
+    assert listed["result"] is None  # the heavy column stays out of the list
+    assert listed["progress"] == {"label": "x"}  # the row shows a running rollback's progress
     assert (listed["status"], listed["cleanup_mode"], listed["cleanup_status"], listed["params"]) == (
         "completed", "full", "done", {"mode": "batch"})
     assert store.get_run("a1")["result"]["certificates"][0] == {"x": 1}  # still there for the run page
@@ -343,3 +344,19 @@ def test_failed_delete_connection_leaves_no_open_transaction(store, monkeypatch)
     assert store.connection(first) is not None  # the DELETE was rolled back
     store.set_setting("after", "1")
     assert not real.in_transaction
+
+
+
+def test_restart_clears_every_progress(tmp_path):
+    from app.store import Store
+    path = tmp_path / "p.sqlite"
+    before = Store(path)
+    before.create_run("c1", "uc01", {})
+    before.update_run("c1", status="completed", cleanup_status="running",
+                      progress={"label": "Revoking", "total": 4, "done": 2})
+    before.create_run("r1", "uc01", {})
+    before.update_run("r1", status="running", progress={"label": "Requesting", "total": 3, "done": 1})
+    after = Store(path)
+    after.mark_interrupted()
+    assert after.get_run("c1")["cleanup_status"] == "interrupted" and after.get_run("c1")["progress"] is None
+    assert after.get_run("r1")["status"] == "interrupted" and after.get_run("r1")["progress"] is None

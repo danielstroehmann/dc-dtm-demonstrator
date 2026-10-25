@@ -2,8 +2,13 @@
 {% block title %}Error · DTM Demonstrator{% endblock %}
 {% block content %}
 <article class="card">
+  {% if status == 404 %}
+  <div class="card-head"><h2>Not found</h2></div>
+  <p>{{ message }}</p>
+  {% else %}
   <div class="card-head"><h2>Something went wrong</h2></div>
   <p class="error" role="alert">{{ message }}</p>
+  {% endif %}
   <div class="action-bar"><a href="/" role="button" class="outline btn-sm">Back to runs</a></div>
 </article>
 {% endblock %}

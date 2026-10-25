@@ -1,22 +1,35 @@
 {# Static part of the run page – not polled, so paging and open details survive a running cleanup. #}
-{% from "_icons.html" import pill %}
+{% from "_icons.html" import icon, pill %}
 {% set r = run.result %}
 {# A web UI batch run waiting for the portal has nothing to show yet – no empty card #}
 {% if r.duration_s is defined or r.response or r.portal_values or r.checks %}
 <article class="card">
   <div class="card-head"><h2>Overview</h2></div>
   {% if r.provisioning %}{% set pv = r.provisioning %}
-  <p class="metrics-title">Factory provisioning – {{ pv.count }} one-time passcode{{ "s" if pv.count != 1 }}</p>
-  <div class="grid metrics">
-    <div><small>All passcodes</small><p class="metric">{{ pv.duration_s }} s</p></div>
-    {% if pv.per_certificate_s %}<div><small>Time per passcode</small><p class="metric">{{ pv.per_certificate_s }} s</p></div>{% endif %}
-    {% if pv.per_minute %}<div><small>Passcodes per minute</small><p class="metric">{{ pv.per_minute }}</p></div>{% endif %}
-    <div><small data-tip="Median of one passcode request">Median</small><p class="metric">{{ pv.median_s }} s</p></div>
-    {% if pv.estimate_min is defined %}<div><small data-tip="Median per passcode, one station, sequential">{{ "{:,}".format(pv.estimate_devices) }} passcodes ≈</small><p class="metric">{{ pv.estimate_min }} min</p></div>{% endif %}
+  {# UC-5: the two phases side by side, in the colours of the reproducible steps; same four columns each #}
+  <div class="phase-pair">
+    <section class="box accent">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>Factory provisioning</h3></div>
+      <div class="metrics metrics-4">
+        <div><small>All passcodes</small><p class="metric">{{ pv.duration_s }} s</p></div>
+        <div><small>Per passcode</small><p class="metric">{{ "%.2f" | format(pv.per_certificate_s or pv.duration_s) }} s</p></div>
+        <div><small>Per minute</small><p class="metric">{{ pv.per_minute or "–" }}</p></div>
+        {% if pv.estimate_min is defined %}<div><small data-tip="Median per passcode, one station, sequential">{{ "{:,}".format(pv.estimate_devices) }} passcodes ≈</small><p class="metric">{{ pv.estimate_min }} min</p></div>
+        {% else %}<div><small data-tip="Median of one passcode request">Median</small><p class="metric">{{ "%.2f" | format(pv.median_s) }} s</p></div>{% endif %}
+      </div>
+    </section>
+    <section class="box accent field">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Enrollment in the field</h3></div>
+      <div class="metrics metrics-4">
+        <div><small>All requests</small><p class="metric">{{ r.duration_s }} s</p></div>
+        <div><small>Per certificate</small><p class="metric">{{ "%.2f" | format(r.per_certificate_s or r.duration_s) }} s</p></div>
+        <div><small>Per minute</small><p class="metric">{{ r.per_minute or "–" }}</p></div>
+        {% if r.estimate_min is defined %}<div><small data-tip="Median per device (key generation + request), one station, sequential">{{ "{:,}".format(r.estimate_devices) }} devices ≈</small><p class="metric">{{ r.estimate_min }} min</p></div>
+        {% else %}<div><small data-tip="Key pair and CSR generated on the device">Key generation</small><p class="metric">{{ r.keygen_s }} s</p></div>{% endif %}
+      </div>
+    </section>
   </div>
-  <p class="metrics-title">Enrollment in the field</p>
-  {% endif %}
-  {% if r.duration_s is defined %}
+  {% elif r.duration_s is defined %}
   <div class="grid metrics">
     <div><small>{{ "Upload done → completed" if run.params.mode == "batch" and not run.params.protocol else "All requests" }}</small><p class="metric">{{ r.duration_s }} s</p></div>
     {% if r.estimate_min is defined %}<div><small data-tip="Median per device (key generation + request), one station, sequential">{{ "{:,}".format(r.estimate_devices) }} devices ≈</small><p class="metric">{{ r.estimate_min }} min</p></div>{% endif %}
@@ -30,17 +43,14 @@
     <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
   </div>
   {% endif %}
-  {% if r.response %}
-  <details><summary>{{ "First enrollment" if run.params.protocol else "DTM response (first request)" }}</summary>
-    <dl class="kv">{% for k, v in r.response.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
-  </details>
-  {% endif %}
   {% if r.checks %}
-  <section class="box accent">
-    <div class="box-head"><h3>What the passcode enforces <small>bound to <span class="mono">{{ r.bound_cn }}</span></small></h3></div>
-    <table class="compact data-table">
-      <thead><tr><th>Check</th><th>Expected</th><th>DTM</th></tr></thead>
-      <tbody>{% for c in r.checks %}<tr><td>{{ c.check }}</td><td>{{ c.expected }}</td><td>{{ pill("completed" if c.ok else "failed") }} {{ c.outcome }}</td></tr>{% endfor %}</tbody>
+  <section class="checks">
+    <div class="box-head"><h3>Passcode enforced</h3></div>
+    <table class="data-table checks-table">
+      <colgroup><col class="c-check"><col class="c-expected"><col></colgroup>
+      <thead><tr><th>Check</th><th>Expected</th><th>Result</th></tr></thead>
+      <tbody>{% for c in r.checks %}<tr><td>{{ c.check }}</td><td>{{ c.expected }}</td>
+        <td data-tip="{{ c.detail or c.outcome }}">{{ pill("passed" if c.ok else "failed") }} {{ c.outcome | dtm_message }}</td></tr>{% endfor %}</tbody>
     </table>
   </section>
   {% endif %}
@@ -49,6 +59,11 @@
     <div class="box-head"><h3>Enter in DTM web UI <small>policy {{ r.policy }}</small></h3></div>
     <dl class="kv">{% for k, v in r.portal_values.items() %}<dt>{{ k }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
   </section>
+  {% endif %}
+  {% if r.response %}
+  <details class="overview-details"><summary>{{ "First enrollment" if run.params.protocol else "DTM response (first request)" }}</summary>
+    <dl class="kv">{% for k, v in r.response.items() %}<dt>{{ k | replace("_", " ") | capitalize }}</dt><dd><code>{{ v }}</code></dd>{% endfor %}</dl>
+  </details>
   {% endif %}
 </article>
 {% endif %}

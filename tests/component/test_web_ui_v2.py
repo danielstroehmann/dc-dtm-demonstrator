@@ -40,7 +40,8 @@ def test_unconfigured_home_is_the_welcome_page(user):
     assert stepper(html, "Getting started") == [
         ("current", True, "Connect DTM"), ("", False, "Choose a use case"), ("", False, "Run and roll back")]
     assert '<form method="post" action="/settings/connections">' in html
-    assert 'name="host" value="one.digicert.com"' in html
+    assert host_options(html) == [("one.digicert.com", True, "one.digicert.com · US"),
+                                  ("one.nl.digicert.com", False, "one.nl.digicert.com · NL")]  # US preselected
     assert '<button type="submit" class="cta">Check and save</button>' in html
     assert 'class="tile"' not in html and "formaction" not in html and "<table" not in html
     assert 'name="id"' not in html  # a new connection, not an edit
@@ -51,7 +52,7 @@ def test_first_connection_redirects_home_later_ones_to_settings(user, store, fak
     first = save(user, name="US")
     assert first.status_code == 303 and first.headers["location"] == "/"
     home = user.get("/").text
-    assert "<h1>Start a demo</h1>" in home and "<h1>Welcome</h1>" not in home
+    assert '<article class="tile">' in home and "<h1>Welcome</h1>" not in home and "<h1>" not in home
     second = save(user, name="US backup")  # the fake DTM knows one account; a second name is enough
     assert second.status_code == 303 and second.headers["location"] == "/settings"
     (us,) = [c for c in store.connections() if c["name"] == "US"]
@@ -98,7 +99,7 @@ def test_failed_later_save_stays_on_settings(configured_user, store, fake):
 
 def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fake):
     html = configured_user.get("/").text
-    assert "<h1>Start a demo</h1>" in html and "<h1>Welcome</h1>" not in html
+    assert "<h1>" not in html  # no "Start a demo" heading – the tiles say it (author: less text)
     assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 3
     for key, use_case in evergreen.CATALOG.items():
         assert html.count(f'formaction="/runs/new/{key}"') == 1
@@ -124,7 +125,7 @@ def test_connection_select_only_with_several_connections(two, store):
     assert html.count('<select name="connection"') == 1 and '<input type="hidden" name="connection"' not in html
     options = re.findall(r'<option value="(\d+)"\s*(selected)?>([^<]+)</option>', html)
     assert {int(v): bool(sel) for v, sel, _ in options} == {two.ids["US"]: True, two.ids["NL"]: False}
-    assert f"US – {HOST}" in html and f"NL – {HOST}" in html
+    assert f"US · {HOST}" in html and f"NL · {HOST}" in html
     store.set_default_connection(two.ids["NL"])
     options = re.findall(r'<option value="(\d+)"\s*(selected)?>', two.get("/").text)
     assert {int(v) for v, sel in options if sel} == {two.ids["NL"]}
@@ -144,7 +145,7 @@ def test_recent_runs_status_pills(configured_store, user, store, status, kind):
     store.update_run("p1", status=status)
     html = user.get("/").text
     assert "No runs yet." not in html
-    row = re.search(r'<tr>\s*<td><a href="/runs/p1">p1</a></td>.*?</tr>', html, re.S).group(0)
+    row = re.search(r'<tr id="run-p1"[^>]*>\s*<td><a href="/runs/p1">p1</a></td>.*?</tr>', html, re.S).group(0)
     assert f'<span class="pill {kind}">{status}</span>' in row
     assert "<td>–</td>" in row  # no cleanup yet
 
@@ -153,7 +154,8 @@ def test_recent_runs_status_pills(configured_store, user, store, status, kind):
 def test_recent_runs_cleanup_pill(configured_store, user, store, cleanup_status, kind):
     store.create_run("p2", "uc01", BASE_PARAMS)
     store.update_run("p2", status="completed", cleanup_status=cleanup_status)
-    row = re.search(r'<tr>\s*<td><a href="/runs/p2">p2</a></td>.*?</tr>', user.get("/").text, re.S).group(0)
+    row = re.search(r'<tr id="run-p2"[^>]*>\s*<td><a href="/runs/p2">p2</a></td>.*?</tr>', user.get("/").text,
+                    re.S).group(0)
     assert row.count('<span class="pill ') == 2
     assert f'<span class="pill {kind}">{cleanup_status}</span>' in row
 
@@ -183,9 +185,10 @@ def test_header_chip_follows_the_default(two, store):
 
 def test_nav_marks_the_current_section(configured_user, store):
     store.create_run("c1", "uc01", BASE_PARAMS)
-    # only the exact section pages are "current"; deeper pages carry their own breadcrumb
+    # section pages are "current"; run pages and run forms belong to Runs; the catalog has its breadcrumb
     expected = {"/": ["Runs"], "/settings": ["Settings"], "/settings?edit=1": ["Settings"],
-                "/runs/new": [], "/runs/c1": [], "/runs/new/uc01": [], "/nope": []}
+                "/runs/new": [], "/runs/c1": ["Runs"], "/runs/new/uc01": ["Runs"], "/runs/new/evergreen": ["Runs"],
+                "/runs/new/uc04": ["Runs"], "/runs/new/uc05": ["Runs"], "/nope": []}
     assert {path: nav_current(configured_user.get(path).text) for path in expected} == expected
 
 
@@ -205,7 +208,8 @@ def test_anonymous_error_pages_have_no_app_shell(configured_store, web, method, 
     response = web.request(method, path, data={} if method != "get" else None, follow_redirects=False)
     assert response.status_code == status
     html = response.text
-    assert "Something went wrong" in html  # still the error page …
+    # still the error page (404: "Not found", plain text; other errors: "Something went wrong" + alert) …
+    assert ("<h2>Not found</h2>" if status == 404 else "<h2>Something went wrong</h2>") in html
     # … but without what only a logged-in user may see: connection name/host, navigation, log-out
     assert "conn-chip" not in html and f"Default · {HOST}" not in html
     assert 'class="nav-link"' not in html and 'action="/logout"' not in html
@@ -213,7 +217,7 @@ def test_anonymous_error_pages_have_no_app_shell(configured_store, web, method, 
 
 def test_logged_in_error_page_keeps_the_app_shell(configured_user):
     html = configured_user.get("/nope").text
-    assert "Something went wrong" in html and 'class="conn-chip"' in html and 'action="/logout"' in html
+    assert "<h2>Not found</h2>" in html and 'class="conn-chip"' in html and 'action="/logout"' in html
 
 
 # --- run page: header pill, phase stepper, live line ------------------------------------------------
@@ -278,7 +282,7 @@ def test_connection_name_is_escaped_in_chip_select_and_run_pages(user, store):
         chip = re.search(r'<a href="/settings" class="conn-chip"[^>]*>', html).group(0)
         assert 'onerror' not in chip or escaped in chip, path  # a name in the chip tooltip is escaped too
     home = user.get("/").text
-    assert f"<option value=\"{a}\" selected>{escaped} – {HOST}</option>" in home
+    assert f"<option value=\"{a}\" selected>{escaped} · {HOST}</option>" in home
     assert f"<td>{escaped}</td>" in home  # runs table, connection column (two connections)
     assert f"· {escaped}</p>" in user.get("/runs/x1").text
 
@@ -294,7 +298,7 @@ def test_use_case_title_is_escaped_in_tiles_and_tooltips(configured_store, user,
     assert hostile not in html and 'onmouseover="alert(1)' not in html
     escaped = "T&#34; onmouseover=&#34;alert(1)"
     assert f'aria-label="Start {escaped}"' in html  # tile button attribute
-    assert f"<td>{escaped} · batch (3)</td>" in html  # runs table use-case cell (text, no tooltip attribute)
+    assert f"<td>{escaped}</td>" in html  # runs table use-case cell (text, no tooltip attribute)
     page = user.get("/runs/t1").text
     assert hostile not in page and 'onmouseover="alert(1)' not in page
     assert f"<p>{escaped} · Batch (3)" in page  # run page title line
@@ -331,11 +335,39 @@ def test_app_css_loads_after_pico(configured_user):
 
 
 def test_single_line_controls_share_one_height():
-    """Controls in one question row line up: inputs, selects, read-only values and segmented
-    buttons all take --control-h (a CSS contract; the look itself was verified in Chrome)."""
+    """Controls in one row line up: every single-line control in any form (selects, inputs but
+    radio/checkbox/hidden), read-only values and segmented buttons take --control-h (a CSS contract;
+    the look itself was verified in Chrome)."""
     rules = css_rules((STATIC / "app.css").read_text())
     sized = {sel for selectors, decls in rules if decls.get("height") == "var(--control-h)" for sel in selectors}
-    for selector in (".segmented", ".readonly-value", ".q-grid .field select",
-                     ".q-grid .field input:not([type=radio]):not([type=checkbox])"):
+    for selector in (".segmented", ".readonly-value", "form select",
+                     "form input:not([type=radio]):not([type=checkbox]):not([type=hidden])"):
         assert selector in sized, selector
     assert any("--control-h" in decls for _, decls in rules)  # defined once, not hard-coded per control
+
+
+
+def host_options(html: str) -> list[tuple[str, bool, str]]:
+    """(value, selected, label) of the connection form's host select."""
+    select = re.search(r'<select name="host" required>(.*?)</select>', html, re.S)
+    assert select, "no host select"
+    return [(v, bool(sel), label) for v, sel, label in
+            re.findall(r'<option value="([^"]+)" ?(selected)?>([^<]+)</option>', select.group(1))]
+
+
+def test_one_grid_per_row_contract():
+    """Author's quality bar: elements side by side share one grid – the connection select is exactly
+    one tile wide, questions sit in three equal columns, every row action has the same box."""
+    rules = css_rules((STATIC / "app.css").read_text())
+
+    def decl(selector, prop):
+        return [d[prop] for sels, d in rules if selector in sels and prop in d]
+    assert "repeat(3, minmax(0, 1fr))" in decl(".tiles", "grid-template-columns")
+    assert "repeat(3, minmax(0, 1fr))" in decl(".q-grid", "grid-template-columns")
+    assert decl(".conn-select", "width") == ["calc((100% - 2 * var(--s4)) / 3)"]  # gap of .tiles is --s4
+    assert "var(--s4)" in decl(".tiles", "gap")[0]
+    assert decl(".actions-cell .row-action", "width") == ["7.5rem"]
+    assert decl(".actions-cell .row-action", "height") == ["1.75rem"]
+    assert decl("table.runs-table td", "line-height") == ["1.75rem"]  # = the action box
+    widths = {s: d["width"] for sels, d in rules for s in sels if s.startswith(".rollback-meter.p-") and "width" in d}
+    assert widths == {f".rollback-meter.p-{p}::before": f"{p}%" for p in range(0, 101, 5)}  # every step the row uses

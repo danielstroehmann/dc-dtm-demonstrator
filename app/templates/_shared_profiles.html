@@ -2,8 +2,8 @@
 {# Shared profiles of one account (US) – loaded on demand; created once by the first run that needs them,
    never deleted. NL: one profile per run instead. #}
 <div class="shared-profiles" id="shared-profiles-{{ connection.id }}">
-  {% if per_run %}<span class="meta">One profile per run, deleted by the full rollback – nothing shared.</span>
-  {% elif unsupported %}<span class="meta">Unsupported platform – no new runs; existing runs can still be rolled back.</span>
+  {% if per_run %}<span class="meta">One profile per run.</span>
+  {% elif unsupported %}<span class="meta">Unsupported platform – no new runs.</span>
   {% elif error %}<span class="meta error" data-tip="{{ error }}">{{ "Retiring failed" if error.startswith("Retiring") else "Could not be loaded from DTM" }}</span>
   {% else %}
   <ul class="plain">{% for name, state in status.items() %}

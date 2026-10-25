@@ -4,7 +4,7 @@
 {% block content %}
 {% set p = run.params %}
 {% set finished = run.result and run.status not in ("pending", "running") %}
-{# Phases: Run → Result → Clean up. The page reloads at every phase change (HX-Refresh / form POST). #}
+{# Phases: Run → Result → Clean up (started from the runs list). The page reloads at every phase change (HX-Refresh). #}
 {% if rolled_back %}{% set phase = 4 %}{% elif run.cleanup_status %}{% set phase = 3 %}
 {% elif run.status in ("pending", "running") %}{% set phase = 1 %}{% else %}{% set phase = 2 %}{% endif %}
 <nav aria-label="breadcrumb"><ul><li><a href="/">Runs</a></li><li>{{ run.id }}</li></ul></nav>
@@ -20,8 +20,6 @@
 {% include "_run_live.html" %}
 {% if finished %}{% include "_result_overview.html" %}{% endif %}
 {% if run.use_case == "uc04" and run.status in ("completed", "renewing") and not run.cleanup_status %}{% include "_renew.html" %}{% endif %}
-{% if rolled_back %}{% include "_delete_run.html" %}{% endif %}
 {% include "_timeline.html" %}
 {% if finished %}{% include "_result.html" %}{% endif %}
-{% include "_cleanup.html" %}
 {% endblock %}

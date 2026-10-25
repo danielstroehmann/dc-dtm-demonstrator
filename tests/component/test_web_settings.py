@@ -43,7 +43,7 @@ def test_save_first_connection(user, store, fake):
     edit = user.get(f"/settings?edit={conn['id']}").text
     assert "<h2>Edit connection</h2>" in edit and 'value="US prod"' in edit and "leave empty to keep it" in edit
     assert f'<input type="hidden" name="id" value="{conn["id"]}">' in edit and API_KEY not in edit
-    assert "<h1>Start a demo</h1>" in user.get("/").text
+    assert '<article class="tile">' in user.get("/").text  # configured: the home page offers the use cases
 
 
 @pytest.mark.parametrize("host", ["https://one.digicert.com", "one digicert.com", "localhost", "one.digicert.com/x",
@@ -269,3 +269,63 @@ def test_api_keys_are_never_rendered(user, store, fake):
              *(f"/runs/new/uc01?connection={i}" for i in ids)]
     for path in pages:
         assert API_KEY not in user.get(path).text, path
+
+
+
+# --- host choice: the supported platforms only; several accounts per host -------------------------------
+
+def test_platform_regions_cover_exactly_the_platforms():
+    from app import dtm
+    assert set(dtm.PLATFORM_REGIONS) == set(dtm.PLATFORMS)
+    assert dtm.PLATFORM_REGIONS == {"one.digicert.com": "US", "one.nl.digicert.com": "NL"}
+
+
+def test_host_select_offers_the_platforms_and_keeps_the_saved_one(user, store, fake):
+    from tests.component.test_web_ui_v2 import host_options
+    expected = [("one.digicert.com", "one.digicert.com · US"), ("one.nl.digicert.com", "one.nl.digicert.com · NL")]
+    add = host_options(user.get("/settings").text)
+    assert [(v, label) for v, _, label in add] == expected and [s for _, s, _ in add] == [True, False]
+    store.save_connection(None, "NL demo", NL_HOST, ACCOUNT_ID, API_KEY)
+    conn = only(store)
+    edit = host_options(user.get(f"/settings?edit={conn['id']}").text)
+    assert [(v, label) for v, _, label in edit] == expected and [s for _, s, _ in edit] == [False, True]
+    assert "unsupported" not in user.get(f"/settings?edit={conn['id']}").text
+
+
+def test_host_select_keeps_an_unsupported_saved_host_editable(user, store):
+    from tests.component.test_web_ui_v2 import host_options
+    store.save_connection(None, "Old", "dtm.example.com", ACCOUNT_ID, API_KEY)
+    conn = only(store)
+    options = host_options(user.get(f"/settings?edit={conn['id']}").text)
+    assert options[-1] == ("dtm.example.com", True, "dtm.example.com · unsupported")
+    assert [s for _, s, _ in options[:-1]] == [False, False] and len(options) == 3
+    assert "unsupported" not in user.get("/settings").text  # the add form offers the platforms only
+
+
+
+def test_connection_actions_order_and_side_by_side_fields(user, store, fake):
+    store.save_connection(None, "US", HOST, ACCOUNT_ID, API_KEY)
+    store.save_connection(None, "NL", NL_HOST, OTHER_ACCOUNT_ID, "k")
+    html = user.get("/settings").text
+    for block in re.findall(r'<div class="actions">(.*?)</div>', html, re.S):
+        labels = re.findall(r">(Make default|Edit|Delete)<", block)
+        assert labels in (["Make default", "Edit", "Delete"], ["Edit", "Delete"]), labels  # the default has no button
+    rows = re.findall(r'<div class="field-row">(.*?)</div>', html, re.S)
+    assert any("name=\"account_id\"" in r and "name=\"api_key\"" in r for r in rows)  # side by side
+    assert any("name=\"name\"" in r and "name=\"host\"" in r for r in rows)
+    summaries = re.findall(r'<summary class="meta">(Profiles: [^<]+)</summary>', html)
+    assert sorted(summaries) == ["Profiles: per run", "Profiles: shared"]
+
+
+def test_unsupported_summary(user, store):
+    store.save_connection(None, "Old", "dtm.example.com", ACCOUNT_ID, API_KEY)
+    assert '<summary class="meta">Profiles: –</summary>' in user.get("/settings").text
+
+
+def test_a_refused_host_is_not_offered_back(user, store, fake):
+    """A crafted POST with an unsupported host: the re-rendered form offers the platforms only."""
+    from tests.component.test_web_ui_v2 import host_options
+    response = save(user, host="attacker.example")
+    assert response.status_code == 400
+    assert "attacker.example" not in [v for v, _, _ in host_options(response.text)]
+    assert "· unsupported" not in response.text

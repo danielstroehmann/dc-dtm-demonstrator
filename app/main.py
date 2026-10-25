@@ -63,6 +63,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["use_cases"] = USE_CASES
     templates.env.globals["use_case_names"] = evergreen.DISPLAY_NAMES
     templates.env.globals["platforms"] = dtm.PLATFORMS
+    templates.env.globals["platform_regions"] = dtm.PLATFORM_REGIONS
+    templates.env.filters["dtm_message"] = enrollment.dtm_message  # also tidies runs stored before it existed
     templates.env.globals["catalog"] = evergreen.CATALOG
     templates.env.globals["snippets"] = snippets
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
@@ -175,7 +177,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException):
-        return render(request, "error.html", exc.status_code, message=exc.detail)
+        return render(request, "error.html", exc.status_code, message=exc.detail, status=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, _exc):
@@ -209,12 +211,24 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         response.delete_cookie(COOKIE)
         return response
 
+    def list_row(run: dict) -> dict:
+        """A run as the runs list shows it (rolled back?, connection name)."""
+        return run | {"rolled_back": _rolled_back(run),
+                      "connection": (run_connection(run) or {}).get("name")
+                      or f"{run['params'].get('connection_name', '–')} (not configured)"}
+
+    @app.get("/runs/{run_id}/row")
+    async def run_row(request: Request, run_id: str):
+        """The list row on its own – it polls itself while a full rollback runs."""
+        run = store.get_run(run_id) if RUN_ID.fullmatch(run_id) else None
+        if not run:  # deleted meanwhile: 286 makes htmx stop polling, the empty body removes the row
+            return HTMLResponse("", status_code=286)
+        return render(request, "_run_row.html", run=list_row(run), several=len(store.connections()) > 1)
+
     @app.get("/")
     async def index(request: Request):
-        runs = [run | {"rolled_back": _rolled_back(run)} for run in store.list_runs()]
+        runs = [list_row(run) for run in store.list_runs()]
         several = len(store.connections()) > 1
-        runs = [run | {"connection": (run_connection(run) or {}).get("name")
-                       or f"{run['params'].get('connection_name', '–')} (not configured)"} for run in runs]
         connections = store.connections()
         return render(request, "index.html", nav="runs", runs=runs, configured=bool(connections), several=several,
                       connections=[_public(c) for c in connections],
@@ -374,7 +388,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             return render(request, "error.html", 502, message=f"Could not load data from DTM: {exc}")
         finally:
             await client.aclose()
-        return render(request, "run_new.html", use_case=evergreen.CATALOG[use_case], use_case_id=use_case, cas=cas,
+        return render(request, "run_new.html", nav="runs", use_case=evergreen.CATALOG[use_case], use_case_id=use_case, cas=cas,
                       profile_status=profile_status, profile_mode=profile_mode, connection=_public(conn),
                       default_connection=_public(conn), several=len(store.connections()) > 1,
                       max_batch=evergreen.MAX_BATCH, max_passcode_batch=enrollment.MAX_PASSCODE_BATCH,
@@ -471,7 +485,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     @app.get("/runs/{run_id}")
     async def run_page(request: Request, run_id: str):
         run = get_run_or_404(run_id)
-        return render(request, "run.html", **live_context(run), **certificate_page(run, 1), dialect="curl")
+        return render(request, "run.html", nav="runs", **live_context(run), **certificate_page(run, 1), dialect="curl")
 
     @app.get("/runs/{run_id}/live")
     async def run_live(request: Request, run_id: str):
@@ -554,14 +568,25 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return FileResponse(path, media_type="application/zip", filename=f"robot-{run_id}-{run['use_case']}-{path.name}")
 
     @app.post("/runs/{run_id}/cleanup")
-    async def run_cleanup(run_id: str, mode: str = Form(...)):
+    async def run_cleanup(request: Request, run_id: str, mode: str = Form(...)):
+        """mode "certificates" is API-only now – the UI offers the full rollback in the runs list."""
+        from_list = bool(request.headers.get("hx-request"))
         run = get_run_or_404(run_id)
-        if mode not in ("full", "certificates") or _active(run):
-            raise HTTPException(409, "Cleanup not possible right now")
-        if _rolled_back(run):
-            raise HTTPException(409, "This run has already been rolled back")
-        spawn(lambda c: cleanup.cleanup(store, c, run_id, mode, data_dir / "runs" / run_id), run_id)
-        store.update_run(run_id, cleanup_status="running")
+        try:
+            if mode not in ("full", "certificates") or _active(run):
+                raise HTTPException(409, "Cleanup not possible right now")
+            if _rolled_back(run):
+                raise HTTPException(409, "This run has already been rolled back")
+            spawn(lambda c: cleanup.cleanup(store, c, run_id, mode, data_dir / "runs" / run_id), run_id)
+        except HTTPException as exc:
+            if not from_list:
+                raise
+            # htmx swaps no error responses – the row comes back with the current state and the reason
+            return render(request, "_run_row.html", run=list_row(store.get_run(run_id)),
+                          several=len(store.connections()) > 1, error=exc.detail)
+        store.update_run(run_id, cleanup_status="running", progress=None)  # no leftover numbers of the run
+        if from_list:  # the row, now showing the rollback
+            return await run_row(request, run_id)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     return app

@@ -146,6 +146,7 @@ def shared_profile_body(base: dict, spec: ProfileSpec, account_id: str) -> dict:
 # NL deletes a profile once its policy is gone – one profile per run, removed by the full rollback;
 # US still refuses that (DTM bug) – shared profiles per account until it is fixed. Other hosts are refused.
 PLATFORMS = {"one.nl.digicert.com": "per_run", "one.digicert.com": "shared"}
+PLATFORM_REGIONS = {"one.digicert.com": "US", "one.nl.digicert.com": "NL"}  # labels of the host choice
 
 
 def profile_mode(host: str) -> str:

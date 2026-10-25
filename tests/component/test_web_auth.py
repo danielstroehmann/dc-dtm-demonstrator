@@ -145,7 +145,14 @@ def test_api_docs_are_disabled(user, path):
 
 def test_unknown_route_renders_error_page(user):
     response = user.get("/nope")
-    assert response.status_code == 404 and "Something went wrong" in response.text
+    assert response.status_code == 404 and "<h2>Not found</h2>" in response.text
+    assert "Something went wrong" not in response.text and 'role="alert"' not in response.text  # no red alert
+
+
+def test_other_errors_keep_the_alert(user, store):
+    response = user.post("/runs", data={"mode": "single", "ca_id": "x"})  # no connection yet
+    assert response.status_code == 409
+    assert "<h2>Something went wrong</h2>" in response.text and '<p class="error" role="alert">' in response.text
 
 
 # --- headers & CSP -------------------------------------------------------------------------

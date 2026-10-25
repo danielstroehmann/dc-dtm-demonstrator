@@ -128,6 +128,55 @@ details.box[open] > summary { margin-bottom: var(--s3); }
 table.data-table th, table.data-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: 18rem; vertical-align: middle; }
 table.data-table td.actions-cell { max-width: none; overflow: visible; text-align: right; }
+/* Runs list: fixed columns, the use case takes the rest – no horizontal scroll on a 1024 px window */
+table.runs-table { table-layout: fixed; width: 100%; }
+table.runs-table th, table.runs-table td { max-width: none; }
+table.runs-table td { line-height: 1.75rem; }  /* = the action box: text, pills and buttons give one row height */
+table.runs-table td .pill { vertical-align: middle; }
+table.runs-table .c-run { width: 6rem; } table.runs-table .c-conn { width: 7rem; }
+table.runs-table .c-variant { width: 11rem; } table.runs-table .c-status { width: 7.5rem; }
+table.runs-table .c-cleanup { width: 6.5rem; } table.runs-table .c-created { width: 9.5rem; }
+table.runs-table .c-actions { width: 8.5rem; }
+
+/* The row's action slot: Full rollback, Delete and the running rollback share one box to the pixel */
+.actions-cell .row-action { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
+  width: 7.5rem; height: 1.75rem; margin: 0; padding: 0 var(--s2); font-size: 0.8rem; line-height: 1;
+  border: var(--pico-border-width) solid var(--dc-blue); border-radius: var(--pico-border-radius); white-space: nowrap; }
+.actions-cell button.row-action.secondary { border-color: var(--pico-secondary-border); }
+.actions-cell button.row-action.refused { border-color: var(--bad); color: var(--bad); }  /* reason in the tooltip */
+/* Forms and tooltip wrappers in the slot must not add a text line – every row stays the same height */
+.actions-cell > form, .actions-cell > span { display: inline-flex; vertical-align: middle; margin: 0; }
+/* Rollback running: the button's box fills up with what DTM has done; without a count a light sweeps */
+.rollback-meter { position: relative; overflow: hidden; color: var(--dc-blue-dark); font-weight: 500;
+  font-variant-numeric: tabular-nums; background: #fff; cursor: default; }
+.rollback-meter::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+  background: #cfe3f7; transition: width 0.6s ease; }
+.rollback-meter.indeterminate::before { width: 40%; border-right: 0;
+  background: linear-gradient(90deg, transparent, #cfe3f7, transparent); animation: rollback-sweep 1.4s ease-in-out infinite; }
+.rollback-meter > span { position: relative; }
+.rollback-meter.p-0::before { width: 0%; }
+.rollback-meter.p-5::before { width: 5%; }
+.rollback-meter.p-10::before { width: 10%; }
+.rollback-meter.p-15::before { width: 15%; }
+.rollback-meter.p-20::before { width: 20%; }
+.rollback-meter.p-25::before { width: 25%; }
+.rollback-meter.p-30::before { width: 30%; }
+.rollback-meter.p-35::before { width: 35%; }
+.rollback-meter.p-40::before { width: 40%; }
+.rollback-meter.p-45::before { width: 45%; }
+.rollback-meter.p-50::before { width: 50%; }
+.rollback-meter.p-55::before { width: 55%; }
+.rollback-meter.p-60::before { width: 60%; }
+.rollback-meter.p-65::before { width: 65%; }
+.rollback-meter.p-70::before { width: 70%; }
+.rollback-meter.p-75::before { width: 75%; }
+.rollback-meter.p-80::before { width: 80%; }
+.rollback-meter.p-85::before { width: 85%; }
+.rollback-meter.p-90::before { width: 90%; }
+.rollback-meter.p-95::before { width: 95%; }
+.rollback-meter.p-100::before { width: 100%; }
+@keyframes rollback-sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .rollback-meter.indeterminate::before { animation: none; width: 100%; } }
 table.data-table .actions { flex-wrap: nowrap; justify-content: flex-end; }
 .mono { font-family: var(--pico-font-family-monospace); font-size: 0.8rem; }
 
@@ -137,11 +186,11 @@ table.compact th, table.compact td { padding: var(--s1) var(--s2); white-space: 
   text-overflow: ellipsis; line-height: 1.3; }
 table.compact th { font-weight: 500; }
 table.compact td:nth-child(2) { font-family: var(--pico-font-family-monospace); }
-table.compact .c-cn { width: 34%; }
-table.compact .c-serial { width: 26%; }
+table.compact .c-cn { width: 28%; }
+table.compact .c-serial { width: 42ch; }
 table.compact .c-date { width: 6.5rem; }
-table.compact .c-issuer { width: 22%; }
-table.compact .c-key { width: 7rem; }
+table.compact .c-issuer { width: auto; }
+table.compact .c-key { width: 9rem; }
 .pager { display: flex; align-items: center; justify-content: center; gap: var(--s4); margin-top: var(--s2); }
 
 /* ---- Reproducible steps ---- */
@@ -162,7 +211,9 @@ table.compact .c-key { width: 7rem; }
 .method.delete { background: var(--bad); }
 .method.local { background: #6b6b6b; }
 .method.manual { background: var(--dc-orange); }
-.snippet { margin-top: var(--s3); }
+.snippet { margin-top: var(--s2); }
+.call-line .btn-sm { margin: 0; }  /* Copy sits in the step's head line, right of the time */
+.api-calls pre { font-size: 0.75rem; }  /* Variables and steps: one code size */
 .snippet-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s3);
   margin-bottom: var(--s2); font-size: 0.8rem; color: var(--pico-muted-color); }
 .snippet pre { margin: 0; max-height: 22rem; overflow: auto; font-size: 0.75rem; }
@@ -192,10 +243,6 @@ table.compact .c-key { width: 7rem; }
 .timeline li:first-child .msg { font-weight: 500; }
 
 /* ---- Clean up: deliberate, not the loudest thing on the page ---- */
-.cleanup-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: var(--s4); }
-.cleanup-actions form { margin: 0; }
-.cleanup-actions button { margin-bottom: var(--s2); }
-.cleanup-actions small { display: block; color: var(--pico-muted-color); }
 
 /* ---- Confirmation dialog (replaces window.confirm) ---- */
 dialog > article { max-width: 26rem; padding: var(--s5); border-top: 3px solid var(--dc-blue); }
@@ -302,12 +349,13 @@ article.card { border-top: 1px solid var(--dc-border); border-radius: var(--radi
 article.card.focus { border-top: 3px solid var(--dc-blue); }
 
 /* ---- Use-case tiles ---- */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: var(--s4); }
+/* Desktop only: three tiles; the connection picker above is exactly one tile wide (same formula) */
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s4); }
 .tile { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s5); margin: 0; background: #fff;
   border: 1px solid var(--dc-border); border-radius: var(--radius-l); box-shadow: var(--shadow-1);
   transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease; }
 .tile:hover { border-color: var(--dc-blue-tint-border); box-shadow: var(--shadow-2); transform: translateY(-1px); }
-.tile-top { display: flex; align-items: flex-start; gap: var(--s3); }
+.tile-top { display: flex; align-items: center; gap: var(--s3); min-height: 2.75rem; }
 .tile-icon { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; flex: none; border-radius: 0.6rem;
   background: var(--dc-blue-tint); color: var(--dc-blue); }
 .tile-icon svg { width: 1.35rem; height: 1.35rem; }
@@ -390,16 +438,18 @@ body.auth { display: block; }
 .auth-form .action-bar { border-top: 0; padding-top: 0; margin-top: var(--s2); justify-content: flex-start; }
 
 /* ---- Connection picker above the tiles, narrow form card on the welcome page ---- */
-.conn-select { max-width: 24rem; margin-bottom: var(--s4); }
+.conn-select { width: calc((100% - 2 * var(--s4)) / 3); margin-bottom: var(--s4); }
 .narrow-card { max-width: 40rem; }
 
 /* ---- Connections list (settings) ---- */
 .conn-list { list-style: none; padding: 0; margin: 0; }
-.conn-list li { list-style: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s2) var(--s4);
+.conn-list li { list-style: none; display: grid; grid-template-columns: minmax(0, 1fr) 17rem; gap: var(--s2) var(--s4);
   align-items: center; padding: var(--s3) 0; margin: 0; border-top: 1px solid var(--dc-border); }
 .conn-list li:first-child { border-top: 0; padding-top: 0; }
 .conn-list li > div { min-width: 0; }
 .conn-list .name { font-weight: 500; }
+.conn-list li > .actions { justify-content: flex-end; align-self: start; }
+.shared-profiles-toggle > summary { width: max-content; }  /* one action column for all rows – the details line up */
 .conn-list .meta { display: block; font-size: 0.82rem; color: var(--pico-muted-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Responsive ---- */
@@ -460,7 +510,7 @@ article.card { padding: var(--s4) var(--s5); margin-bottom: var(--s4); }
 .segmented { margin-bottom: 0; }
 .segmented label { padding: 0.35rem var(--s3); font-size: 0.9rem; }
 /* Questions and fields side by side, as many as fit */
-.q-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); gap: var(--s3) var(--s5);
+.q-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s3) var(--s5);
   align-items: start; }
 .q-grid > * { margin: 0; }
 .q-grid label { margin-bottom: 0; }
@@ -478,7 +528,8 @@ article.card { padding: var(--s4) var(--s5); margin-bottom: var(--s4); }
 .q-grid .field > select, .q-grid .field > .readonly-value, .q-grid .field > input:not(.short) { align-self: stretch; }
 .field-label, .seg-label { font-weight: 400; color: var(--pico-color); margin: 0; }
 .q-grid .field select, .q-grid .field input { margin: 0; }
-.q-grid .field select, .q-grid .field input:not([type=radio]):not([type=checkbox]) { box-sizing: border-box; height: var(--control-h); }
+/* Every single-line control has one height (quality bar: shared edges in a row) */
+form select, form input:not([type=radio]):not([type=checkbox]):not([type=hidden]) { box-sizing: border-box; height: var(--control-h); }
 /* Same height as the inputs and selects next to it, even with the smaller monospace text */
 .readonly-value { box-sizing: border-box; height: var(--control-h); line-height: var(--control-inner);
   padding: 0 var(--pico-form-element-spacing-horizontal);
@@ -486,6 +537,18 @@ article.card { padding: var(--s4) var(--s5); margin-bottom: var(--s4); }
   color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .readonly-value.mono { font-size: 0.85rem; }
 .q-grid .switch-cell { align-self: end; padding-bottom: var(--s2); }
-/* UC-5: two groups of metrics in one card (factory provisioning, enrollment in the field) */
-.metrics-title { margin: 0 0 var(--s2); font-size: 0.85rem; font-weight: 500; color: var(--pico-muted-color); }
-.metrics + .metrics-title { margin-top: var(--s3); }
+.choice-with-count { display: flex; align-items: flex-end; gap: var(--s3); }
+.q-grid .r1c1 { grid-area: 1 / 1; } .q-grid .r1c2 { grid-area: 1 / 2; } .q-grid .r1c3 { grid-area: 1 / 3; }
+.q-grid .r2c1 { grid-area: 2 / 1; } .q-grid .r2c2 { grid-area: 2 / 2; } .q-grid .r2c3 { grid-area: 2 / 3; }
+.choice-with-count input.short { width: 6rem; margin: 0; }
+/* UC-5 overview: factory and field side by side, same four metric columns, then the checks */
+.phase-pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s4); margin-bottom: var(--s4); align-items: stretch; }
+.phase-pair > .box, .phase-pair > .box.accent + .box.accent { margin: 0; }  /* side by side, not stacked */
+.metrics-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--s3); }
+.metrics-4 .metric { font-size: 1.3rem; }
+table.checks-table { table-layout: fixed; width: 100%; margin: 0; }
+.checks { margin-bottom: var(--s3); }
+.overview-details { margin: 0; }
+table.checks-table .c-check { width: 34%; }
+table.checks-table .c-expected { width: 7rem; }
+table.data-table.checks-table td, table.data-table.checks-table th { max-width: none; }

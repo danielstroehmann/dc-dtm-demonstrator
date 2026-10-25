@@ -1,11 +1,11 @@
 {% from "_icons.html" import icon %}
 {# Use-case tiles: GET form so the selected connection travels along with the chosen use case. #}
-{% set icons = {"evergreen": "key", "uc04": "refresh", "uc05": "shield"} %}
+{% set icons = {"evergreen": "infinity", "uc04": "refresh", "uc05": "shield"} %}
 <form method="get">
   {% if connections | length > 1 %}
   <label class="conn-select">Connection
     <select name="connection">
-      {% for c in connections %}<option value="{{ c.id }}" {% if c.id == selected %}selected{% endif %}>{{ c.name }} – {{ c.host }}</option>{% endfor %}
+      {% for c in connections %}<option value="{{ c.id }}" {% if c.id == selected %}selected{% endif %}>{{ c.name }} · {{ c.host }}</option>{% endfor %}
     </select>
   </label>
   {% elif selected %}<input type="hidden" name="connection" value="{{ selected }}">{% endif %}

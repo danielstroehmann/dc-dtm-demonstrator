@@ -30,7 +30,9 @@ def profile_reads(fake: FakeDTM) -> list[str]:
 @pytest.mark.parametrize("path", ["/runs/new/evergreen", "/runs/new/uc04"])
 def test_nl_form_shows_the_runs_own_profile_without_asking_dtm(nl_user, fake, path):
     html = nl_user.get(path).text
-    assert "Own profile for this run" in html and "– deleted by the full rollback</small>" in html
+    assert re.search(r'<div class="readonly-value" tabindex="0" data-tip="Deleted by the full rollback">Own profile '
+                     r'for this run</div>\s*<small class="field-help">(5 years|6 months · renew any time)</small>', html)
+    assert "– deleted by the full rollback" not in html  # the help is the validity only
     assert "robot-evergreen" not in html and "robot-renewal" not in html  # no shared profile names
     assert "DTM keeps it" not in html
     assert profile_reads(fake) == []  # no shared_profile_status on NL
@@ -38,11 +40,11 @@ def test_nl_form_shows_the_runs_own_profile_without_asking_dtm(nl_user, fake, pa
 
 def test_nl_settings_profiles(nl_user, store, fake):
     html = nl_user.get("/settings").text
-    assert re.search(r'<summary class="meta">Profiles</summary>', html) and "Shared profiles" not in html
+    assert '<summary class="meta">Profiles: per run</summary>' in html and "Profiles: shared" not in html
     conn = store.connection(None)
     fake.requests.clear()
     part = nl_user.get(f"/settings/connections/{conn['id']}/profiles").text
-    assert "One profile per run, deleted by the full rollback – nothing shared." in part
+    assert '<span class="meta">One profile per run.</span>' in part
     assert fake.requests == []  # rendered without calling DTM
 
 

@@ -130,7 +130,7 @@ async def test_webui_steps_are_replayable(store, fake, tmp_path, monkeypatch, us
     run_zip = zipfile.ZipFile(tmp_path / "runs" / "wr1" / artifact)
     if client_side:
         devices = "the device" if count == 1 else f"each of the {count} devices"
-        assert local["purpose"] == f"Generate key + CSR for {devices} and pack the CSRs (local)"
+        assert local["purpose"] == f"Generate key + CSR for {devices} and pack the CSRs"
         assert local["spec"]["command"] == evergreen.csr_batch_command(count, "P_256", mode)
         assert local["seconds"] is not None  # the factory's key generation is measured
         assert run_zip.namelist() == [f"{n}.csr" for n in names]
@@ -140,7 +140,7 @@ async def test_webui_steps_are_replayable(store, fake, tmp_path, monkeypatch, us
         assert result.returncode == 0, result.stderr
         assert zipfile.ZipFile(work / "csrs.zip").namelist() == run_zip.namelist()  # same device names
     else:
-        assert local["purpose"] == f"Write the CSV with the {count} device names and pack it (local)"
+        assert local["purpose"] == f"Write the CSV with the {count} device names and pack it"
         assert local["spec"]["command"] == evergreen.csv_batch_command(count)
         if not (shutil.which("zip") and shutil.which("bash")):
             pytest.skip("needs bash and zip to replay the CSV step")

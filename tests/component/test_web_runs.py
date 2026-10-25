@@ -21,6 +21,13 @@ def form(**overrides) -> dict:
     return {"run_id": "r1", "variant": "api", "mode": "single", "count": "1", "ca_id": ECDSA_CA_ID} | overrides
 
 
+def action_slot(html: str, run_id: str) -> str:
+    """The runs list's action slot (td.actions-cell) of that run."""
+    row = re.search(rf'<tr id="run-{run_id}"[^>]*>(.*?)</tr>', html, re.S)
+    assert row, run_id
+    return re.search(r'<td class="actions-cell">(.*?)</td>', row.group(1), re.S).group(1)
+
+
 def finished(store, run_id):
     return wait_for(lambda: (r := store.get_run(run_id)) and r["status"] not in ("pending", "running") and r,
                     what=f"run {run_id} to finish")
@@ -254,7 +261,7 @@ def test_single_count_is_stored_and_account_bound(configured_user, store):
     assert params["key_type"] == "P_256" and params["ca_name"] == "Fake ECDSA ICA"
     assert API_KEY not in json.dumps(params)
     index = configured_user.get("/").text
-    assert "single (1)" in index
+    assert runs_rows(index)["r1"][2] == "API · 1×"
     page = configured_user.get("/runs/r1").text
     assert "<small>All requests</small>" in page and "Upload done" not in page
     assert "robot-r1-uc01-single-0001" in page and "robot-r1-uc01-single-0002" not in page
@@ -280,7 +287,9 @@ def test_api_batch_end_to_end_through_ui(configured_user, store, fake):
     page = configured_user.get("/runs/r1").text
     for cn in evergreen.common_names("r1", "batch", 3, "uc01"):
         assert cn in page
-    assert "Full rollback" in page and "Certificates only" in page
+    # rollback and delete live in the runs list only – the run page has no clean-up card
+    assert "Full rollback" not in page and "Certificates only" not in page and "<h2>Clean up</h2>" not in page
+    assert 'action="/runs/r1/cleanup"' in action_slot(configured_user.get("/").text, "r1")
     assert "PRIVATE KEY" not in page
     assert 'hx-trigger="every 1s"' not in page  # finished runs stop polling
     # a finished run tells a polling page to reload once (the result is not part of the polled fragment)
@@ -482,6 +491,8 @@ def test_full_cleanup_through_ui(configured_user, store, fake, data_dir):
     assert not (data_dir / "runs" / "r1").exists()
     page = configured_user.get("/runs/r1").text
     assert "Full rollback" not in page and "Certificates only" not in page
+    slot = action_slot(configured_user.get("/").text, "r1")
+    assert 'action="/runs/r1/delete"' in slot and "Full rollback" not in slot  # rolled back: delete only
     again = configured_user.post("/runs/r1/cleanup", data={"mode": "full"})
     assert again.status_code == 409
 
@@ -492,8 +503,9 @@ def test_certificates_cleanup_keeps_full_rollback_available(configured_user, sto
     configured_user.post("/runs/r1/cleanup", data={"mode": "certificates"})
     assert cleaned(store, "r1")["cleanup_status"] == "done"
     assert len(fake.policies) == 1 and (data_dir / "runs" / "r1" / "batch.zip").exists()
-    page = configured_user.get("/runs/r1").text
-    assert "Full rollback" in page and "Certificates only" not in page
+    # the route still accepts mode=certificates (no UI); the list offers the full rollback afterwards
+    slot = action_slot(configured_user.get("/").text, "r1")
+    assert 'action="/runs/r1/cleanup"' in slot and ">Full rollback</button>" in slot and "delete" not in slot
     configured_user.post("/runs/r1/cleanup", data={"mode": "full"})
     wait_for(lambda: store.get_run("r1")["cleanup_mode"] == "full"
              and store.get_run("r1")["cleanup_status"] == "done", what="full rollback")
@@ -537,8 +549,8 @@ def test_cleanup_failure_is_visible(configured_user, store, fake):
     fake.fail["policy_delete"] = httpx.Response(400, text="<html>no</html>")
     configured_user.post("/runs/r1/cleanup", data={"mode": "full"})
     assert cleaned(store, "r1")["cleanup_status"] == "failed"
-    page = configured_user.get("/runs/r1").text
-    assert "Full rollback" in page  # can be retried
+    slot = action_slot(configured_user.get("/").text, "r1")
+    assert 'action="/runs/r1/cleanup"' in slot and ">Full rollback</button>" in slot  # can be retried
 
 
 # --- startup ------------------------------------------------------------------------------
@@ -671,7 +683,7 @@ def test_api_calls_section_through_ui(configured_user, store, fake):
     configured_user.post("/runs", data=form(mode="batch", count="2"))
     finished(store, "r1")
     html = configured_user.get("/runs/r1").text
-    assert '<article class="card api-calls" id="api-calls">' in html and "<h2>Reproducible Steps</h2>" in html
+    assert '<article class="card api-calls" id="api-calls">' in html and "<h2>Reproducible steps</h2>" in html
     assert "export DTM_API_KEY=&#39;&lt;your API key&gt;&#39;" in html
     assert f"export DTM_HOST={HOST}" in html
     assert API_KEY not in html and "BEGIN" not in html
@@ -719,9 +731,9 @@ def test_failed_run_shows_api_calls(configured_user, store, fake):
     configured_user.post("/runs", data=form())
     assert finished(store, "r1")["status"] == "failed"
     html = configured_user.get("/runs/r1").text
-    assert "Reproducible Steps" in html and "error</span>" in html
+    assert "Reproducible steps" in html and "error</span>" in html
     # a setup failure has only setup calls
-    assert '<details class="box neutral">' in html and phase_titles(html) == [] and "Certificate Order" not in html
+    assert '<details class="box neutral">' in html and phase_titles(html) == [] and "Certificate order" not in html
     assert "<h2>Payload</h2>" not in html
 
 
@@ -732,13 +744,13 @@ def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store)
     assert page.status_code == 200 and "<p>uc99 · Single" in page.text
     index = user.get("/")
     # an unknown use case shows its raw ID – no internal "UC-n" numbering, no tooltip attribute
-    assert index.status_code == 200 and re.search(r"<td>uc99 · single", index.text)
+    assert index.status_code == 200 and re.search(r"<td>uc99</td>", index.text)
     assert "UC-99" not in index.text
     # a non-numeric ID is shown raw – never "UC-legacy"
     store.create_run("x2", "legacy", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
     store.update_run("x2", status="failed")
     index = user.get("/").text
-    assert re.search(r"<td\s*>legacy · single", index) and "UC-legacy" not in index
+    assert re.search(r"<td>legacy</td>", index) and "UC-legacy" not in index
     assert "<p>legacy · Single" in user.get("/runs/x2").text
 
 
@@ -758,15 +770,15 @@ def test_progress_card_during_cleanup(configured_store, user, store):
 
 # --- result layout and reproducible-steps grouping --------------------------------------------
 
-# A phase title of the reproducible steps: icon chip + text (Certificate Order / Factory Enrollment /
-# Renewal in the Field), inside a <section class="box accent[ field]">.
+# A phase title of the reproducible steps: icon chip + text (Certificate order / Factory enrollment /
+# Renewal in the field), inside a <section class="box accent[ field]">.
 PHASE_TITLE = re.compile(r'<section class="(box accent[^"]*)">\s*<div class="box-head">\s*'
                          r'<h3 class="phase-title"><span class="phase-icon">(.*?)</span>([^<]+)</h3>', re.S)
 
 
 PHASE_ICONS = {"factory": 'd="M3 21V10l6 4V10l6 4V6l6 3v12z"', "refresh": 'd="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"',
                "key": 'd="M11 12l9-9M17 6l3 3M15 8l2 2"'}  # _icons.html
-FIELD_PHASES = ("Renewal in the Field", "Enrollment in the Field")  # the orange "in the field" boxes
+FIELD_PHASES = ("Renewal in the field", "Enrollment in the field")  # the orange "in the field" boxes
 
 
 def phase_titles(html: str) -> list[tuple[str, str, str]]:
@@ -789,7 +801,7 @@ def section(html: str, phase: str) -> str:
     if phase == "setup":  # collapsed neutral box
         start = html.index('<details class="box neutral">')
         return html[start:html.index("</details>", start)]
-    start = html.index("Certificate Order</h3>")  # highlighted accent box
+    start = html.index("Certificate order</h3>")  # highlighted accent box
     start = html.rindex('<section class="box accent">', 0, start)
     return html[start:html.index("</section>", start)]
 
@@ -810,11 +822,11 @@ def test_steps_grouped_by_phase(configured_user, store):
     assert [c["phase"] for c in calls] == ["setup"] * 6 + ["recurring"] * 8
     html = configured_user.get("/runs/r1").text
     setup, recurring = section(html, "setup"), section(html, "recurring")
-    assert "<summary>One-Time Setup</summary>" in setup
+    assert "<summary>One-time setup</summary>" in setup
     assert '<details class="box neutral" open' not in html  # collapsed by default
-    assert "Certificate Order</h3>" in recurring
-    assert_phase_titles(html, [("Certificate Order", "factory")])
-    assert html.index('<details class="box neutral">') < html.index("Certificate Order</h3>")
+    assert "Certificate order</h3>" in recurring
+    assert_phase_titles(html, [("Certificate order", "factory")])
+    assert html.index('<details class="box neutral">') < html.index("Certificate order</h3>")
     assert '<ol class="calls">' in setup and '<ol class="calls">' in recurring
     assert '<div class="call-line">' in recurring and '<p class="call-purpose">' in recurring
     setup_purposes = [c["purpose"] for c in calls if c["phase"] == "setup"]
@@ -850,8 +862,8 @@ def test_run_page_order_and_removed_texts(configured_user, store):
     html = configured_user.get("/runs/r1").text
     marks = ['<h1>Run r1 <span class="pill ok">completed</span></h1>', '<ol class="stepper" aria-label="Run phases">',
              '<div id="live"', "<h2>Overview</h2>", "<h2>Timeline", "<h2>Payload</h2>",
-             "<h2>Reproducible Steps</h2>", "<h2>Clean up</h2>"]
-    assert "<h2>Delete run</h2>" not in html
+             "<h2>Reproducible steps</h2>"]
+    assert "<h2>Delete run</h2>" not in html and "<h2>Clean up</h2>" not in html
     positions = [html.index(m) for m in marks]
     assert positions == sorted(positions), dict(zip(marks, positions))
     payload = html.index("<h2>Payload</h2>")
@@ -862,8 +874,7 @@ def test_run_page_order_and_removed_texts(configured_user, store):
     for gone in ('class="objects"', "Issued certificates", "kept out of the UI",
                  "x-api-key: &lt;API key&gt;", "Status: ", "Revoke certificates, delete policy"):
         assert gone not in html, gone
-    assert 'hx-confirm="Full rollback of run r1?"' in html
-    assert 'hx-confirm="Revoke the certificates of run r1?"' in html
+    assert "hx-confirm" not in html  # no rollback on the run page
 
 
 def test_payload_for_webui_batch_has_upload_hint_and_single_api_has_certificate(configured_user, store):
@@ -885,7 +896,7 @@ def test_webui_single_has_no_payload_section(configured_user, store):
     assert "<h2>Payload</h2>" not in html and "Enter in DTM web UI" in html
     assert '<details class="box neutral">' in html
     # the order itself is a manual step in the DTM web UI – shown in the certificate order, no request
-    assert_phase_titles(html, [("Certificate Order", "factory")])
+    assert_phase_titles(html, [("Certificate order", "factory")])
     recurring = section(html, "recurring")
     assert '<span class="method manual">MANUAL</span>' in recurring and '<code class="path">DTM web UI</code>' in recurring
     assert '<p class="call-purpose">Order in the DTM web UI – request the certificate</p>' in recurring
@@ -919,7 +930,7 @@ def test_legacy_calls_without_phase_count_as_recurring(configured_store, user, s
                        "count": 1, "spec": {"method": "GET", "path": "/x"}}]})
     html = user.get("/runs/l1").text
     assert '<details class="box neutral">' not in html
-    assert_phase_titles(html, [("Certificate Order", "factory")])
+    assert_phase_titles(html, [("Certificate order", "factory")])
     assert '<p class="call-purpose">old call</p>' in section(html, "recurring")
     assert "# old call" in hidden_script(html, "script-recurring-curl")
 
@@ -1016,17 +1027,20 @@ def test_page_structure_cards(configured_user, store):
     assert "<h2>Add connection</h2>" in settings
     assert "All calls are scoped" not in settings  # intro removed
     index = configured_user.get("/").text
-    assert "<h1>Start a demo</h1>" in index and "<h2>Recent runs</h2>" in index
+    assert "<h1>" not in index and "<h2>Recent runs</h2>" in index  # no "Start a demo" heading
     assert "Every object a run creates" not in index
     new = configured_user.get("/runs/new/evergreen").text
-    assert "a–z, 0–9, max. 16" in new and "Require approval (auto-approved)" in new
-    assert '<span class="seg-label" id="l-key_location">Where is the key pair generated?</span>' in new
-    assert '<span class="seg-label" id="l-mode">How many devices at once?</span>' in new
-    assert '<span class="seg-label" id="l-variant">Run it</span>' in new
+    assert "a–z, 0–9, max. 16" in new and "Require approval (auto-approved)" not in new
+    assert re.search(r'<label class="slot r2c3 switch-cell"[^>]*data-tip="Auto-approved by the demonstrator">'
+                     r'<input type="checkbox" name="approval"[^>]*> Require approval</label>', new)
+    assert new.count('name="approval"') == 1  # the old switch in the Certificate section is gone
+    assert '<span class="seg-label" id="l-key_location">Key generation</span>' in new
+    assert '<span class="seg-label" id="l-mode">Devices</span>' in new
+    assert '<span class="seg-label" id="l-variant">Run via</span>' in new
     # key location, mode, protocol, authentication, variant
     assert new.count('role="radiogroup"') == 5
     error = configured_user.get("/nope").text
-    assert '<div class="card-head"><h2>Something went wrong</h2></div>' in error
+    assert '<div class="card-head"><h2>Not found</h2></div>' in error and 'role="alert"' not in error
 
 
 def test_login_page_is_a_split_screen(web, configured_store):
@@ -1118,11 +1132,11 @@ def test_every_confirm_has_a_label(configured_user, store):
             label = re.search(r'data-confirm-label="([^"]+)"', tag)
             assert label, (path, tag)
             seen[re.search(r'hx-confirm="([^"]+)"', tag).group(1)] = label.group(1)
-    assert seen == {"Full rollback of run r1?": "Roll back", "Revoke the certificates of run r1?": "Revoke"}
-    # deleting a rolled-back run (run page card and index row) needs no confirmation
-    for path in ("/", "/runs/r2"):
-        forms = re.findall(r'<form[^>]*action="/runs/r2/delete"[^>]*>', configured_user.get(path).text)
-        assert forms and not any("hx-confirm" in f for f in forms), path
+    assert seen == {"Roll back run r1? Revokes its certificates and removes everything it created.": "Roll back"}
+    # deleting a rolled-back run (index row only) needs no confirmation
+    forms = re.findall(r'<form[^>]*action="/runs/r2/delete"[^>]*>', configured_user.get("/").text)
+    assert len(forms) == 1 and "hx-confirm" not in forms[0]
+    assert 'action="/runs/r2/delete"' not in configured_user.get("/runs/r2").text
 
 
 
@@ -1140,11 +1154,10 @@ def test_rolled_back_run_page_order(configured_user, store):
     configured_user.post("/runs/r1/cleanup", data={"mode": "full"})
     cleaned(store, "r1")
     html = configured_user.get("/runs/r1").text
-    marks = ["<h2>Overview</h2>", "<h2>Delete run</h2>", "<h2>Timeline", "<h2>Payload</h2>",
-             "<h2>Reproducible Steps</h2>"]
+    marks = ["<h2>Overview</h2>", "<h2>Timeline", "<h2>Payload</h2>", "<h2>Reproducible steps</h2>"]
     positions = [html.index(m) for m in marks]
     assert positions == sorted(positions), dict(zip(marks, positions))
-    assert "<h2>Clean up</h2>" not in html and html.count("<h2>Delete run</h2>") == 1
+    assert "<h2>Clean up</h2>" not in html and "<h2>Delete run</h2>" not in html  # both moved to the runs list
 
 
 
@@ -1195,7 +1208,7 @@ def test_uc02_form_and_run(configured_user, store, fake):
         assert all(b"BEGIN CERTIFICATE REQUEST" in archive.read(n) for n in archive.namelist())
     index = configured_user.get("/").text
     assert evergreen.DISPLAY_NAMES["uc02"] == "Evergreen device certificates"
-    assert "<td>Evergreen device certificates · batch (3)</td>" in index and "UC-" not in index
+    assert runs_rows(index)["r1"][1:3] == ["Evergreen device certificates", "API · 3×"] and "UC-" not in index
 
 
 def test_uc02_single_overview(configured_user, store):
@@ -1262,7 +1275,7 @@ def test_no_native_title_tooltips(configured_user, store):
 def runs_rows(html: str) -> dict[str, list[str]]:
     """Run ID → the text of its cells in the runs list (single-connection layout)."""
     rows = {}
-    for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
         cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
         link = re.search(r'<a href="/runs/([^"]+)">', row)
         if cells and link:
@@ -1276,19 +1289,19 @@ def runs_rows(html: str) -> dict[str, list[str]]:
 def test_runs_list_names_the_use_case_by_its_catalog_entry(configured_store, user, store, use_case, expected):
     store.create_run("n1", use_case, BASE_PARAMS | {"mode": "single", "count": 2})
     html = user.get("/").text
-    assert runs_rows(html)["n1"][1] == f"{expected} · single (2)"
+    assert runs_rows(html)["n1"][1] == expected  # the catalog name only – mode and count are in Variant
     cell = re.search(r'<a href="/runs/n1">n1</a></td>\s*(<td[^>]*>)', html).group(1)
     assert cell == "<td>"  # no data-tip – clipped cells get the automatic tooltip
     assert "UC-" not in html
 
 
 @pytest.mark.parametrize("params,variant", [
-    ({"protocol": "est", "auth": "passcode"}, "EST · Passcode"),
-    ({"protocol": "cmpv2", "auth": "certificate"}, "CMPv2 · Factory certificate"),
-    ({"protocol": "scep", "auth": "passcode"}, "SCEP · Passcode"),
-    ({"protocol": "rest", "auth": "certificate"}, "REST API · Factory certificate"),
-    ({"variant": "api"}, "API"),
-    ({"variant": "webui"}, "Web UI"),
+    ({"protocol": "est", "auth": "passcode"}, "EST · Passcode · 3×"),
+    ({"protocol": "cmpv2", "auth": "certificate"}, "CMPv2 · Factory certificate · 3×"),
+    ({"protocol": "scep", "auth": "passcode"}, "SCEP · Passcode · 3×"),
+    ({"protocol": "rest", "auth": "certificate", "count": 1}, "REST API · Factory certificate · 1×"),
+    ({"variant": "api"}, "API · 3×"),
+    ({"variant": "webui", "count": 12}, "Web UI · 12×"),
 ])
 def test_runs_list_variant_cell(configured_store, user, store, params, variant):
     use_case = "uc03" if "protocol" in params else "uc01"
@@ -1305,3 +1318,5 @@ def test_no_internal_use_case_numbers_on_index_and_run_pages(configured_user, st
         page = configured_user.get(path)
         assert page.status_code == 200, path
         assert not re.search(r"UC-?\d", page.text), (path, re.findall(r".{40}UC-?\d.{20}", page.text))
+
+

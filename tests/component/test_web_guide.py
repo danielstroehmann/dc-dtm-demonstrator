@@ -80,14 +80,21 @@ def test_form_markup_contract(configured_user):
     html = configured_user.get("/runs/new/evergreen").text
     assert re.search(r'<form method="post" action="/runs" data-guide>', html)
     assert '<input type="hidden" name="use_case" value="evergreen">' in html
-    # the questions and the conditions under which they apply
-    assert '<div class="field" data-when="mode=batch">' in html  # count
-    assert html.count('<div data-when="mode=single key_location=factory">') == 2  # protocol | authentication
+    # the questions in fixed slots (row/column) and the conditions under which they apply
+    assert '<div class="slot r1c1">' in html  # key location
+    assert '<div class="slot r1c2 choice-with-count">' in html  # devices + count inline
+    assert re.search(r'<input id="count" type="number" name="count" class="short" value="2" min="1" max="\d+"\s+'
+                     r'aria-label="Number of certificates" data-when="mode=batch">', html)
+    assert html.count('data-when="mode=single key_location=factory">') == 2  # protocol | authentication
+    assert '<div class="slot r2c1" data-when="mode=single key_location=factory">' in html
+    assert '<div class="slot r2c2" data-when="mode=single key_location=factory">' in html
     assert '<label data-when="protocol=rest"><input type="radio" name="auth_method" value="apikey"' in html
     assert re.search(r'<label data-when="protocol=rest \| protocol=est \| protocol=cmpv2"><input type="radio" '
                      r'name="auth_method" value="certificate"', html)  # no factory certificate for SCEP
-    assert '<div data-when="mode=batch | key_location=server | auth_method=apikey">' in html  # API / web UI
-    assert '<label class="switch-cell" data-when="mode=batch variant=api"><input type="checkbox" name="approval"' in html
+    assert '<div class="slot r1c3" data-when="mode=batch | key_location=server | auth_method=apikey">' in html
+    assert re.search(r'<label class="slot r2c3 switch-cell" data-when="mode=batch variant=api" '
+                     r'data-tip="Auto-approved by the demonstrator"><input type="checkbox" name="approval"[^>]*> '
+                     r'Require approval</label>', html)
     for value in ("rest", "est", "cmpv2", "scep"):
         assert f'name="protocol" value="{value}"' in html
     assert 'name="profile_id"' not in html  # profiles are shared, not chosen
@@ -102,7 +109,7 @@ def test_guide_questions_share_one_q_grid_section(configured_user):
     issuance = sections[0]
     (grid,) = [n for n in issuance.children if n.tag == "div"]
     assert grid.attrs["class"].split() == ["fields", "q-grid"]
-    questions = ("key_location", "mode", "count", "protocol", "auth_method", "variant")
+    questions = ("key_location", "mode", "count", "protocol", "auth_method", "variant", "approval")
     owner = {}
     for node in grid.walk():
         if node.tag == "input" and node.attrs.get("name") in questions:
@@ -110,21 +117,26 @@ def test_guide_questions_share_one_q_grid_section(configured_user):
             owner.setdefault(node.attrs["name"], set()).add(id(item))
     assert set(owner) == set(questions)
     assert all(len(items) == 1 for items in owner.values())  # one grid item per question
-    assert len({next(iter(items)) for items in owner.values()}) == len(questions)  # side by side, not nested
+    slots = {name: next(iter(items)) for name, items in owner.items()}
+    assert slots["mode"] == slots["count"]  # the count sits inline next to the devices choice
+    assert len(set(slots.values())) == 6  # six fixed slots, side by side, not nested
+    items = [n for n in grid.children if n.tag in ("div", "label")]
+    assert [next(c for c in n.attrs["class"].split() if c[:1] == "r") for n in items] == [
+        "r1c1", "r1c2", "r1c3", "r2c1", "r2c2", "r2c3"]
     certificate = [n for n in sections[1].children if n.tag == "div"][0]
     assert "q-grid" in certificate.attrs["class"].split()
     names = {n.attrs.get("name") for n in certificate.walk() if n.tag in ("input", "select")}
-    assert names == {"ca_id", "run_id", "approval"}
+    assert names == {"ca_id", "run_id"}  # the approval switch moved up into the Issuance grid
 
 
 def test_initial_state(configured_user):
     form = guide(configured_user)
-    assert form.options("key_location") == ["server", "factory"] and form.options("mode") == ["batch", "single"]
+    assert form.options("key_location") == ["server", "factory"] and form.options("mode") == ["single", "batch"]
     assert form.visible("count") and form.visible("variant") and form.visible("approval")
     assert not form.visible("protocol") and not form.visible("auth_method")
     assert form.submission() | {"run_id": "x"} == {
         "use_case": "evergreen", "connection_id": form.submission()["connection_id"], "key_location": "server",
-        "mode": "batch", "count": "10", "variant": "api", "ca_id": ECDSA_CA_ID, "run_id": "x"}
+        "mode": "batch", "count": "2", "variant": "api", "ca_id": ECDSA_CA_ID, "run_id": "x"}  # batch preselected
 
 
 def test_questions_follow_the_answers(configured_user):
@@ -150,7 +162,7 @@ def test_questions_follow_the_answers(configured_user):
     assert form.submission()["auth_method"] == "passcode"
     # back to batch: the single-device questions are not submitted at all
     form.choose("mode", "batch")
-    assert not {"protocol", "auth_method"} & set(form.submission()) and form.submission()["count"] == "10"
+    assert not {"protocol", "auth_method"} & set(form.submission()) and form.submission()["count"] == "2"
 
 
 def test_factory_single_keeps_the_default_api_key(configured_user):
@@ -188,7 +200,7 @@ def test_profile_hint_follows_the_protocol(configured_user):
 PATHS = [
     # answers in click order → expected (use case, mode, count, variant, protocol, auth)
     ({"count": "3"}, ("uc01", "batch", 3, "api", None, None)),
-    ({"variant": "webui"}, ("uc01", "batch", 10, "webui", None, None)),
+    ({"variant": "webui"}, ("uc01", "batch", 2, "webui", None, None)),
     ({"mode": "single"}, ("uc01", "single", 1, "api", None, None)),
     ({"mode": "single", "variant": "webui"}, ("uc01", "single", 1, "webui", None, None)),
     ({"key_location": "factory", "count": "2"}, ("uc02", "batch", 2, "api", None, None)),
@@ -305,7 +317,7 @@ def test_batch_keeps_its_count(configured_user, store):
 def hint(html: str, name: str) -> str:
     """The read-only profile field: the name as value, below it "<validity>[ – <note>]"."""
     match = re.search(r'<span class="field-label">Certificate profile</span>\s*<div class="readonly-value mono" '
-                      r'tabindex="0" data-tip="Shared per account[^"]*">' + re.escape(name) + r'</div>\s*'
+                      r'tabindex="0" data-tip="Shared per account – kept by DTM">' + re.escape(name) + r'</div>\s*'
                       r'<small class="field-help">([^<]*)</small>', html)
     assert match, name
     return match.group(1)
@@ -317,9 +329,9 @@ def test_profile_hints(configured_user, fake):
     shared(fake, dtm.PROFILE_EVERGREEN_CMP, status="DISABLED")
     html = configured_user.get("/runs/new/evergreen").text
     assert hint(html, EVERGREEN) == "5 years"
-    assert hint(html, CMP) == "5 years · bare key – retired, this run enables it again"
+    assert hint(html, CMP) == "5 years · bare key · enabled again"
     uc04 = configured_user.get("/runs/new/uc04").text
-    assert hint(uc04, RENEWAL) == "6 months · renew any time – created or restored by this run, DTM keeps it"
+    assert hint(uc04, RENEWAL) == "6 months · renew any time · new"
     assert EVERGREEN not in uc04
     assert dtm_writes(fake) == []  # the form only reads the status
 
@@ -328,7 +340,7 @@ def test_hints_ignore_a_foreign_account(configured_user, fake):
     from tests.fakedtm import OTHER_ACCOUNT_ID
     from tests.integration.test_shared_profiles import shared
     shared(fake, dtm.PROFILE_EVERGREEN, account_id=OTHER_ACCOUNT_ID)
-    assert hint(configured_user.get("/runs/new/evergreen").text, EVERGREEN).endswith("created or restored by this run, DTM keeps it")
+    assert hint(configured_user.get("/runs/new/evergreen").text, EVERGREEN) == "5 years · new"  # theirs does not count
 
 
 def test_form_with_dtm_error_is_502(configured_user, fake):
@@ -471,3 +483,32 @@ def test_settings_profiles_guards(web, configured_store, auth, fake, data_dir):
     assert web.post("/settings/connections/999/profiles/retire").status_code == 404
     cross = web.post(f"/settings/connections/{conn}/profiles/retire", headers={"Origin": "https://evil.example"})
     assert cross.status_code == 403 and "profile_disable" not in fake.route_order()
+
+
+
+# --- labels are terms, never questions (author's style rule) ---------------------------------------
+
+@pytest.mark.parametrize("path", ["/runs/new/evergreen", "/runs/new/uc04", "/runs/new/uc05"])
+def test_run_form_labels_are_terms(configured_user, path):
+    html = configured_user.get(path).text
+    form = html[html.index('<form method="post" action="/runs"'):html.index("</form>", html.index('action="/runs"'))]
+    labels = re.findall(r'<span class="seg-label"[^>]*>([^<]*)</span>', form)
+    labels += re.findall(r'<span class="field-label">([^<]*)</span>', form)
+    labels += [re.sub(r"<[^>]+>", "", m).strip() for m in re.findall(r"<label[^>]*>(.*?)</label>", form, re.S)]
+    labels += re.findall(r"<legend[^>]*>([^<]*)</legend>", form) + re.findall(r'aria-label="([^"]*)"', form)
+    labels += re.findall(r"<h3>([^<]*)</h3>", form)
+    assert labels and not [label for label in labels if "?" in label], labels
+
+
+def test_guide_labels_and_options(configured_user):
+    html = configured_user.get("/runs/new/evergreen").text
+    seg = dict(re.findall(r'<span class="seg-label" id="l-([a-z_]+)">([^<]*)</span>', html))
+    assert seg == {"key_location": "Key generation", "mode": "Devices", "variant": "Run via", "protocol": "Protocol",
+                   "auth_method": "Authentication"}
+    form = guide(configured_user)
+
+    def texts(name):
+        return [re.sub(r"\s+", " ", n.parent.text).strip() for n in form.inputs()
+                if n.attrs.get("name") == name and n.attrs.get("type") == "radio"]
+    assert texts("key_location") == ["DTM (server-side)", "Factory"]
+    assert texts("mode") == ["Single", "Batch"] and texts("variant") == ["API (measured)", "DTM web UI"]

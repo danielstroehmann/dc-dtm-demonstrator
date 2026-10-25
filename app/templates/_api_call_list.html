@@ -6,11 +6,11 @@
       <span class="method {{ c.method | lower }}">{{ c.method }}</span>
       <code class="path">{{ c.path }}</code>
       <span class="call-time">{% if c.count > 1 %}{{ c.count }}× · {% endif %}{% if c.seconds is not none %}{{ c.seconds }} s{% endif %}{% if c.outcome != "ok" %} · <span class="error">{{ c.outcome }}</span>{% endif %}</span>
+      {% if c.spec %}<button class="btn-sm outline" data-copy="pre-{{ id }}">Copy</button>{% endif %}
     </div>
     <p class="call-purpose">{{ c.purpose }}</p>
     {% if c.spec %}
     <div class="snippet">
-      <div class="snippet-head"><span></span><button class="btn-sm outline" data-copy="pre-{{ id }}">Copy</button></div>
       <pre id="pre-{{ id }}"><code>{{ snippets.render(c.spec, dialect) }}</code></pre>
     </div>
     {% endif %}

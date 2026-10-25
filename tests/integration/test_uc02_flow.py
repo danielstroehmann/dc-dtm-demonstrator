@@ -348,4 +348,4 @@ async def test_factory_csrs_logs_start_and_end(store):
     await evergreen.factory_csrs(["a", "b"], "P_256", lambda msg, level="step": events.append((level, msg)))
     assert events[0] == ("step", "Factory generates 2 key pair(s) and CSR(s)")
     assert events[1][0] == "success" and "2 CSR(s) ready in" in events[1][1]
-    assert "the private keys stay in the factory" in events[1][1]
+    assert events[1][1].startswith("2 CSR(s) ready in ") and events[1][1].endswith("s")  # no explanatory tail

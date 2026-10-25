@@ -5,33 +5,17 @@
 <div class="page-head"><h1>Welcome</h1></div>
 {% include "_welcome.html" %}
 {% else %}
-<div class="page-head"><h1>Start a demo</h1></div>
 <section class="block">{% include "_use_cases.html" %}</section>
 <section class="block">
   <div class="section-title"><h2>Recent runs</h2></div>
   <article class="card">
   {% if runs %}
   <div class="overflow-auto">
-  <table class="striped data-table">
-    <thead><tr><th>Run</th><th>Use case</th>{% if several %}<th>Connection</th>{% endif %}<th>Variant</th><th>Status</th><th>Cleanup</th><th>Created (UTC)</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+  <table class="striped data-table runs-table">
+    <colgroup><col class="c-run"><col>{% if several %}<col class="c-conn">{% endif %}<col class="c-variant"><col class="c-status"><col class="c-cleanup"><col class="c-created"><col class="c-actions"></colgroup>
+    <thead><tr><th>Run</th><th>Use case</th>{% if several %}<th>Connection</th>{% endif %}<th>Variant</th><th>Status</th><th>Clean up</th><th>Created (UTC)</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
     <tbody>
-    {% for run in runs %}
-      <tr>
-        <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-        <td>{{ use_case_names.get(run.use_case, run.use_case) }} · {{ run.params.mode }} ({{ run.params.count }})</td>
-        {% if several %}<td>{{ run.connection }}</td>{% endif %}
-        {# Enrollment-protocol runs: the protocol and how the factory authenticates; otherwise API or web UI #}
-        <td>{% if run.params.protocol %}{{ protocols.get(run.params.protocol, run.params.protocol) }} · {{ auths.get(run.params.auth, run.params.auth) }}{% else %}{{ "API" if run.params.variant == "api" else "Web UI" }}{% endif %}</td>
-        <td>{{ pill(run.status) }}</td>
-        <td>{% if run.cleanup_status %}{{ pill(run.cleanup_status) }}{% else %}–{% endif %}</td>
-        <td>{{ run.created_at[:16].replace("T", " ") }}</td>
-        <td class="actions-cell">{% if run.rolled_back %}
-          <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">
-            <button type="submit" class="secondary outline btn-sm" aria-label="Delete run {{ run.id }}">Delete</button>
-          </form>
-        {% endif %}</td>
-      </tr>
-    {% endfor %}
+    {% for run in runs %}{% include "_run_row.html" %}{% endfor %}
     </tbody>
   </table>
   </div>

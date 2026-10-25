@@ -189,7 +189,7 @@ class Store:
         # The overview needs no results (they hold every issued certificate).
         return [_run(r) for r in self._exec(
             "SELECT id, use_case, params, status, created_at, finished_at, NULL AS result, error, cleanup_mode, "
-            "cleanup_status, NULL AS progress FROM runs ORDER BY created_at DESC").fetchall()]
+            "cleanup_status, progress FROM runs ORDER BY created_at DESC").fetchall()]
 
     def update_run(self, run_id: str, **fields) -> None:
         for key in ("params", "result", "progress"):
@@ -214,6 +214,7 @@ class Store:
         # An interrupted renewal leaves the device with its previous, still valid certificate.
         self._exec("UPDATE runs SET status = 'completed' WHERE status = 'renewing'")
         self._exec("UPDATE runs SET cleanup_status = 'interrupted' WHERE cleanup_status = 'running'")
+        self._exec("UPDATE runs SET progress = NULL WHERE progress IS NOT NULL")  # nothing is in progress after a restart
 
     # ledger of DTM objects created by a run – the primary source for cleanup
     def add_object(self, run_id: str, kind: str, dtm_id: str, name: str) -> None:

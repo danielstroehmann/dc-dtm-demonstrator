@@ -59,7 +59,7 @@ GUIDE = UseCase(
     "Evergreen device certificates",
     "Long-lived device certificates for the factory – answer a few questions and the run shows the matching "
     "flow end to end.",
-    "client_side", ("Server-side or factory keys", "Batch · Single", "REST · EST · CMPv2 · SCEP"))
+    "client_side", ("REST · EST · CMPv2 · SCEP", "Single · Batch", "Server-side or factory keys"))
 CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"], "uc05": USE_CASES["uc05"]}
 # What the UI calls a run's use case: the catalog entry it was started from (no internal UC numbers).
 DISPLAY_NAMES = {uc: (GUIDE if uc in ("uc01", "uc02", "uc03") else use_case).title for uc, use_case in USE_CASES.items()}
@@ -144,7 +144,7 @@ async def factory_csrs(names: list[str], key_type: str, log) -> tuple[dict[str, 
     the event loop keeps serving the UI meanwhile."""
     log(f"Factory generates {len(names)} key pair(s) and CSR(s)")
     csrs, seconds = await asyncio.to_thread(_make_csrs, names, key_type)
-    log(f"{len(names)} CSR(s) ready in {seconds:.2f}s – the private keys stay in the factory", "success")
+    log(f"{len(names)} CSR(s) ready in {seconds:.2f}s", "success")
     return csrs, seconds
 
 
@@ -230,7 +230,7 @@ async def create_division(client: DTMClient, api: ApiCalls, store: Store, run_id
         phase="setup")
     variables["RZONE_ID"] = rzone_id
     division_id = await api.timed(
-        "Create a division for this run (the response has no ID)", "POST", DIVISION_PATH,
+        "Create a division for this run", "POST", DIVISION_PATH,
         client.create_division(division_name, DIVISION_DESCRIPTION, rzone_id),
         spec={"method": "POST", "path": DIVISION_PATH, "body_file": "division.json",
               "json": dtm.division_body("{RUN_NAME}-division", DIVISION_DESCRIPTION, "{DTM_ACCOUNT_ID}", "{RZONE_ID}")},
@@ -252,10 +252,10 @@ async def use_profile(client: DTMClient, api: ApiCalls, store: Store, run_id: st
     name = f"{prefix(run_id, use_case)}-profile"
     own = replace(spec, name=name)
     validity = f"{spec.value} {spec.unit}"
-    log(f"Creating certificate profile {name} ({validity}) – the full rollback deletes it again")
+    log(f"Creating certificate profile {name} ({validity})")
     body = await client.run_profile_body(own)
     profile_id = await api.timed(
-        f"Create the certificate profile for this run ({validity}, copied from the account's client profile)",
+        f"Create the certificate profile for this run ({validity})",
         "POST", dtm.PROFILES, client.create_run_profile(own, body),
         spec={"method": "POST", "path": dtm.PROFILES, "body_file": "profile.json",
               "json": body | {"account_id": "{DTM_ACCOUNT_ID}"},
@@ -270,7 +270,7 @@ async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.Profile
     """The purpose's shared profile (validity etc.) – created by the first run, reused afterwards."""
     validity = f"{spec.value} {spec.unit}"
     profile_id, how = await api.timed(
-        f"Find the shared profile {spec.name} ({validity}) – the demonstrator creates it once per account", "GET",
+        f"Find the shared profile {spec.name} ({validity})", "GET",
         dtm.PROFILES, client.shared_profile(spec),
         # The profile list spans every account the key sees – the account filter is essential.
         spec={"method": "GET", "path": dtm.PROFILES, "query": LIST, "capture": one_record(
@@ -322,7 +322,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
         if p["variant"] == "webui":
             result |= await _prepare_portal(api, run_id, p, run_dir, log)
             store.update_run(run_id, status="waiting", result=result)
-            log("Setup done – continue in the DTM portal", "success")
+            log("Setup done – continue in the DTM web UI", "success")
             return
         if p["mode"] == "single":
             result |= await _single(client, api, store, run_id, policy_id, p, log)
@@ -349,7 +349,7 @@ async def _single(client: DTMClient, api: ApiCalls, store: Store, run_id: str, p
     csrs, keygen_s = {}, None
     if client_side:
         csrs, keygen_s = await factory_csrs(names, p["key_type"], log)
-        api.add("Generate the device key and CSR (local, per device)", "LOCAL", "openssl", None,
+        api.add("Generate the device key and CSR", "LOCAL", "openssl", None,
                 spec={"command": keygen_command(names[0], p["key_type"])})
     log(f"Requesting {len(names)} certificate(s) one by one – "
         + ("DTM signs each CSR" if client_side else "DTM generates each key pair"))
@@ -409,16 +409,16 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
         store.update_run(run_id, progress={"label": f"Factory generates {len(names)} key pairs", "started": time.time()})
         csrs, keygen_s = await factory_csrs(names, p["key_type"], log)
         payload, artifact = csr_zip(csrs), "csrs.zip"
-        api.add(f"Generate key + CSR for each of the {len(names)} devices and pack the CSRs (local)", "LOCAL",
+        api.add(f"Generate key + CSR for each of the {len(names)} devices and pack the CSRs", "LOCAL",
                 "openssl", None, spec={"command": csr_batch_command(len(names), p["key_type"])})
         upload |= {"form": dtm.csr_batch_fields("{RUN_NAME}-batch", "{POLICY_ID}"),
                    "files": {"data": "@csrs.zip;type=application/zip"}}
     else:
         payload, artifact = batch_zip(names), "batch.zip"
         cert_pem, key_pem = certs.encryption_keypair(f"{pre}-encryption")
-        api.add(f"Write the CSV with the {len(names)} device names and pack it (local)", "LOCAL", "zip", None,
+        api.add(f"Write the CSV with the {len(names)} device names and pack it", "LOCAL", "zip", None,
                 spec={"command": csv_batch_command(len(names))})
-        api.add("Create a one-time RSA key pair DTM encrypts the result to (local)", "LOCAL", "openssl", None,
+        api.add("Create a one-time key pair for the encrypted result", "LOCAL", "openssl", None,
                 spec={"command": ENC_CERT_COMMAND})
         upload |= {"form": dtm.batch_fields("{RUN_NAME}-batch", "{POLICY_ID}", p["key_type"]),
                    "files": {"encryption_certificate": "<enc.crt", "data": "@batch.zip;type=application/zip"}}
@@ -435,7 +435,7 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
     job_id = job["id"]
     variables["JOB_ID"] = job_id
     store.add_object(run_id, "batch_job", job_id, f"{pre}-batch")
-    log(f"Batch job {job_id} accepted – the clock is running", "success")
+    log(f"Batch job {job_id} accepted", "success")
 
     approval_s = None
     deadline = upload_done + max(600, len(names) * 2)
@@ -458,7 +458,7 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
             if status in ("completed", "failed", "rejected"):
                 break
             if p.get("approval") and approval_s is None and status == "pending_approval":  # verified live
-                log("Approval required – approving via API (the request/approve round trip)")
+                log("Approval required – approving via API")
                 api.add("Wait until the job awaits approval", "GET", f"{JOBS_PATH}/{{JOB_ID}}", None,
                         spec={"method": "GET", "path": f"{JOBS_PATH}/{{JOB_ID}}",
                               "until": {"status": "pending_approval", "stop": ["completed", "failed", "rejected"]}})
@@ -488,18 +488,18 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
     result_path = f"{JOBS_PATH}/{{JOB_ID}}/download/result"
     if client_side:  # certificates only – nothing secret, so DTM sends a plain ZIP
         store.update_run(run_id, progress={"label": "Downloading the result", "started": time.time()})
-        inner = await api.timed("Download the result (ZIP with the certificates)", "GET", result_path,
+        inner = await api.timed("Download the result", "GET", result_path,
                                 client.batch_result(job_id),
                                 spec={"method": "GET", "path": result_path, "output": "result.zip"})
-        api.add("Unpack the certificates (local)", "LOCAL", "unzip", None,
+        api.add("Unpack the certificates", "LOCAL", "unzip", None,
                 spec={"command": {"bash": "rm -rf result && unzip -q result.zip -d result && ls result",
                                   "powershell": "Expand-Archive -Force result.zip result; Get-ChildItem result"}})
     else:
         store.update_run(run_id, progress={"label": "Downloading and decrypting the result", "started": time.time()})
-        envelope = await api.timed("Download the encrypted result (CMS envelope)", "GET", result_path,
+        envelope = await api.timed("Download the encrypted result", "GET", result_path,
                                    client.batch_result(job_id),
                                    spec={"method": "GET", "path": result_path, "output": "result.p7m"})
-        api.add("Decrypt the result with the one-time key and unpack it (local)", "LOCAL", "openssl", None,
+        api.add("Decrypt and unpack the result", "LOCAL", "openssl", None,
                 spec={"command": {"bash": DECRYPT_COMMAND + "\nrm -rf result && unzip -q result.zip -d result && ls result",
                                   "powershell": DECRYPT_COMMAND + "\nExpand-Archive -Force result.zip result; Get-ChildItem result"}})
         inner = certs.decrypt_result(envelope, cert_pem, key_pem)
@@ -529,13 +529,13 @@ async def _prepare_portal(api: ApiCalls, run_id: str, p: dict, run_dir: Path, lo
         (run_dir / "csrs.zip").write_bytes(csr_zip(csrs))
         artifact = "csrs.zip"
         devices = f"each of the {len(names)} devices" if len(names) > 1 else "the device"
-        api.add(f"Generate key + CSR for {devices} and pack the CSRs (local)", "LOCAL",
+        api.add(f"Generate key + CSR for {devices} and pack the CSRs", "LOCAL",
                 "openssl", keygen_s, spec={"command": csr_batch_command(len(names), p["key_type"], p["mode"])})
     elif p["mode"] == "batch":
         (run_dir / "batch.zip").write_bytes(batch_zip(names))
         log(f"Batch upload file with {p['count']} entries ready for download", "success")
         artifact = "batch.zip"
-        api.add(f"Write the CSV with the {len(names)} device names and pack it (local)", "LOCAL", "zip", None,
+        api.add(f"Write the CSV with the {len(names)} device names and pack it", "LOCAL", "zip", None,
                 spec={"command": csv_batch_command(len(names))})
     task = (f"upload {artifact} as a batch request" if p["mode"] == "batch"
             else ("request the certificates one by one" if len(names) > 1 else "request the certificate")

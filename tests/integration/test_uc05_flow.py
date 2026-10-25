@@ -74,7 +74,7 @@ async def test_uc05_provisions_bound_passcodes_and_enrolls_in_the_field(store, e
     calls = r["api_calls"]
     (create,) = [c for c in calls if c["path"] == enrollment.PASSCODE_PATH]
     assert (create["phase"], create["count"], create["method"]) == ("recurring", count, "POST")
-    assert create["purpose"] == "Create the device's one-time passcode, bound to its common name (factory, once per device)"
+    assert create["purpose"] == "Create the device's one-time passcode, bound to its common name"
     field = [c for c in calls if c["phase"] == "field"]
     assert field and sum(c["method"] == "POST" for c in field) == 1
     assert next(c for c in field if c["method"] == "POST")["count"] == count
@@ -289,7 +289,7 @@ async def test_passcodes_come_after_policy_setup(store, enroll_net, cmp_openssl,
     # after every DTM setup call (local setup steps of the protocol may follow)
     assert paths.index(enrollment.PASSCODE_PATH) > max(i for i, c in enumerate(calls)
                                                        if c["phase"] == "setup" and c["method"] != "LOCAL")
-    ref_step = next(c for c in calls if c["purpose"].startswith("Read the passcode reference"))
+    ref_step = next(c for c in calls if c["purpose"] == "Extract the passcode reference (CMPv2 sender ID)")
     assert ref_step["phase"] == "recurring" and calls.index(ref_step) == paths.index(enrollment.PASSCODE_PATH) + 1
 
 
@@ -329,17 +329,24 @@ async def test_checks_that_cannot_reach_dtm_are_inconclusive(store, enroll_net, 
     for row in (one, two):
         assert row["ok"] is False and row["outcome"].startswith("inconclusive – "), row
         assert "issued" not in row["outcome"]
-    assert three["check"] == "Usage of that passcode afterwards" and three["expected"] == "used up (current DTM behaviour)"
+    assert three["check"] == "Passcode usage afterwards" and three["expected"] == "used up"
     assert (three["ok"], three["outcome"]) == (False, "usage 0 of 1")  # the request never reached the passcode
+    for row in (one, two):  # the full error stays available (tooltip), the outcome is DTM's message only
+        assert row["detail"].startswith(("EST returned 503", "CMPv2 request rejected"))
+        assert row["outcome"] == "inconclusive – " + enrollment.dtm_message(row["detail"])
 
 
 @pytest.mark.parametrize("protocol", ["est", "cmpv2"])
 async def test_real_rejections_count_and_usage_is_reported(store, enroll_net, cmp_openssl, tmp_path, protocol):
     run = await start(store, enroll_net, "j5", tmp_path, protocol=protocol)
     one, two, three = run["result"]["checks"]
-    assert one["ok"] and two["ok"] and not one["outcome"].startswith("inconclusive")
-    assert three == {"check": "Usage of that passcode afterwards", "expected": "used up (current DTM behaviour)",
-                     "ok": True, "outcome": "usage 1 of 1 – this device could not enroll any more"}
+    assert (one["ok"], one["outcome"]) == (True, "Passcode has reached its usage limit")
+    assert (two["ok"], two["outcome"]) == (True, "Invalid registered value provided in attribute: subject.common_name")
+    for row in (one, two):
+        assert row["detail"] != row["outcome"] and row["outcome"] in row["detail"]  # full text kept as detail
+        assert ("returned 400" if protocol == "est" else "PKIStatus: rejection") in row["detail"]
+    assert three == {"check": "Passcode usage afterwards", "expected": "used up", "ok": True,
+                     "outcome": "usage 1 of 1 – the rejected request used it up, this device could not enroll any more"}
 
 
 async def test_a_failing_check_does_not_fail_the_run(store, enroll_net, tmp_path, monkeypatch):
@@ -381,9 +388,10 @@ async def test_batch_labels(store, enroll_net, tmp_path):
     assert any(m.startswith("3 devices enrolled – ") and m.endswith("s per request") for m in messages)
 
 
-@pytest.mark.parametrize("protocol,reason", [("est", "returned 401"), ("cmpv2", "MAC verification failed")])
+@pytest.mark.parametrize("protocol,reason,detail", [("est", "invalid passcode", "returned 401"),
+                                                    ("cmpv2", "MAC verification failed", "PKIStatus: rejection")])
 async def test_rejection_for_another_reason_does_not_count(store, enroll_net, cmp_openssl, tmp_path, monkeypatch,
-                                                            protocol, reason):
+                                                            protocol, reason, detail):
     """Both checks get a real rejection – but for a wrong passcode, not for the rule they test: DTM
     holds other secrets than the station sends (EST: 401 invalid passcode; CMPv2: MAC check)."""
     original_checks, original_create = enrollment._passcode_checks, dtm.DTMClient.create_passcode
@@ -402,8 +410,8 @@ async def test_rejection_for_another_reason_does_not_count(store, enroll_net, cm
     assert run["status"] == "completed", run["error"]
     one, two, three = run["result"]["checks"]
     for row in (one, two):
-        assert row["ok"] is False and row["outcome"].startswith("rejected for another reason – "), row
-        assert reason in row["outcome"]
+        assert row["ok"] is False and row["outcome"] == f"rejected for another reason – {reason}", row
+        assert detail in row["detail"]
         assert "reached its usage limit" not in row["outcome"] and "Invalid registered value" not in row["outcome"]
     assert (three["ok"], three["outcome"]) == (False, "usage 0 of 1")  # refused before the passcode was used
     cmp_openssl.sync_to_dtm()
@@ -416,3 +424,26 @@ def test_check_reason_patterns():
     assert enrollment.REGISTERED_VALUE.search("Invalid registered value provided in attribute: subject.common_name")
     for other in ("EST returned 401: invalid passcode", 'StatusString: "MAC verification failed"'):
         assert not enrollment.USAGE_LIMIT.search(other) and not enrollment.REGISTERED_VALUE.search(other)
+
+
+
+def test_dtm_message():
+    est = 'EST request failed: EST returned 400: {"errors":[{"code":"invalid_input","message":"Passcode has reached its usage limit"}]}'
+    assert enrollment.dtm_message(est) == "Passcode has reached its usage limit"
+    cmp = ('CMPv2 request rejected: CMP error: request rejected by server:PKIStatus: rejection; StatusString: '
+           '"Invalid registered value provided in attribute: subject.common_name"; PKIFailureInfo: badRequest')
+    assert enrollment.dtm_message(cmp) == "Invalid registered value provided in attribute: subject.common_name"
+    for plain in ("EST returned 503: Service Unavailable", "usage 1 of 1", "CMPv2 request timed out", ""):
+        assert enrollment.dtm_message(plain) == plain
+    assert enrollment.dtm_message('{"errors":[{"code":"x", "message" : "spaced"}]}') == "spaced"
+
+
+async def test_timeline_wording(store, enroll_net, tmp_path):
+    await start(store, enroll_net, "t5", tmp_path)
+    messages = [e["message"] for e in store.events("t5")]
+    assert "Rejected as expected: Passcode has reached its usage limit" in messages
+    assert "Rejected as expected: Invalid registered value provided in attribute: subject.common_name" in messages
+    assert not any(" enrolled in " in m for m in messages)  # a single device: only the summary line
+    await start(store, enroll_net, "t6", tmp_path, checks=False, **batch(2))
+    per_device = [m for m in (e["message"] for e in store.events("t6")) if " enrolled in " in m]
+    assert [m.split(" enrolled in ")[0] for m in per_device] == evergreen.common_names("t6", "est", 2, UC)
