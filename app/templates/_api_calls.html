@@ -30,7 +30,7 @@
 
   {% if setup %}
   <details class="box neutral">
-    <summary>One-time setup</summary>
+    <summary><h3 class="phase-title"><span class="phase-icon">{{ icon("settings") }}</span>One-time setup</h3></summary>
     <div class="box-head"><span></span><button class="btn-sm outline" data-copy="script-setup-{{ dialect }}">Copy as script</button></div>
     {% with phase = "setup", group = setup %}{% include "_api_call_list.html" %}{% endwith %}
     <pre id="script-setup-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "setup") }}</pre>
@@ -50,7 +50,7 @@
   {% if field %}
   <section class="box accent field">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Enrollment in the field</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Field enrollment</h3>
       <button class="btn-sm outline" data-copy="script-field-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "field", group = field %}{% include "_api_call_list.html" %}{% endwith %}
@@ -60,7 +60,7 @@
   {% if renewal %}
   <section class="box accent field">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Renewal in the field</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Field renewal</h3>
       <button class="btn-sm outline" data-copy="script-renewal-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "renewal", group = renewal %}{% include "_api_call_list.html" %}{% endwith %}

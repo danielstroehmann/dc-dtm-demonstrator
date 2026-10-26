@@ -71,7 +71,7 @@ async def test_uc05_provisions_bound_passcodes_and_enrolls_in_the_field(store, e
     # the ledger: auth policy, every passcode (and the check's), policy, division – no profile on US
     kinds = sorted(o["kind"] for o in store.objects("u5"))
     assert kinds == sorted(["auth_policy", "division", "policy"] + ["passcode"] * (count + checks))
-    # phases: setup, factory provisioning (recurring), enrollment in the field
+    # phases: setup, factory provisioning (recurring), field enrollment
     calls = r["api_calls"]
     (create,) = [c for c in calls if c["path"] == enrollment.PASSCODE_PATH]
     assert (create["phase"], create["count"], create["method"]) == ("recurring", count, "POST")
@@ -483,7 +483,7 @@ async def test_without_pause_the_run_never_stops(store, enroll_net, tmp_path, mo
     run = await start(store, enroll_net, "q5", tmp_path, pause=False, checks=False)
     assert run["status"] == "completed", run["error"]
     assert "paused" not in statuses
-    assert not any("Enrollment in the field started" in e["message"] for e in store.events("q5"))
+    assert not any("Field enrollment started" in e["message"] for e in store.events("q5"))
 
 
 @pytest.mark.parametrize("protocol,count", [("est", 1), ("cmpv2", 2)])
@@ -504,7 +504,7 @@ async def test_pause_waits_with_the_passcodes_in_dtm_until_the_field_starts(stor
     assert run["progress"] is None and not task.done()
     events = [e["message"] for e in store.events("z5")]
     assert any(m.startswith("Passcodes are in DTM") for m in events)
-    assert not any("Enrollment in the field started" in m for m in events)
+    assert not any("Field enrollment started" in m for m in events)
     # still waiting after many more polls
     import asyncio
     for _ in range(200):
@@ -519,7 +519,7 @@ async def test_pause_waits_with_the_passcodes_in_dtm_until_the_field_starts(stor
     assert [c["ok"] for c in r["checks"]] == [True, True, True]
     assert all(enroll_net.passcode_usage(o) == 1 for o in own.values())
     events = [e["message"] for e in store.events("z5")]
-    assert events.index("Enrollment in the field started") > next(
+    assert events.index("Field enrollment started") > next(
         i for i, m in enumerate(events) if m.startswith("Passcodes are in DTM"))
     cmp_openssl.sync_to_dtm()
     assert sorted(c["common_name"] for c in enroll_net.issued()) == sorted(names)
@@ -538,7 +538,7 @@ async def test_rollback_during_the_pause_ends_the_run_and_removes_the_passcodes(
     assert len(passcodes(enroll_net, "robot-r5-uc05-passcode-0")) == 2
     cleanup_run = await do_cleanup(store, enroll_net, "r5", "full", tmp_path)
     run = await asyncio.wait_for(task, 30)
-    assert run["status"] == "failed" and run["error"] == "rolled back before the enrollment in the field"
+    assert run["status"] == "failed" and run["error"] == "rolled back before the field enrollment"
     assert run["finished_at"]
     # the run task neither logs its end nor resets the progress – the cleanup's heartbeat owns both
     (failed,) = [u for u in updates if u.get("status") == "failed"]
@@ -574,7 +574,7 @@ async def test_pause_ends_after_the_time_limit(store, enroll_net, tmp_path, monk
     clock["offset"] = 121
     run = await asyncio.wait_for(task, 30)
     assert run["status"] == "failed"
-    assert run["error"] == "the enrollment in the field was not started within 2 minutes"
+    assert run["error"] == "the field enrollment was not started within 2 minutes"
     assert enroll_net.enroll_requests == []
     run = await do_cleanup(store, enroll_net, "t5", "full", tmp_path)
     assert run["cleanup_status"] == "done"

@@ -18,7 +18,7 @@ from tests.integration import test_replayable_steps
 from tests.integration.test_uc03_flow import all_snippets
 
 UC = "uc06"
-# (factory protocol, authentication, renewal in the field)
+# (factory protocol, authentication, field renewal)
 COMBOS = [("rest", "apikey", "rest"), ("rest", "passcode", "rest"), ("rest", "certificate", "rest"),
           ("est", "passcode", "est"), ("est", "certificate", "est"), ("est", "passcode", "rest"),
           ("cmpv2", "passcode", "cmpv2"), ("cmpv2", "certificate", "cmpv2"), ("cmpv2", "certificate", "rest"),

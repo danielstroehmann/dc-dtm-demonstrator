@@ -424,7 +424,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if use_case in ("uc04", "uc05"):  # renewal per click (uc04) / one-time passcodes in the field (uc05)
             protocol = protocol or "est"
             if protocol not in ("est", "cmpv2"):
-                raise HTTPException(400, "Enrollment in the field: EST or CMPv2.")
+                raise HTTPException(400, "Field enrollment: EST or CMPv2.")
         if use_case == "uc05":
             auth_method = "passcode"
         if enrolled:  # enrollment protocols: API only, sequential single requests, no approval
@@ -575,10 +575,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.post("/runs/{run_id}/enroll")
     async def enroll_run(run_id: str):
-        """UC-5: the run paused after the factory step continues with the enrollment in the field."""
+        """UC-5: the run paused after the factory step continues with the field enrollment."""
         run = get_run_or_404(run_id)
         if run["use_case"] != "uc05":
-            raise HTTPException(409, "Only a passcode-bound run waits for the enrollment in the field")
+            raise HTTPException(409, "Only a passcode-bound run waits for the field enrollment")
         if not run.get("cleanup_status"):  # a double click or a stale page just shows the run as it is
             store.claim_status(run_id, "paused", "running")
         return RedirectResponse(f"/runs/{run_id}", status_code=303)

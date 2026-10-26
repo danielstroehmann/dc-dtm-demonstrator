@@ -19,7 +19,7 @@
       </div>
     </section>
     <section class="box accent field">
-      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Renewal in the field <small>{{ {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}.get(run.params.field, "REST API") }}</small></h3></div>
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Field renewal <small>{{ {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}.get(run.params.field, "REST API") }}</small></h3></div>
       <div class="metrics metrics-4">
         <div><small data-tip="Last round, all devices">All devices</small><p class="metric">{{ last.duration_s ~ " s" if last else "–" }}</p></div>
         <div><small>Per device</small><p class="metric">{{ "%.2f s" | format(last.per_certificate_s or last.duration_s) if last else "–" }}</p></div>
@@ -29,7 +29,7 @@
     </section>
   </div>
   <section class="devices">
-    <div class="box-head"><h3>Devices in DTM <small>group {{ r.group }}</small></h3></div>
+    <div class="box-head"><h3>Devices in DTM</h3></div>
     <table class="data-table devices-table">
       <colgroup><col class="c-device"><col class="c-ident"><col class="c-serial"><col class="c-state"><col class="c-until"></colgroup>
       <thead><tr><th>Device name</th><th>Identity in certificate (CN)</th><th>Certificate</th><th>Status</th><th>Valid until</th></tr></thead>
@@ -56,7 +56,7 @@
       </div>
     </section>
     <section class="box accent field">
-      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Enrollment in the field</h3></div>
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Field enrollment</h3></div>
       <div class="metrics metrics-4">
         <div><small>All requests</small><p class="metric">{{ r.duration_s }} s</p></div>
         <div><small>Per certificate</small><p class="metric">{{ "%.2f" | format(r.per_certificate_s or r.duration_s) }} s</p></div>

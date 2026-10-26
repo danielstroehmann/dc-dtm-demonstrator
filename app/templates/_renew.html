@@ -4,7 +4,7 @@
 {% set limit = max_renewals(run) %}
 {% set limit_reached = renewals | length >= limit %}
 <article class="card focus">
-  <div class="card-head"><h2>Renewal in the field</h2>
+  <div class="card-head"><h2>Field renewal</h2>
     <form method="post" action="/runs/{{ run.id }}/renew" class="inline">
       <button type="submit" class="btn-icon" {% if run.status == "renewing" or limit_reached %}disabled{% endif %}
               {% if run.status == "renewing" %}aria-busy="true"{% endif %}

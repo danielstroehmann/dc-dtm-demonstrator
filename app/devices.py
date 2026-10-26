@@ -51,7 +51,7 @@ class DeviceError(ValueError):
 def check_choice(protocol: str, auth: str, field: str, identity: str) -> str | None:
     """The form's answers – None when they fit together, else what is wrong."""
     if protocol not in PROTOCOLS or auth not in AUTHS or field not in PROTOCOLS or identity not in IDENTITIES:
-        return "Select the factory protocol, the authentication, the renewal in the field and the identity."
+        return "Select the factory protocol, the authentication, the field renewal and the identity."
     if auth == "apikey" and protocol != "rest":
         return "An API key works only with the REST API."
     return None  # any field protocol: the policy carries the factory's and the field's method
@@ -67,7 +67,7 @@ def identity(run_id: str, number: int, kind: str) -> str:
 
 
 def device_dir(run_dir: Path, name: str) -> Path:
-    """The simulated device's key and certificate (EST/CMPv2 renewal in the field) – removed by the rollback."""
+    """The simulated device's key and certificate (EST/CMPv2 field renewal) – removed by the rollback."""
     return run_dir / "devices" / name
 
 

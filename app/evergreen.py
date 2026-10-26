@@ -45,20 +45,19 @@ USE_CASES = {
         "client_side", ("EST · CMPv2 · SCEP · REST", "Passcode · Factory certificate", "Single device")),
     "uc04": UseCase(
         "Renewable device certificates",
-        "One device is enrolled in the factory via EST or CMPv2 and later renews its certificate in the field with a "
-        "click – authenticated by the certificate it already holds. No device group, so the Essentials license "
-        "is enough.",
+        "Factory enrollment of one device via EST or CMPv2, field renewal per click – authenticated by the "
+        "certificate the device already holds. No device group, so the Essentials license is enough.",
         "client_side", ("EST · CMPv2", "Single device", "Renewal per click")),
     "uc05": UseCase(
         "Passcode-bound device certificates",
-        "The factory only writes a one-time passcode to the device, bound to its common name. In the field the "
-        "device enrolls via EST or CMPv2 – DTM checks the request against the passcode and accepts it once.",
+        "The factory only writes a one-time passcode to the device, bound to its common name. Field enrollment "
+        "via EST or CMPv2 – DTM checks the request against the passcode and accepts it once.",
         "client_side", ("EST · CMPv2", "Single · Batch", "One-time passcode")),
     "uc06": UseCase(
         "Managed devices",
-        "The factory creates each device in DTM and requests its certificate for it – the common name is the "
-        "device name, DTM files the certificate under the device. Renewal per click renews every device; the new "
-        "certificate lands under the same device. Needs the Advanced license.",
+        "The factory creates each device in DTM and requests its certificate for it – the common name is a serial "
+        "number or MAC address, DTM files the certificate under the device. Field renewal per click via EST, CMPv2 "
+        "or REST; the new certificate lands under the same device. Needs the Advanced license.",
         "client_side", ("Advanced license", "Single · Batch", "Renewal per click"), license="advanced"),
 }
 # The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.

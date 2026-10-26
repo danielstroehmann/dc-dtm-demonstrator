@@ -122,3 +122,12 @@ def test_only_the_uc06_tile_is_marked_advanced(configured_user, path):
             assert '<span class="tile-icon">' in tile, key
     assert [k for k, uc in evergreen.CATALOG.items() if uc.license == "advanced"] == ["uc06"]
     assert {uc.license for uc in evergreen.USE_CASES.values()} == {"essentials", "advanced"}
+
+
+def test_card_head_button_is_centred_on_the_title():
+    """The Renew/Enroll form beside a card title is a flex box without button margin – centred on the title."""
+    css = (ROOT / "app" / "static" / "app.css").read_text()
+    form = re.search(r"\.card-head > form\.inline\s*\{([^}]*)\}", css)
+    button = re.search(r"\.card-head > form\.inline > button\s*\{([^}]*)\}", css)
+    assert form and "display: flex" in form.group(1)
+    assert button and re.search(r"margin:\s*0\s*;", button.group(1))

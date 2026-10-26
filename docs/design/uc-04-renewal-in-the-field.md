@@ -1,4 +1,4 @@
-# UC-4 – Renewable device certificates (renewal in the field)
+# UC-4 – Renewable device certificates (field renewal)
 
 > Status: implemented 2026-10-24 (`app/enrollment.py`, `renew`). Verified live: enrollment + renewal,
 > cleanup without residue.
@@ -6,7 +6,7 @@
 ## Requirements (from the author, 2026-10-24)
 
 - One device only – no batch.
-- Enrollment in the factory, then **renewal in the field per click**, authenticated with the certificate
+- Enrollment in the factory, then **field renewal per click**, authenticated with the certificate
   the device already holds.
 - Reproducible steps contain both, enrollment and renewal – as separate blocks, every API call on its own.
 
@@ -16,7 +16,7 @@
 |---|---|
 | Setup | Division, authentication policy with the factory credential (passcode or factory certificate), EST policy – **no device group (Essentials)** |
 | Factory enrollment | Key + CSR → EST `simpleenroll` → PEM. The simulated device keeps key and certificate in `<data>/runs/<id>/device/device.pem` (written atomically, 0600, never shown, removed on any cleanup) |
-| Renewal in the field (per click, max. 5 per run) | New key + CSR → EST `simplereenroll` on `clientauth.<host>` with the **current device certificate as mTLS client certificate** → PEM; the device switches to the new key and certificate |
+| Field renewal (per click, max. 5 per run) | New key + CSR → EST `simplereenroll` on `clientauth.<host>` with the **current device certificate as mTLS client certificate** → PEM; the device switches to the new key and certificate |
 
 ## Findings (live)
 
@@ -33,7 +33,7 @@
 
 ## Renewal protocols (verified live 2026-10-25)
 
-| Protocol | Enrollment | Renewal in the field | Result |
+| Protocol | Enrollment | Field renewal | Result |
 |---|---|---|---|
 | EST | `simpleenroll` (passcode or factory certificate) | `simplereenroll` on `clientauth.<host>`, mTLS with the current device certificate | works |
 | CMPv2 | `ir` | `kur` (key update request) signed with the current device certificate (`-cert/-key/-extracerts`, `-trusted` = policy `ca_chain`) | works, 0.7–0.8 s; profile `robot-renewal-cmp-6m-profile` (6 months, bare key) |

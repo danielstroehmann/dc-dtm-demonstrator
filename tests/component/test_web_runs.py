@@ -772,14 +772,17 @@ def test_progress_card_during_cleanup(configured_store, user, store):
 # --- result layout and reproducible-steps grouping --------------------------------------------
 
 # A phase title of the reproducible steps: icon chip + text (Certificate order / Factory enrollment /
-# Renewal in the field), inside a <section class="box accent[ field]">.
+# Field renewal), inside a <section class="box accent[ field]">.
 PHASE_TITLE = re.compile(r'<section class="(box accent[^"]*)">\s*<div class="box-head">\s*'
                          r'<h3 class="phase-title"><span class="phase-icon">(.*?)</span>([^<]+)</h3>', re.S)
 
 
 PHASE_ICONS = {"factory": 'd="M3 21V10l6 4V10l6 4V6l6 3v12z"', "refresh": 'd="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"',
-               "key": 'd="M11 12l9-9M17 6l3 3M15 8l2 2"'}  # _icons.html
-FIELD_PHASES = ("Renewal in the field", "Enrollment in the field")  # the orange "in the field" boxes
+               "key": 'd="M11 12l9-9M17 6l3 3M15 8l2 2"',
+               "settings": 'd="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"'}  # _icons.html
+SETUP_TITLE = re.compile(r'<summary><h3 class="phase-title"><span class="phase-icon">(.*?)</span>One-time setup</h3>'
+                         r'</summary>', re.S)
+FIELD_PHASES = ("Field renewal", "Field enrollment")  # the orange "in the field" boxes
 
 
 def phase_titles(html: str) -> list[tuple[str, str, str]]:
@@ -823,7 +826,10 @@ def test_steps_grouped_by_phase(configured_user, store):
     assert [c["phase"] for c in calls] == ["setup"] * 6 + ["recurring"] * 8
     html = configured_user.get("/runs/r1").text
     setup, recurring = section(html, "setup"), section(html, "recurring")
-    assert "<summary>One-time setup</summary>" in setup
+    setup_icon = SETUP_TITLE.findall(setup)  # the expander title carries the settings icon, like a phase box
+    assert len(setup_icon) == 1 and setup_icon[0].count("<svg") == 1, setup[:400]
+    assert PHASE_ICONS["settings"] in setup_icon[0]
+    assert all(p not in setup_icon[0] for n, p in PHASE_ICONS.items() if n != "settings")
     assert '<details class="box neutral" open' not in html  # collapsed by default
     assert "Certificate order</h3>" in recurring
     assert_phase_titles(html, [("Certificate order", "factory")])

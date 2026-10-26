@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 SOURCE = Path(os.environ.get("TLS_SOURCE_DIR", "/tls-in"))
 TARGET = Path(os.environ.get("TLS_TARGET_DIR", "/tls"))
 EXPIRY_WARNING = timedelta(days=30)
+DEV_NULL = os.stat(os.devnull).st_rdev  # 1:3 in every Linux container
 MAX_SIZE = 1 << 20  # a certificate chain or keystore is a few KB
 
 
@@ -29,7 +30,8 @@ def _read(name: str) -> bytes:
     """An unset path is mounted as /dev/null (empty). Anything else must be a readable regular file."""
     path = SOURCE / name
     try:
-        if not path.exists() or (path.is_char_device() and os.path.samefile(path, "/dev/null")):
+        # A bind-mounted /dev/null is the host's node, not the container's – compare the device number.
+        if not path.exists() or (path.is_char_device() and path.stat().st_rdev == DEV_NULL):
             return b""
         if not path.is_file():
             raise TLSError(f"{name} is not a file – check the path in .env")

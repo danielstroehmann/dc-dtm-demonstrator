@@ -22,13 +22,22 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -m "not live and not smoke"
-      - run: shellcheck -s bash install.sh
+      - run: shellcheck -s bash install.sh scripts/stack-smoke.sh
       # Every release ships with written release notes – checked before any image is published.
       - if: startsWith(github.ref, 'refs/tags/v')
         run: '[ -s "docs/releases/${GITHUB_REF_NAME}.md" ] || { echo "::error::missing release notes docs/releases/${GITHUB_REF_NAME}.md"; exit 1; }'
 
+  # The real compose stack (app, tls, proxy) from this commit's image – catches what unit tests cannot,
+  # e.g. bind mounts (v0.3.0: an unset TLS path mounted as /dev/null stopped the proxy).
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t demonstrator:ci .
+      - run: scripts/stack-smoke.sh demonstrator:ci
+
   image:
-    needs: test
+    needs: [test, stack]
     if: github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

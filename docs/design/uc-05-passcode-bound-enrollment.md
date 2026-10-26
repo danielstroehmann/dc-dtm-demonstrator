@@ -33,7 +33,7 @@ enrollment, a revoke and a passcode delete, one after another).
    presenter can show the passcodes in the DTM portal; *Enroll devices* (`POST /runs/{id}/enroll`) continues.
    The passcodes stay in the task's memory only (a restart interrupts the run), at most 60 minutes, and a
    rollback ends the wait.
-3. **Enrollment in the Field (per device, timed):** key (+ CSR) on the device → EST `simpleenroll` / CMPv2
+3. **Field Enrollment (per device, timed):** key (+ CSR) on the device → EST `simpleenroll` / CMPv2
    `ir` with *its own* passcode → certificate; statistics as UC-3. The run fails if a certificate carries
    a name without a passcode.
 4. **Checks (optional, on by default):** device 0001 enrolls again with its used passcode → rejected; a

@@ -33,3 +33,12 @@ def test_run_id_pattern():
     for bad in ("", "A1", "a-b", "a_b", "a" * 17, "a b", "../x", "ä", "a\n"):
         assert not RUN_ID.fullmatch(bad), bad
 
+
+
+def test_catalog_uses_the_field_wording():
+    """The catalog texts say 'field enrollment/renewal', never 'in the field'; UC-6's CN is a serial or MAC."""
+    from app import evergreen
+    texts = {key: " ".join((uc.title, uc.summary, *uc.tags)) for key, uc in evergreen.USE_CASES.items()}
+    assert all("in the field" not in t.lower() for t in texts.values()), texts
+    assert "field renewal per click" in texts["uc04"].lower() and "Field enrollment via EST or CMPv2" in texts["uc05"]
+    assert "common name is a serial number or MAC address" in texts["uc06"]

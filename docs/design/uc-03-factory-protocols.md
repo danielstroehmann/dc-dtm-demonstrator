@@ -96,14 +96,14 @@ The EST URL is documented as "copy from the policy page" – check whether
   certificate DTM returns; TLS to DTM is verified either way.
 - Factory-certificate authentication for SCEP is not verified – the guide offers the passcode only.
 
-## Renewal in the field – Essentials (verified live 2026-10-24)
+## Field renewal – Essentials (verified live 2026-10-24)
 
 EST policy without device group (Essentials), authentication policy with a passcode only: enrollment with
 the passcode, then `simplereenroll` on `clientauth.<host>` with the **issued device certificate as mTLS
 client certificate** (no passcode, no factory certificate) → `200`, renewed certificate with the same CN,
 new serial, new validity (2.6 s). Policy default `est_request_parameters.renewal_authentication_mode:
 RENEWING_CERTIFICATE_ONLY`. The old certificate stays **issued** (not revoked automatically) – both count
-as licenses. Candidate for a UC-4 "factory enrollment → renewal in the field".
+as licenses. Candidate for a UC-4 "factory enrollment → field renewal".
 
 ## Open
 

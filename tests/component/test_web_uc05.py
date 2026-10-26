@@ -38,7 +38,7 @@ def test_uc05_form(configured_user, fake):
 @pytest.mark.parametrize("protocol", ["scep", "rest", "EST", "cmp", "x"])
 def test_uc05_refuses_other_protocols(configured_user, store, fake, protocol):
     response = configured_user.post("/runs", data=uc05_form(protocol=protocol), follow_redirects=False)
-    assert response.status_code == 400 and "Enrollment in the field: EST or CMPv2." in response.text
+    assert response.status_code == 400 and "Field enrollment: EST or CMPv2." in response.text
     assert store.list_runs() == [] and fake.route_order() == []
 
 
@@ -94,7 +94,7 @@ def test_uc05_overview_phase_pair(configured_user, store, enroll_net, count):
     assert run["status"] == "completed", run["error"]
     html = configured_user.get("/runs/p5").text
     boxes = phase_boxes(html)
-    assert list(boxes) == ["Factory provisioning", "Enrollment in the field"]
+    assert list(boxes) == ["Factory provisioning", "Field enrollment"]
     factory, field = boxes.values()
     assert (factory["classes"], field["classes"]) == ("box accent", "box accent field")
     assert 'd="M3 21V10l6 4V10l6 4V6l6 3v12z"' in factory["icon"] and 'd="M11 12l9-9M17 6l3 3M15 8l2 2"' in field["icon"]
@@ -137,9 +137,9 @@ def test_uc05_steps_and_rollback_from_the_web(configured_user, store, enroll_net
     configured_user.post("/runs", data=uc05_form(mode="batch", count="2"))
     assert finished(store, "p5")["status"] == "completed"
     api = configured_user.get("/runs/p5/api?dialect=curl").text
-    assert_phase_titles(api, [("Factory provisioning", "factory"), ("Enrollment in the field", "key")])
+    assert_phase_titles(api, [("Factory provisioning", "factory"), ("Field enrollment", "key")])
     field = api[api.index('<section class="box accent field">'):]
-    assert "Enrollment in the field</h3>" in field and "simpleenroll" in field
+    assert "Field enrollment</h3>" in field and "simpleenroll" in field
     assert "simpleenroll" not in api[:api.index('<section class="box accent field">')]
     assert 'data-copy="script-field-curl"' in field
     index = configured_user.get("/").text
@@ -154,7 +154,7 @@ def test_uc05_run_page_without_checks(configured_user, store, enroll_net):
     assert finished(store, "p5")["status"] == "completed"
     html = configured_user.get("/runs/p5").text
     assert '<section class="checks">' not in html and "Passcode enforced" not in html
-    assert list(phase_boxes(html)) == ["Factory provisioning", "Enrollment in the field"]
+    assert list(phase_boxes(html)) == ["Factory provisioning", "Field enrollment"]
     assert "1,000 passcodes" not in html  # one device – nothing to extrapolate
 
 
@@ -222,9 +222,9 @@ def test_batch_overview_says_all_requests(configured_user, store, enroll_net):
 # --- the pause before the field -----------------------------------------------------------------
 
 def enroll_card(html: str) -> str | None:
-    if "<h2>Enrollment in the field</h2>" not in html:
+    if "<h2>Field enrollment</h2>" not in html:
         return None
-    card = html[html.rindex('<article', 0, html.index("<h2>Enrollment in the field</h2>")):]
+    card = html[html.rindex('<article', 0, html.index("<h2>Field enrollment</h2>")):]
     return card[:card.index("</article>")]
 
 
@@ -277,7 +277,7 @@ def test_rollback_from_the_runs_list_during_the_pause(configured_user, store, en
     assert run["cleanup_status"] == "done"
     from tests.conftest import wait_for
     run = wait_for(lambda: (r := store.get_run("p5"))["status"] == "failed" and r, what="the run to end")
-    assert run["error"] == "rolled back before the enrollment in the field"
+    assert run["error"] == "rolled back before the field enrollment"
     assert enroll_net.enroll_requests == []
     assert all(o["status"] == "DELETED" for o in enroll_net.auth_objects["passcode"].values())
     assert enroll_card(configured_user.get("/runs/p5").text) is None

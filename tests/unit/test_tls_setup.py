@@ -310,3 +310,65 @@ def test_directory_instead_of_a_file_ends_with_a_clear_message(dirs, pki, capsys
     code, _, err = run(capsys)
     assert code == 1 and err.startswith("TLS: ") and "key.pem is not a file" in err
     assert not (target / "cert.pem").exists()
+
+
+# --- /dev/null as docker bind-mounts it: the host's node, not the container's ---------------------------
+
+@pytest.fixture
+def foreign_dev_null(monkeypatch):
+    """Turn the named source files into what a container sees for a bind-mounted /dev/null: a character
+    device with /dev/null's device number but another inode than the container's own /dev/null. The
+    entries point at /dev/zero (a real character device that is not samefile with /dev/null); only the
+    device number that Path.stat() reports is swapped."""
+    null_rdev, real_stat, names = os.stat("/dev/null").st_rdev, Path.stat, set()
+
+    def fake_stat(self, *args, **kwargs):
+        result = real_stat(self, *args, **kwargs)
+        if self.name in names and self.parent == tls_setup.SOURCE and stat.S_ISCHR(result.st_mode):
+            return os.stat_result(result[:10], {"st_rdev": null_rdev})
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    def make(source: Path, *files: str) -> None:
+        for name in files:
+            (source / name).unlink()
+            (source / name).symlink_to("/dev/zero")
+            names.add(name)
+    return make
+
+
+def test_bind_mounted_dev_null_reads_as_empty(dirs, foreign_dev_null):
+    source, _ = dirs
+    foreign_dev_null(source, "keystore.p12")
+    assert not os.path.samefile(source / "keystore.p12", "/dev/null")  # what the old samefile check missed
+    assert tls_setup._read("keystore.p12") == b""
+
+
+def test_pem_pair_next_to_a_bind_mounted_dev_null_keystore(dirs, pki, capsys, foreign_dev_null):
+    """The release bug: every install without TLS_PKCS12_FILE ended with 'keystore.p12 is not a file'."""
+    source, target = dirs
+    put(source, "cert.pem", pem(pki["leaf"]))
+    put(source, "key.pem", key_pem(pki["key"]))
+    foreign_dev_null(source, "keystore.p12")
+    code, out, err = run(capsys)
+    assert code == 0, err
+    assert out.startswith("TLS: PEM certificate for demo.local") and (target / "cert.pem").exists()
+
+
+def test_nothing_configured_with_bind_mounted_dev_null(dirs, capsys, foreign_dev_null):
+    source, target = dirs
+    foreign_dev_null(source, "cert.pem", "key.pem", "keystore.p12")
+    code, _, err = run(capsys)
+    assert code == 1 and "no certificate configured" in err and not target.exists()
+
+
+def test_another_character_device_is_not_empty(dirs, pki, capsys):
+    """Only /dev/null's device number means 'unset' – /dev/zero (or any other device) is a wrong path."""
+    source, target = dirs
+    put(source, "cert.pem", pem(pki["leaf"]))
+    put(source, "key.pem", key_pem(pki["key"]))
+    (source / "keystore.p12").unlink()
+    (source / "keystore.p12").symlink_to("/dev/zero")
+    with pytest.raises(tls_setup.TLSError, match="keystore.p12 is not a file"):
+        tls_setup._read("keystore.p12")

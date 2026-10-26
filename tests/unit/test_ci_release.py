@@ -20,8 +20,8 @@ def test_release_notes_are_checked_in_the_test_job_for_tags_only():
     (check,) = checks
     assert check["if"] == "startsWith(github.ref, 'refs/tags/v')"
     assert check["run"].startswith('[ -s "docs/releases/${GITHUB_REF_NAME}.md" ]') and "exit 1" in check["run"]
-    # before any image is built: the image job needs the test job, the release job the image
-    assert CI["jobs"]["image"]["needs"] == "test" and CI["jobs"]["release"]["needs"] == "image"
+    # before any image is built: the image job needs the test and the stack job, the release job the image
+    assert sorted(CI["jobs"]["image"]["needs"]) == ["stack", "test"] and CI["jobs"]["release"]["needs"] == "image"
     assert not any("docs/releases" in s.get("run", "") and "-s" in s.get("run", "") for s in steps("release"))
 
 

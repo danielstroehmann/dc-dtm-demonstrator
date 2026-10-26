@@ -94,10 +94,11 @@ def test_defaults_rest_with_api_key(configured_user, store, fake):
     assert table.count("<tr") == 2 and device["name"] in table
     assert f'<td class="mono" data-tip="Serial number – DTM matched it to {device["name"]}">SN-M1-0001</td>' in table
     assert device["certificates"][0]["serial"] in table
-    assert "Devices in DTM" in html and "group robot-m1-uc06-group" in html
+    assert '<div class="box-head"><h3>Devices in DTM</h3></div>' in html  # no group name in the heading
+    assert "robot-m1-uc06-group" not in re.search(r"<h3>Devices in DTM.*?</h3>", html, re.S).group(0)
     titles = re.findall(r'<h3 class="phase-title">.*?</svg></span>(.*?)</h3>', html, re.S)
-    assert titles[:2] == ["Device registration <small>REST API</small>", "Renewal in the field <small>REST API</small>"]
-    assert "<h2>Renewal in the field</h2>" in html and ">Renew now</button>" in html
+    assert titles[:2] == ["Device registration <small>REST API</small>", "Field renewal <small>REST API</small>"]
+    assert "<h2>Field renewal</h2>" in html and ">Renew now</button>" in html
     assert "devices ≈" not in html  # one device – no extrapolation
     assert "PRIVATE KEY" not in html
 
@@ -116,7 +117,7 @@ def test_protocol_choices_through_the_web(configured_user, store, enroll_net, cm
     label = {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}
     titles = re.findall(r'<h3 class="phase-title">.*?</svg></span>(.*?)</h3>', html, re.S)
     assert titles[:2] == [f"Device registration <small>{label[protocol]}</small>",
-                          f"Renewal in the field <small>{label[field]}</small>"]
+                          f"Field renewal <small>{label[field]}</small>"]
     ident = devices.identity("m1", 1, identity)
     assert f">{ident}</td>" in devices_table(html)
     assert "PRIVATE KEY" not in html + configured_user.get("/runs/m1/api?dialect=curl").text
@@ -172,7 +173,7 @@ def test_renew_through_the_web(configured_user, store, fake):
     assert "<small>Rounds</small><p class=\"metric\">1</p>" in html
     api = configured_user.get("/runs/m1/api?dialect=curl").text
     titles = [t for _, _, t in phase_titles(api)]
-    assert titles[-2:] == ["Device registration", "Renewal in the field"]
+    assert titles[-2:] == ["Device registration", "Field renewal"]
     renewal_box = api[api.index('<section class="box accent field">'):]
     assert "/renew" in renewal_box and "/renew" not in api[:api.index('<section class="box accent field">')]
     for dialect in snippets.DIALECTS:

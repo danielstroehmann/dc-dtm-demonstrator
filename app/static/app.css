@@ -24,6 +24,9 @@
   --dc-orange-tint: #fff5eb;
   --dc-orange-tint-border: #f8d5b0;
   --dc-grey-bg: #f5f5f5;
+  --dc-grey: #777;
+  --dc-grey-tint: #f3f4f6;
+  --dc-grey-tint-border: #d5d9de;
   --dc-border: #dde3e9;
   --ok: #2e7d32;
   --bad: #b3261e;
@@ -70,6 +73,8 @@ h2 small, h3 small { font-size: 0.8em; font-weight: 400; color: var(--pico-muted
 .site-header nav ul:first-child { margin-left: 0; }
 .site-header nav ul:last-child { margin-right: 0; }
 .site-header form.inline { display: flex; }
+.card-head > form.inline { display: flex; }  /* no inline line box: the button centres exactly on the title */
+.card-head > form.inline > button { margin: 0; }
 .site-header a { color: #fff; text-decoration: none; }
 .site-header button.logout { color: #fff; margin: 0; }
 .site-header button.logout:hover { background: rgba(255, 255, 255, 0.12); }
@@ -104,6 +109,11 @@ article.card { padding: var(--s5); margin: 0 0 var(--s6); border: 1px solid var(
 .phase-icon svg { width: 1.125rem; height: 1.125rem; }
 .box.field { background: var(--dc-orange-tint); border-color: var(--dc-orange-tint-border); border-left-color: var(--dc-orange); }
 .box.field .phase-icon { background: var(--dc-orange); }
+/* One-time setup: neither factory nor field – the same box, in grey */
+.box.neutral { background: var(--dc-grey-tint); border-color: var(--dc-grey-tint-border); border-left: 4px solid var(--dc-grey); }
+.box.neutral .phase-icon { background: var(--dc-grey); }
+details.box > summary:has(.phase-title) { display: flex; align-items: center; justify-content: space-between; }
+details.box > summary:has(.phase-title)::after { float: none; margin: 0; }
 .box.accent + .box.accent { margin-top: var(--s5); }
 .box-hint { margin: 0 0 var(--s3); font-size: 0.875rem; color: var(--pico-muted-color); }
 details.box > summary { font-weight: 500; color: #333; cursor: pointer; margin: 0; }

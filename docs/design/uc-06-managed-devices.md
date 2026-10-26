@@ -16,7 +16,7 @@ device-group endpoints); DTM client: `app/dtm.py` (`# devices`).
 |---|---|---|
 | Factory enrollment | REST API · EST · CMPv2 | |
 | Authentication | API key (REST only) · Passcode · Factory certificate | |
-| Renewal in the field | EST · CMPv2 (the device renews itself with its current certificate) · REST API (the backend renews) | any, independent of the factory: the policy carries both methods |
+| Field renewal | EST · CMPv2 (the device renews itself with its current certificate) · REST API (the backend renews) | any, independent of the factory: the policy carries both methods |
 | Certificate identity | Serial number `SN-<RUN>-<nnnn>` · MAC address `02:<2 bytes of sha256(run)>:<device number>` (locally administered, never a vendor OUI) | deterministic, unique per run and device |
 
 ## Flow

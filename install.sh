@@ -352,7 +352,7 @@ if [ -z "$local_image" ]; then
 fi
 systemctl restart dtm-demonstrator.service || {  # = compose up -d; keeps the unit state truthful
 	journalctl -u dtm-demonstrator.service -n 30 --no-pager || true
-	compose logs --tail 30 proxy || true
+	compose logs --tail 30 tls proxy || true  # tls: why the TLS files were refused
 	die "the demonstrator did not start – see the log above"
 }
 info "Waiting for the demonstrator to become healthy"

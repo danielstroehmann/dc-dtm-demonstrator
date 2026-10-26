@@ -312,7 +312,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
     result: dict = {"api_calls": api.calls, "api_variables": variables}
     store.update_run(run_id, status="running")
     base = prefix(run_id, p["use_case"])
-    field = p["use_case"] == "uc05"  # enrollment in the field with a one-time passcode
+    field = p["use_case"] == "uc05"  # field enrollment with a one-time passcode
     station = None
     try:
         with tempfile.TemporaryDirectory(prefix="dtm-uc03-") as tmp:
@@ -420,15 +420,15 @@ async def _await_field(store: Store, run_id: str, result: dict, log) -> None:
     field (POST /runs/{id}/enroll sets it running again), so the passcode configuration can be shown
     in the DTM portal first. The passcodes stay in this task's memory; a rollback ends the wait."""
     store.update_run(run_id, status="paused", result=result, progress=None)
-    log("Passcodes are in DTM – show them in the portal, then start the enrollment in the field", "success")
+    log("Passcodes are in DTM – show them in the portal, then start the field enrollment", "success")
     deadline = time.monotonic() + PAUSE_MAX_S
     while (run := store.get_run(run_id) or {"status": "paused", "cleanup_status": "gone"})["status"] == "paused":
         if run.get("cleanup_status"):  # rolled back (or deleted) – the cleanup owns the run now
-            raise RolledBack("rolled back before the enrollment in the field")
+            raise RolledBack("rolled back before the field enrollment")
         if time.monotonic() > deadline:
-            raise EnrollmentError(f"the enrollment in the field was not started within {PAUSE_MAX_S // 60} minutes")
+            raise EnrollmentError(f"the field enrollment was not started within {PAUSE_MAX_S // 60} minutes")
         await asyncio.sleep(PAUSE_POLL_S)
-    log("Enrollment in the field started")
+    log("Field enrollment started")
 
 
 def _save_device(run_dir: Path, key_pem: bytes, cert_pem: str, device: Path | None = None) -> None:
@@ -471,8 +471,8 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
         raise EnrollmentError("the run has no usable certificate policy")
     policy_id, cn = policies[0]["dtm_id"], result["certificates"][0]["common_name"]
     protocol = p.get("protocol", "est")
-    store.update_run(run_id, progress={"label": "Renewing in the field", "started": time.time()})
-    log("Renewal in the field: the device authenticates with its current certificate")
+    store.update_run(run_id, progress={"label": "Field renewal", "started": time.time()})
+    log("Field renewal: the device authenticates with its current certificate")
     start = time.monotonic()
     key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])  # a fresh key pair
     keygen = time.monotonic() - start
@@ -729,7 +729,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
         for done, cn in enumerate(names, 1):
             start = time.monotonic()
             key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])
-            station.last_key = key_pem  # UC-4: the device keeps it for the renewal in the field
+            station.last_key = key_pem  # UC-4: the device keeps it for the field renewal
             generated = time.monotonic()
             keygen += generated - start
             keys += 1
@@ -741,7 +741,7 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
             if len(names) > 1:  # one device: the summary line below says it
                 log(f"{cn} enrolled in {seconds[-1]:.2f}s")
             store.update_run(run_id, progress={"label": "Enrolling the device" if len(names) == 1 else
-                                               f"Enrolling {len(names)} devices in the field",
+                                               f"Field enrollment of {len(names)} devices",
                                                "started": started_wall, "total": len(names), "done": done})
         outcome = "ok"
     finally:
@@ -895,7 +895,7 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str, group: bool =
 
 
 def renew_steps(protocol: str, cn: str, key_type: str, group: bool = False) -> list[dict]:
-    """UC-4 renewal in the field, as separate steps: new key (+ CSR) → EST simplereenroll with the
+    """UC-4 field renewal, as separate steps: new key (+ CSR) → EST simplereenroll with the
     current certificate as mTLS client certificate, or CMPv2 key update signed with it → the device
     switches to the new key and certificate."""
     if protocol == "cmpv2":
