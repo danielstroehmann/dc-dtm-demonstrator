@@ -8,6 +8,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 dir=$(mktemp -d)
 project=stack-smoke-$$
 compose() { docker compose -p "$project" --project-directory "$dir" -f "$dir/docker-compose.yml" "$@"; }
+# shellcheck disable=SC2329  # invoked by the trap
 cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -rf "$dir"; }
 trap cleanup EXIT
 
@@ -15,6 +16,9 @@ cp "$repo/deploy/docker-compose.yml" "$repo/deploy/Caddyfile" "$dir/"
 mkdir -p "$dir/tls" "$dir/tls-live" "$dir/caddy-data" "$dir/data"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj "/CN=localhost" \
 	-addext "subjectAltName=DNS:localhost" -keyout "$dir/tls/key.pem" -out "$dir/tls/cert.pem" 2>/dev/null
+# A throwaway key: readable for the tls service, which runs as root without CAP_DAC_OVERRIDE (the
+# installer's keys are root-owned instead).
+chmod 644 "$dir/tls/key.pem"
 cat >"$dir/.env" <<EOF
 DEMONSTRATOR_IMAGE=$image
 ADMIN_PASSWORD=stack-smoke-password-$$-not-a-secret
