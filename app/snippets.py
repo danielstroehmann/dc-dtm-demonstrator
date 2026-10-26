@@ -10,7 +10,8 @@ import shlex
 DIALECTS = {"curl": "curl", "wget": "wget", "powershell": "PowerShell 7"}
 # Only the variables the snippets define are tokens – other "{TEXT}" in DTM values stays as is.
 VARIABLES = ("DTM_HOST", "DTM_ACCOUNT_ID", "DIVISION_ID", "POLICY_ID", "JOB_ID", "CSR",
-             "AUTH_POLICY_ID", "PROFILE_ID", "PASSCODE", "FACTORY_CERT", "RUN_NAME", "ICA_ID", "RZONE_ID")
+             "AUTH_POLICY_ID", "PROFILE_ID", "PASSCODE", "FACTORY_CERT", "RUN_NAME", "ICA_ID", "RZONE_ID",
+             "GROUP_ID", "DEVICE_ID", "CERT_ID", "DEVICE_NAME", "IDENTITY")
 TOKEN = re.compile(r"\{(" + "|".join(VARIABLES) + r")\}")
 # In local commands the shell variables are written out already – only bare {VAR} tokens are replaced.
 COMMAND_TOKEN = re.compile(r"(?<![$\w])\{(" + "|".join(VARIABLES) + r")\}")
@@ -129,19 +130,30 @@ def _capture(request: str, capture: dict, dialect: str) -> str:
     return f'{head}{step}\n: "${{{var}:?{missing}}}"'
 
 
+FAILED_POLLS = 8
+
+
 def _until(request: str, until: dict, dialect: str) -> str:
     target, stop = until["status"], until.get("stop", ["failed", "rejected"])
     head, cmd = _split(request)
     # Bounded like the run itself (10 minutes), and an unreadable answer ends the loop, too –
-    # an endless poll would keep loading DTM.
+    # an endless poll would keep loading DTM. DTM once reported "failed" mid-processing and then
+    # completed the job, so "failed" ends the loop only once it persists (FAILED_POLLS × 2 s).
+    confirm, final = "failed" in stop, [s for s in stop if s != "failed"]
     if dialect == "powershell":
-        states = ", ".join(f"'{s}'" for s in [target, *stop])
+        states = ", ".join(f"'{s}'" for s in [target, *final])
         cmd = cmd.replace("\n", "\n  ")
-        return (f"{head}foreach ($i in 1..300) {{\n  try {{ $r = {cmd} }}\n"
+        check = (f"\n  if ($r.status -eq 'failed') {{ $f++; if ($f -ge {FAILED_POLLS}) {{ break }} }} else {{ $f = 0 }}"
+                 if confirm else "")
+        return (f"{head}{'$f = 0' + chr(10) if confirm else ''}foreach ($i in 1..300) {{\n  try {{ $r = {cmd} }}\n"
                 '  catch { Write-Host "request failed: $($_.Exception.Message)"; break }\n'
-                f'  Write-Host "status: $($r.status)"\n  if ($r.status -in {states}) {{ break }}\n  Start-Sleep 2\n}}')
-    return (f'{head}for i in $(seq 1 300); do\n  STATUS="$({cmd} \\\n    | jq -r .status)"\n  echo "status: $STATUS"\n'
-            f'  case "$STATUS" in {target}) break ;; {"|".join(stop)}|""|null) echo "job ${{STATUS:-not readable}}" >&2; break ;; esac\n'
+                f'  Write-Host "status: $($r.status)"\n  if ($r.status -in {states}) {{ break }}{check}\n  Start-Sleep 2\n}}')
+    failed = (f' failed) F=$((F+1)); [ "$F" -ge {FAILED_POLLS} ] && {{ echo "job failed" >&2; break; }} ;;'
+              if confirm else "")
+    return (f'{head}{"F=0" + chr(10) if confirm else ""}for i in $(seq 1 300); do\n  STATUS="$({cmd} \\\n    | jq -r .status)"\n'
+            f'  echo "status: $STATUS"\n'
+            f'  case "$STATUS" in {target}) break ;;{failed} {"|".join([*final, '""', "null"])}) '
+            f'echo "job ${{STATUS:-not readable}}" >&2; break ;;{" *) F=0 ;;" if confirm else ""} esac\n'
             f"  sleep 2\ndone")
 
 

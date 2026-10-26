@@ -192,6 +192,8 @@ class FakeOpenSSL:
                        "record": str(self.record), "fail": None,
                        "usage_file": str(bin_dir / f"{self.TOOL}-passcode-usage.json")}
         self._write()
+        if self.TOOL == "openssl":  # DTM lists what `openssl cmp` received when a device's list is read (UC-6)
+            fake.before_device_list.append(self.sync_to_dtm)
         if self.TOOL == "openssl":  # CMPv2: the fake DTM's one-time passcodes are enforced by `openssl cmp`
             fake.external_passcode_usage = bin_dir / f"{self.TOOL}-passcode-usage.json"
             fake.passcode_listeners.append(self.publish_passcodes)
@@ -236,12 +238,23 @@ class FakeOpenSSL:
         for call in self.calls():
             if not call["issued"]:
                 continue
-            alternative_id = call["argv"][call["argv"].index("-server") + 1].rsplit("DIOT_", 1)[1]
+            # …/cmp/DIOT_<id>[/device-group/<group>] – only the group path files under the device (UC-6)
+            endpoint = call["argv"][call["argv"].index("-server") + 1].rsplit("DIOT_", 1)[1]
+            alternative_id, _, group_id = endpoint.partition("/device-group/")
             policy_id = next(p["id"] for p in self.fake.policies.values() if p["alternative_id"] == alternative_id)
             cert = x509.load_pem_x509_certificate(call["issued"].encode())
             if format(cert.serial_number, "x") not in known:
-                self.fake.register_certificate(policy_id, cert)
+                record = self.fake.register_certificate(policy_id, cert)
+                record["enrollment_method"] = "CMP_V2"
                 known.add(format(cert.serial_number, "x"))
+                if group_id:
+                    signer = call["files"].get("-cert") if "kur" in call["argv"] else None
+                    old = signer and next((c for c in self.fake.certificates.values() if c["serial_number"] == format(
+                        x509.load_pem_x509_certificate(signer.encode()).serial_number, "x")), None)
+                    if old and old.get("device_id"):  # kur: the renewal lands under the same device
+                        record |= {"device_id": old["device_id"], "valid_to": cert.not_valid_after_utc.isoformat()}
+                    else:
+                        self.fake.file_by_identity(record, group_id, record["common_name"], cert)
         state = {p["alternative_id"]: [c["serial_number"] for c in self.fake.certificates.values()
                                        if c["policy_id"] == p["id"] and c["status"] == "ISSUED"]
                  for p in self.fake.policies.values()}

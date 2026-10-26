@@ -1,7 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Settings · DTM Demonstrator{% endblock %}
+{% from "_page_head.html" import page_head %}
+{% block title %}Settings · Demonstrator · Device Trust Manager{% endblock %}
 {% block content %}
-<div class="page-head"><h1>Settings</h1></div>
+{{ page_head("Settings", [("Settings", none)]) }}
 {% if connections %}
 <section class="block">
   <div class="section-title"><h2>DTM connections</h2></div>

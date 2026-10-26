@@ -1,4 +1,5 @@
-# Admin-provided certificate and key (copied to ./tls by install.sh).
+# TLS from /tls/cert.pem + key.pem – prepared at every start by the `tls` service from the files .env
+# points to (default: a self-signed pair; your own PEM pair or a PKCS#12 file). No ACME, no internal CA.
 {
 	# Clients send no SNI when connecting by IP address.
 	default_sni {$DEFAULT_SNI}

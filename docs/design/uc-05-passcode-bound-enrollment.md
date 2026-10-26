@@ -29,6 +29,10 @@ enrollment, a revoke and a passcode delete, one after another).
    and bound to its device's CN (`robot-<run>-uc05-<protocol>-0001…`), one request after another.
    Statistics: all passcodes, time per passcode, per minute, median, estimate for 1,000 passcodes.
    CMPv2 also reads the passcode reference (sender KID).
+   **Pause (optional, on by default – author, 2026-10-26):** the run then stops with status `paused` so the
+   presenter can show the passcodes in the DTM portal; *Enroll devices* (`POST /runs/{id}/enroll`) continues.
+   The passcodes stay in the task's memory only (a restart interrupts the run), at most 60 minutes, and a
+   rollback ends the wait.
 3. **Enrollment in the Field (per device, timed):** key (+ CSR) on the device → EST `simpleenroll` / CMPv2
    `ir` with *its own* passcode → certificate; statistics as UC-3. The run fails if a certificate carries
    a name without a passcode.

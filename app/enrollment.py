@@ -50,6 +50,17 @@ SCEP_PATH = "/devicetrustmanager/certificate-issuance-service/api/v1/scep/DIOT_{
 # default C=US is dropped by DTM because the shared profile has no country field).
 SCEP_SUBJECT = ("dc-dtm-demonstrator", "Factory")
 RENEW_PATH = "/.well-known/est/devicetrustmanager/{policy_id}/simplereenroll"
+
+
+def est_path(policy_id: str, group_id: str | None = None, op: str = "simpleenroll") -> str:
+    """UC-6: the device-group variant files the certificate under the device whose name is the CN."""
+    return f"/.well-known/est/devicetrustmanager/{policy_id}" + (f"/device-group/{group_id}" if group_id else "") + f"/{op}"
+
+
+def cmp_path(alternative_id: str, group_id: str | None = None) -> str:
+    """UC-6: …/device-group/<id> – not documented, verified live (ir and kur land under the device;
+    the plain path issues without filing the certificate under the device)."""
+    return CMP_PATH.format(alternative_id=alternative_id) + (f"/device-group/{group_id}" if group_id else "")
 # DTM accepts a just-issued certificate for renewal only after a few seconds (401 est_unauthorized
 # right after issuance, verified live) – a renewal clicked immediately retries a little.
 RENEW_ATTEMPTS = 3
@@ -66,8 +77,8 @@ class Station:
 
     def __init__(self, host: str, protocol: str, auth: str, policy_id: str, cmp_id: str | None,
                  passcode: str | None, passcode_ref: str | None, factory: tuple[str, bytes] | None, workdir: Path,
-                 ca_chain_pem: str = ""):
-        for value in (policy_id, cmp_id, passcode_ref):
+                 ca_chain_pem: str = "", group_id: str | None = None):
+        for value in (policy_id, cmp_id, passcode_ref, group_id):
             if value is not None and not SAFE_ID.fullmatch(value):
                 raise EnrollmentError(f"unexpected ID from DTM: {value[:40]!r}")
         if protocol == "cmpv2" and (not cmp_id or (auth == "passcode" and not passcode_ref)):
@@ -90,6 +101,8 @@ class Station:
         (workdir / "ca-chain.pem").write_text(ca_chain_pem)
         self.http = httpx.AsyncClient(verify=context, timeout=REQUEST_TIMEOUT)
         self.last_key: bytes | None = None
+        self.group_id = group_id  # UC-6: enroll into this device group …
+        self.device_id: str | None = None  # … for this device (REST names it; EST/CMPv2 match the CN)
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -117,7 +130,9 @@ class Station:
     async def _rest(self, cn: str, csr) -> dict:
         headers = {"x-passcode": self.passcode} if self.auth == "passcode" else {}
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
-        response = await self._post(REST_PATH, headers=headers, json=dtm.single_body(self.policy_id, cn, csr_pem))
+        body = (dtm.device_certificate_body(self.policy_id, self.group_id, self.device_id, cn, csr_pem) if self.group_id
+                else dtm.single_body(self.policy_id, cn, csr_pem))
+        response = await self._post(REST_PATH, headers=headers, json=body)
         pem = dtm._json(response).get("pem")  # DTM may put raw line breaks into JSON strings
         if not pem:
             raise EnrollmentError("REST response contains no certificate")
@@ -127,7 +142,7 @@ class Station:
         headers = {"Content-Type": "application/pkcs10", "Content-Transfer-Encoding": "base64"}
         if self.auth == "passcode":  # verified: Basic base64(<passcode>), no username
             headers["Authorization"] = "Basic " + base64.b64encode(self.passcode.encode()).decode()
-        response = await self._post(EST_PATH.format(policy_id=self.policy_id), headers=headers,
+        response = await self._post(est_path(self.policy_id, self.group_id), headers=headers,
                                     content=base64.b64encode(csr.public_bytes(serialization.Encoding.DER)))
         try:
             issued = certs.parse_pkcs7_certificates(base64.b64decode(response.content))
@@ -146,7 +161,7 @@ class Station:
         key_file.write_bytes(key_pem)
         key_file.chmod(0o600)
         cert_file.unlink(missing_ok=True)
-        args = [openssl, "cmp", "-cmd", "ir", "-server", f"https://{self.host}{CMP_PATH.format(alternative_id=self.cmp_id)}",
+        args = [openssl, "cmp", "-cmd", "ir", "-server", f"https://{self.host}{cmp_path(self.cmp_id, self.group_id)}",
                 "-tls_used", "-tls_trusted", certifi.where(), "-newkey", str(key_file), "-subject", f"/CN={cn}",
                 "-implicit_confirm", "-unprotected_errors", "-msg_timeout", "20", "-total_timeout", "30",
                 "-certout", str(cert_file)]
@@ -207,6 +222,83 @@ class Station:
 
 
 
+async def read_endpoint(client: DTMClient, api: ApiCalls, policy_id: str, protocol: str, variables: dict) -> tuple:
+    """CMPv2/SCEP: the endpoint uses the policy's short ID; ca_chain signs CMPv2 answers.
+    Returns (short ID or None, CA chain PEM)."""
+    cmp_id, ca_chain_pem = None, ""
+    if protocol in ("cmpv2", "scep"):  # the endpoint uses the policy's short ID; ca_chain signs CMP answers
+        detail = await api.timed(f"Read the policy's short ID for the {PROTOCOLS[protocol]} endpoint", "GET",
+                                 f"{POLICY_PATH}/{{POLICY_ID}}", client.get_policy(policy_id),
+                                 spec={"method": "GET", "path": f"{POLICY_PATH}/{{POLICY_ID}}",
+                                       "output": "policy.json"}, phase="setup")
+        cmp_id = detail.get("alternative_id")
+        if not SAFE_ID.fullmatch(cmp_id or ""):
+            raise EnrollmentError(f"DTM returned no usable short ID for the {PROTOCOLS[protocol]} endpoint")
+        ca_chain_pem = "".join(certs.der_b64_to_pem(c["blob"]) for c in detail.get("ca_chain") or []
+                               if c.get("blob"))
+        variables["CMP_ID"] = cmp_id
+        api.add("Extract the policy's short ID", "LOCAL", "jq", None,
+                spec={"command": {
+                    "bash": "export CMP_ID=\"$(jq -r .alternative_id policy.json)\"",
+                    "powershell": "$env:CMP_ID = (Get-Content policy.json -Raw | ConvertFrom-Json).alternative_id"}},
+                phase="setup")
+    return cmp_id, ca_chain_pem
+
+
+async def setup_credentials(client: DTMClient, api: ApiCalls, store: Store, run_id: str, base: str, protocol: str,
+                            auth: str, variables: dict, log, field: bool = False):
+    """The run's authentication policy and the factory's credential (passcode or own client certificate).
+    field (UC-5): the device passcodes follow later – nothing is created here but the policy.
+    Returns (auth policy ID, passcode, passcode reference, factory certificate + key)."""
+    log(f"Creating authentication policy {base}-auth")
+    auth_policy_id = await api.timed(
+        "Create an authentication policy for the factory", "POST", AUTH_POLICY_PATH,
+        client.create_auth_policy(f"{base}-auth"),
+        spec={"method": "POST", "path": AUTH_POLICY_PATH, "body_file": "auth-policy.json",
+              "json": {"name": "{RUN_NAME}-auth", "account_id": "{DTM_ACCOUNT_ID}"},
+              "capture": {"var": "AUTH_POLICY_ID", "jq": ".id", "ps": "$r.id"}}, phase="setup")
+    store.add_object(run_id, "auth_policy", auth_policy_id, f"{base}-auth")
+    variables["AUTH_POLICY_ID"] = auth_policy_id
+
+    passcode = passcode_ref = factory = None
+    if field:
+        pass  # UC-5: the device passcodes follow once the policy exists – nothing is created for nothing
+    elif auth == "passcode":
+        passcode = secrets.token_hex(16)
+        log(f"Creating passcode {base}-passcode")
+        created = await api.timed(
+            "Create the factory's passcode", "POST", PASSCODE_PATH,
+            client.create_passcode(f"{base}-passcode", auth_policy_id, passcode),
+            spec={"method": "POST", "path": PASSCODE_PATH, "body_file": "passcode.json",
+                  "output": "passcode.json.out",
+                  "json": dtm.passcode_body("{RUN_NAME}-passcode", "{DTM_ACCOUNT_ID}", "{AUTH_POLICY_ID}",
+                                            "{PASSCODE}")},
+            phase="setup")
+        store.add_object(run_id, "passcode", created["id"], f"{base}-passcode")
+        passcode_ref = created["alternate_id"]
+        if protocol == "cmpv2":  # CMPv2 sends this reference as sender KID – an ID, not a secret
+            if not SAFE_ID.fullmatch(passcode_ref or ""):
+                raise EnrollmentError("DTM returned no usable passcode reference")
+            variables["PASSCODE_REF"] = passcode_ref
+            _record_passcode_ref(api, "setup")
+    else:
+        log("The factory creates its own client certificate and registers it in DTM")
+        factory = certs.factory_certificate(f"{base}-factory")
+        api.add("Create the factory's own client certificate", "LOCAL", "openssl", None,
+                spec={"command": factory_command(f"{base}-factory")}, phase="setup")
+        await api.timed(
+            "Register the factory certificate as authentication certificate", "POST", AUTH_CERT_PATH,
+            _record(store, run_id, "auth_certificate", f"{base}-factory",
+                    client.create_auth_certificate(f"{base}-factory", auth_policy_id, factory[0])),
+            spec={"method": "POST", "path": AUTH_CERT_PATH, "body_file": "auth-certificate.json",
+                  "json": {"name": "{RUN_NAME}-factory", "account_id": "{DTM_ACCOUNT_ID}",
+                           "authentication_policy_id": "{AUTH_POLICY_ID}", "pem": "{FACTORY_CERT}",
+                           "use_passcode": False}},
+            phase="setup")
+
+    return auth_policy_id, passcode, passcode_ref, factory
+
+
 async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> None:
     run_ = store.get_run(run_id)
     p = run_["params"] | {"use_case": run_["use_case"]}
@@ -226,51 +318,9 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
         with tempfile.TemporaryDirectory(prefix="dtm-uc03-") as tmp:
             division_id = await create_division(client, api, store, run_id, p["use_case"], variables, log)
 
-            log(f"Creating authentication policy {base}-auth")
-            auth_policy_id = await api.timed(
-                "Create an authentication policy for the factory", "POST", AUTH_POLICY_PATH,
-                client.create_auth_policy(f"{base}-auth"),
-                spec={"method": "POST", "path": AUTH_POLICY_PATH, "body_file": "auth-policy.json",
-                      "json": {"name": "{RUN_NAME}-auth", "account_id": "{DTM_ACCOUNT_ID}"},
-                      "capture": {"var": "AUTH_POLICY_ID", "jq": ".id", "ps": "$r.id"}}, phase="setup")
-            store.add_object(run_id, "auth_policy", auth_policy_id, f"{base}-auth")
-            variables["AUTH_POLICY_ID"] = auth_policy_id
-
-            passcode = passcode_ref = factory = credentials = None
-            if field:
-                pass  # UC-5: the device passcodes follow once the policy exists – nothing is created for nothing
-            elif auth == "passcode":
-                passcode = secrets.token_hex(16)
-                log(f"Creating passcode {base}-passcode")
-                created = await api.timed(
-                    "Create the factory's passcode", "POST", PASSCODE_PATH,
-                    client.create_passcode(f"{base}-passcode", auth_policy_id, passcode),
-                    spec={"method": "POST", "path": PASSCODE_PATH, "body_file": "passcode.json",
-                          "output": "passcode.json.out",
-                          "json": dtm.passcode_body("{RUN_NAME}-passcode", "{DTM_ACCOUNT_ID}", "{AUTH_POLICY_ID}",
-                                                    "{PASSCODE}")},
-                    phase="setup")
-                store.add_object(run_id, "passcode", created["id"], f"{base}-passcode")
-                passcode_ref = created["alternate_id"]
-                if protocol == "cmpv2":  # CMPv2 sends this reference as sender KID – an ID, not a secret
-                    if not SAFE_ID.fullmatch(passcode_ref or ""):
-                        raise EnrollmentError("DTM returned no usable passcode reference")
-                    variables["PASSCODE_REF"] = passcode_ref
-                    _record_passcode_ref(api, "setup")
-            else:
-                log("The factory creates its own client certificate and registers it in DTM")
-                factory = certs.factory_certificate(f"{base}-factory")
-                api.add("Create the factory's own client certificate", "LOCAL", "openssl", None,
-                        spec={"command": factory_command(f"{base}-factory")}, phase="setup")
-                await api.timed(
-                    "Register the factory certificate as authentication certificate", "POST", AUTH_CERT_PATH,
-                    _record(store, run_id, "auth_certificate", f"{base}-factory",
-                            client.create_auth_certificate(f"{base}-factory", auth_policy_id, factory[0])),
-                    spec={"method": "POST", "path": AUTH_CERT_PATH, "body_file": "auth-certificate.json",
-                          "json": {"name": "{RUN_NAME}-factory", "account_id": "{DTM_ACCOUNT_ID}",
-                                   "authentication_policy_id": "{AUTH_POLICY_ID}", "pem": "{FACTORY_CERT}",
-                                   "use_passcode": False}},
-                    phase="setup")
+            auth_policy_id, passcode, passcode_ref, factory = await setup_credentials(
+                client, api, store, run_id, base, protocol, auth, variables, log, field)
+            credentials = None
 
             # UC-4 renews: 6 months, renewable at any time; CMPv2 sends a bare public key.
             renewal = p["use_case"] == "uc04"
@@ -295,23 +345,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                           "capture": by_name("POLICY_ID", "{RUN_NAME}-policy")}, phase="setup")
             store.add_object(run_id, "policy", policy_id, policy_name)
             variables["POLICY_ID"] = policy_id
-            cmp_id, ca_chain_pem = None, ""
-            if protocol in ("cmpv2", "scep"):  # the endpoint uses the policy's short ID; ca_chain signs CMP answers
-                detail = await api.timed(f"Read the policy's short ID for the {PROTOCOLS[protocol]} endpoint", "GET",
-                                         f"{POLICY_PATH}/{{POLICY_ID}}", client.get_policy(policy_id),
-                                         spec={"method": "GET", "path": f"{POLICY_PATH}/{{POLICY_ID}}",
-                                               "output": "policy.json"}, phase="setup")
-                cmp_id = detail.get("alternative_id")
-                if not SAFE_ID.fullmatch(cmp_id or ""):
-                    raise EnrollmentError(f"DTM returned no usable short ID for the {PROTOCOLS[protocol]} endpoint")
-                ca_chain_pem = "".join(certs.der_b64_to_pem(c["blob"]) for c in detail.get("ca_chain") or []
-                                       if c.get("blob"))
-                variables["CMP_ID"] = cmp_id
-                api.add("Extract the policy's short ID", "LOCAL", "jq", None,
-                        spec={"command": {
-                            "bash": "export CMP_ID=\"$(jq -r .alternative_id policy.json)\"",
-                            "powershell": "$env:CMP_ID = (Get-Content policy.json -Raw | ConvertFrom-Json).alternative_id"}},
-                        phase="setup")
+            cmp_id, ca_chain_pem = await read_endpoint(client, api, policy_id, protocol, variables)
             log("DTM is configured for this run", "success")
             result |= {"division": f"{base}-division", "policy": policy_name, "protocol": protocol, "auth": auth}
 
@@ -322,6 +356,8 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                 if protocol == "cmpv2":
                     variables["PASSCODE_REF"] = passcode_ref
                     _record_passcode_ref(api, "recurring")
+                if p.get("pause"):
+                    await _await_field(store, run_id, result, log)
             station = Station(p["dtm_host"], protocol, auth, policy_id, cmp_id, passcode, passcode_ref, factory,
                               Path(tmp), ca_chain_pem)
             result |= await _enroll(station, api, store, run_id, p, log, credentials)
@@ -356,6 +392,8 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
         certs.save_certificates(run_dir, result.get("certificates") or [])
         store.update_run(run_id, status="completed", result=result, progress=None, finished_at=now())
         log("Run completed", "success")
+    except RolledBack as exc:  # no log and no progress reset: the cleanup's heartbeat owns both now
+        store.update_run(run_id, status="failed", error=str(exc), finished_at=now())
     except (DTMError, ValueError) as exc:
         log(f"Run failed: {exc}", "error")
         store.update_run(run_id, status="failed", error=str(exc), progress=None, finished_at=now(), result=result)
@@ -369,11 +407,35 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
             await station.aclose()
 
 
-def _save_device(run_dir: Path, key_pem: bytes, cert_pem: str) -> None:
+class RolledBack(Exception):
+    pass
+
+
+PAUSE_MAX_S = 3600
+PAUSE_POLL_S = 1.0
+
+
+async def _await_field(store: Store, run_id: str, result: dict, log) -> None:
+    """UC-5: the passcodes are in DTM – the run waits until the presenter starts the enrollment in the
+    field (POST /runs/{id}/enroll sets it running again), so the passcode configuration can be shown
+    in the DTM portal first. The passcodes stay in this task's memory; a rollback ends the wait."""
+    store.update_run(run_id, status="paused", result=result, progress=None)
+    log("Passcodes are in DTM – show them in the portal, then start the enrollment in the field", "success")
+    deadline = time.monotonic() + PAUSE_MAX_S
+    while (run := store.get_run(run_id) or {"status": "paused", "cleanup_status": "gone"})["status"] == "paused":
+        if run.get("cleanup_status"):  # rolled back (or deleted) – the cleanup owns the run now
+            raise RolledBack("rolled back before the enrollment in the field")
+        if time.monotonic() > deadline:
+            raise EnrollmentError(f"the enrollment in the field was not started within {PAUSE_MAX_S // 60} minutes")
+        await asyncio.sleep(PAUSE_POLL_S)
+    log("Enrollment in the field started")
+
+
+def _save_device(run_dir: Path, key_pem: bytes, cert_pem: str, device: Path | None = None) -> None:
     """UC-4: the simulated device's key and current certificate in one file – written atomically
     (a crash never leaves a mismatching pair) and created with 0600. Demo material: never shown or
     downloadable, removed on any cleanup."""
-    device = run_dir / "device"
+    device = device or run_dir / "device"
     device.mkdir(parents=True, exist_ok=True)
     device.chmod(0o700)
     tmp = device / "device.pem.tmp"
@@ -442,16 +504,17 @@ async def _renew(store: Store, run_id: str, run_dir: Path, log) -> None:
     store.update_run(run_id, status="completed")
 
 
-async def _renew_est(p: dict, policy_id: str, run_dir: Path, csr) -> tuple[dict | None, str, float]:
+async def _renew_est(p: dict, policy_id: str, run_dir: Path, csr, device_dir: Path | None = None,
+                     group_id: str | None = None) -> tuple[dict | None, str, float]:
     """EST simplereenroll with the current certificate as mTLS client certificate. Returns
     (certificate, "", round trip) or (None, reason, …) – 401 right after issuance is worth a retry."""
     context = ssl.create_default_context(cafile=certifi.where())
-    context.load_cert_chain(run_dir / "device" / "device.pem")
+    context.load_cert_chain((device_dir or run_dir / "device") / "device.pem")
     async with httpx.AsyncClient(verify=context, timeout=REQUEST_TIMEOUT) as http:
         start = time.monotonic()
         try:
             response = await http.post(
-                f"https://clientauth.{p['dtm_host']}{RENEW_PATH.format(policy_id=policy_id)}",
+                f"https://clientauth.{p['dtm_host']}{est_path(policy_id, group_id, 'simplereenroll')}",
                 headers={"Content-Type": "application/pkcs10", "Content-Transfer-Encoding": "base64"},
                 content=base64.b64encode(csr.public_bytes(serialization.Encoding.DER)))
         except httpx.HTTPError as exc:
@@ -471,7 +534,8 @@ async def _renew_est(p: dict, policy_id: str, run_dir: Path, csr) -> tuple[dict 
         raise EnrollmentError("EST simplereenroll answer contains no certificate") from exc
 
 
-async def _renew_cmp(p: dict, result: dict, run_dir: Path, key_pem: bytes) -> tuple[dict | None, str, float]:
+async def _renew_cmp(p: dict, result: dict, run_dir: Path, key_pem: bytes, device_dir: Path | None = None,
+                     group_id: str | None = None) -> tuple[dict | None, str, float]:
     """CMPv2 key update request (kur), signed with the current certificate; answers are signed by the
     issuing CA (verified live). Only a rejection by DTM is worth a retry (the short window right after
     issuance); timeouts and local errors are final."""
@@ -481,12 +545,12 @@ async def _renew_cmp(p: dict, result: dict, run_dir: Path, key_pem: bytes) -> tu
     openssl = shutil.which("openssl")
     if not openssl:
         raise EnrollmentError("openssl is not installed – CMPv2 needs it")
-    device = run_dir / "device"
+    device = device_dir or run_dir / "device"
     with tempfile.TemporaryDirectory(prefix="dtm-uc04-") as tmp:
         key_file, cert_file = Path(tmp, "new.key"), Path(tmp, "new.crt")
         key_file.write_bytes(key_pem)
         key_file.chmod(0o600)
-        args = [openssl, "cmp", "-cmd", "kur", "-server", f"https://{p['dtm_host']}{CMP_PATH.format(alternative_id=cmp_id)}",
+        args = [openssl, "cmp", "-cmd", "kur", "-server", f"https://{p['dtm_host']}{cmp_path(cmp_id, group_id)}",
                 "-tls_used", "-tls_trusted", certifi.where(), "-cert", str(device / "device.pem"),
                 "-key", str(device / "device.pem"), "-extracerts", str(device / "device.pem"),
                 "-trusted", str(device / "ca-chain.pem"), "-newkey", str(key_file), "-implicit_confirm",
@@ -720,12 +784,13 @@ CA_CHAIN_PS = ("# ca-chain.pem from the policy (policy.json): DTM signs CMPv2 an
 P12_PS = "openssl pkcs12 -export -inkey factory.key -in factory.crt -out factory.p12 -passout pass:"
 
 
-def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]:
+def enroll_steps(protocol: str, auth: str, cn: str, key_type: str, group: bool = False) -> list[dict]:
     """Copyable device enrollment as separate steps, like the other use cases: generate key (+ CSR)
     locally → the protocol call → turn the answer into a PEM certificate. One-time preparations
     are setup steps. Secrets only as variables the user sets.
     Each step: purpose, method, path (for the label), command {bash, powershell}, phase, kind
-    ("keygen" | "call" | "convert" | "setup")."""
+    ("keygen" | "call" | "convert" | "setup").
+    group (UC-6): into the device group GROUP_ID, for the device DEVICE_ID (REST) / named like the CN."""
     rsa = key_type.upper().startswith("RSA")
     new_key = "rsa:2048" if rsa else "ec -pkeyopt ec_paramgen_curve:P-256"
     req = f'openssl req -new -newkey {new_key} -nodes -keyout device.key -subj "/CN={cn}"'
@@ -747,7 +812,8 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
     if protocol == "rest":
         tls = "--cert factory.crt --key factory.key" if clientauth else '-H "x-passcode: ${PASSCODE}"'
         ps_tls = "--cert-type P12 --cert factory.p12" if clientauth else '-H "x-passcode: $env:PASSCODE"'
-        body = '{"certificate_policy_id": "%s", "csr": "%s", "certificate_profile_attributes": [{"id": "subject.common_name", "value": "%s"}]}'
+        body = ('{"certificate_policy_id": "%s", "csr": "%s", "certificate_profile_attributes": [{"id": "subject.common_name", "value": "%s"}]'
+                + (', "device_group_id": "{GROUP_ID}", "device_id": "{DEVICE_ID}"}' if group else "}"))
         step("keygen", "Generate the device key and CSR", "LOCAL", "openssl",
              f"{req} -out device.csr\nexport CSR=\"$(awk '{{printf \"%s\\\\n\", $0}}' device.csr)\"",
              f"{req} -out device.csr\n" + '$env:CSR = (Get-Content device.csr -Raw).Replace("`r", "").Replace("`n", "\\n")')
@@ -762,7 +828,8 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
              "jq -r .pem certificate.json.out > device.crt",
              "(Get-Content certificate.json.out -Raw | ConvertFrom-Json).pem | Set-Content device.crt")
     elif protocol == "est":
-        path_b, path_p = EST_PATH.format(policy_id="${POLICY_ID}"), EST_PATH.format(policy_id="$env:POLICY_ID")
+        path_b = est_path("${POLICY_ID}", "${GROUP_ID}" if group else None)
+        path_p = est_path("$env:POLICY_ID", "$env:GROUP_ID" if group else None)
         tls = ("--cert factory.crt --key factory.key" if clientauth else
                '-H "Authorization: Basic $(printf %s "${PASSCODE}" | openssl base64 -A)"')
         ps_tls = ("--cert-type P12 --cert factory.p12" if clientauth else
@@ -772,7 +839,7 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
              f"{req} -outform DER -out device.der\n"
              '[Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/device.der")) | Set-Content device.b64')
         step("call", "Request the certificate via EST simpleenroll", "POST",
-             EST_PATH.format(policy_id="{POLICY_ID}"),
+             est_path("{POLICY_ID}", "{GROUP_ID}" if group else None),
              f'curl -sS --fail -X POST "https://{host_b}{path_b}" {tls} \\\n'
              '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" \\\n'
              "  --data-binary @device.b64 -o device.b64.out",
@@ -806,16 +873,18 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
                  else "-cert factory.crt -key factory.key -extracerts factory.crt -trusted ca-chain.pem")
         ps_creds = ("-ref $env:PASSCODE_REF -secret env:PASSCODE" if auth == "passcode"
                     else "-cert factory.crt -key factory.key -extracerts factory.crt -trusted ca-chain.pem")
-        lines = [f"-server https://{{host}}{CMP_PATH.format(alternative_id='{cmp}')}",
-                 "-tls_used -tls_trusted {bundle}", f'-newkey device.key -subject "/CN={cn}"', "{creds}",
+        braced = cn.replace("{", "{{").replace("}", "}}")  # a {VAR} token in the name survives .format
+        lines = [f"-server https://{{host}}{cmp_path('{cmp}', '{group}' if group else None)}",
+                 "-tls_used -tls_trusted {bundle}", f'-newkey device.key -subject "/CN={braced}"', "{creds}",
                  "-implicit_confirm -certout device.crt"]
         bash = [line.format(host="${DTM_HOST}", cmp="${CMP_ID}", bundle="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}",
-                            creds=creds) for line in lines]
-        ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE", creds=ps_creds) for line in lines]
+                            creds=creds, group="${GROUP_ID}") for line in lines]
+        ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE", creds=ps_creds,
+                          group="$env:GROUP_ID") for line in lines]
         step("keygen", "Generate the device key", "LOCAL",
              "openssl", genkey, genkey)
         step("call", "Request the certificate via CMPv2 (ir)", "POST",
-             CMP_PATH.format(alternative_id="{CMP_ID}"),
+             cmp_path("{CMP_ID}", "{GROUP_ID}" if group else None),
              "# CA_BUNDLE: public root CAs for TLS (macOS: /etc/ssl/cert.pem)\nopenssl cmp -cmd ir " + " \\\n  ".join(bash),
              "# CA_BUNDLE: a PEM file with the public root CAs (Windows has none by default)\n"
              "openssl cmp -cmd ir " + " `\n  ".join(ps))
@@ -825,16 +894,17 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str) -> list[dict]
     return steps
 
 
-def renew_steps(protocol: str, cn: str, key_type: str) -> list[dict]:
+def renew_steps(protocol: str, cn: str, key_type: str, group: bool = False) -> list[dict]:
     """UC-4 renewal in the field, as separate steps: new key (+ CSR) → EST simplereenroll with the
     current certificate as mTLS client certificate, or CMPv2 key update signed with it → the device
     switches to the new key and certificate."""
     if protocol == "cmpv2":
-        return _renew_steps_cmp(key_type)
+        return _renew_steps_cmp(key_type, group)
     new_key = "rsa:2048" if key_type.upper().startswith("RSA") else "ec -pkeyopt ec_paramgen_curve:P-256"
     req = (f'openssl req -new -newkey {new_key} -nodes -keyout device-new.key -subj "/CN={cn}" '
            "-outform DER -out renew.der")
-    path_b, path_p = RENEW_PATH.format(policy_id="${POLICY_ID}"), RENEW_PATH.format(policy_id="$env:POLICY_ID")
+    path_b = est_path("${POLICY_ID}", "${GROUP_ID}" if group else None, "simplereenroll")
+    path_p = est_path("$env:POLICY_ID", "$env:GROUP_ID" if group else None, "simplereenroll")
     return [
         {"kind": "keygen", "phase": "renewal", "method": "LOCAL", "path": "openssl",
          "purpose": "Generate a new device key and CSR",
@@ -843,7 +913,8 @@ def renew_steps(protocol: str, cn: str, key_type: str) -> list[dict]:
                                    '[Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/renew.der")) | Set-Content renew.b64\n'
                                    "# Windows curl.exe takes the current certificate as PKCS#12\n"
                                    "openssl pkcs12 -export -inkey device.key -in device.crt -out device.p12 -passout pass:"}},
-        {"kind": "call", "phase": "renewal", "method": "POST", "path": RENEW_PATH.format(policy_id="{POLICY_ID}"),
+        {"kind": "call", "phase": "renewal", "method": "POST",
+         "path": est_path("{POLICY_ID}", "{GROUP_ID}" if group else None, "simplereenroll"),
          "purpose": "Renew via EST simplereenroll with the current certificate",
          "command": {"bash": "# DTM accepts a just-issued certificate for renewal only after a few seconds\nsleep 10\n"
                              f'curl -sS --fail -X POST "https://clientauth.${{DTM_HOST}}{path_b}" '
@@ -867,22 +938,23 @@ def renew_steps(protocol: str, cn: str, key_type: str) -> list[dict]:
     ]
 
 
-def _renew_steps_cmp(key_type: str) -> list[dict]:
+def _renew_steps_cmp(key_type: str, group: bool = False) -> list[dict]:
     genkey = ("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device-new.key"
               if key_type.upper().startswith("RSA") else
               "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out device-new.key")
-    lines = [f"-server https://{{host}}{CMP_PATH.format(alternative_id='{cmp}')}", "-tls_used -tls_trusted {bundle}",
+    lines = [f"-server https://{{host}}{cmp_path('{cmp}', '{group}' if group else None)}", "-tls_used -tls_trusted {bundle}",
              "-cert device.crt -key device.key -extracerts device.crt -trusted ca-chain.pem",
              "-newkey device-new.key -implicit_confirm -certout device-new.crt"]
-    bash = [line.format(host="${DTM_HOST}", cmp="${CMP_ID}", bundle="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}")
-            for line in lines]
-    ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE") for line in lines]
+    bash = [line.format(host="${DTM_HOST}", cmp="${CMP_ID}", bundle="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}",
+                        group="${GROUP_ID}") for line in lines]
+    ps = [line.format(host="$env:DTM_HOST", cmp="$env:CMP_ID", bundle="$env:CA_BUNDLE", group="$env:GROUP_ID")
+          for line in lines]
     wait = "# DTM accepts a just-issued certificate for renewal only after a few seconds\n"
     return [
         {"kind": "keygen", "phase": "renewal", "method": "LOCAL", "path": "openssl",
          "purpose": "Generate a new device key",
          "command": {"bash": genkey, "powershell": genkey}},
-        {"kind": "call", "phase": "renewal", "method": "POST", "path": CMP_PATH.format(alternative_id="{CMP_ID}"),
+        {"kind": "call", "phase": "renewal", "method": "POST", "path": cmp_path("{CMP_ID}", "{GROUP_ID}" if group else None),
          "purpose": "Renew via CMPv2 key update (kur) with the current certificate",
          "command": {"bash": wait + "sleep 10\nopenssl cmp -cmd kur " + " \\\n  ".join(bash),
                      "powershell": wait + "Start-Sleep 10\nopenssl cmp -cmd kur " + " `\n  ".join(ps)}},

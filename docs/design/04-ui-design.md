@@ -33,6 +33,7 @@ Desktop browsers only. A screen is done when it passes these – checked on the 
 
 | Rule | Detail |
 |---|---|
+| **Same page head everywhere** | Every page starts with the breadcrumb ("Use-Case Central" first, current page last; home: "Use-Case Central" only) and the h1 – via `_page_head.html`, so headings sit at the same height on every page |
 | **One grid per row** | Elements side by side share one grid: same number of columns, equal widths, equal box heights, shared top and bottom edges (form controls: `--control-h`) |
 | **Phases** | Factory = blue box (`.box.accent`) with factory icon chip; field = orange box (`.box.accent.field`) with its own chip. Same look in the overview and in the reproducible steps; two phases with results stand side by side (`.phase-pair`) |
 | **Metric groups** | At most four metrics per group, in a fixed grid (`.metrics-4`); short labels ("Per minute"), the unit in the value |

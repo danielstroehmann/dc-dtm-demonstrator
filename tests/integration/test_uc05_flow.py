@@ -448,3 +448,147 @@ async def test_timeline_wording(store, enroll_net, tmp_path):
     await start(store, enroll_net, "t6", tmp_path, checks=False, **batch(2))
     per_device = [m for m in (e["message"] for e in store.events("t6")) if " enrolled in " in m]
     assert [m.split(" enrolled in ")[0] for m in per_device] == evergreen.common_names("t6", "est", 2, UC)
+
+
+# --- the pause before the field: the presenter shows the passcodes in DTM, then starts the enrollment ---
+
+async def until(predicate, what: str):
+    """Waits on the run task inside the same loop – asyncio.sleep is instant in mocked tests, so the
+    number of turns is bounded instead of the time."""
+    import asyncio
+    for _ in range(20000):
+        if value := predicate():
+            return value
+        await asyncio.sleep(0)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def run_in_background(store, fake: FakeDTM, run_id: str, tmp_path, **overrides):
+    import asyncio
+    return asyncio.create_task(start(store, fake, run_id, tmp_path, **overrides))
+
+
+def paused(store, run_id):
+    return lambda: (r := store.get_run(run_id)) and r["status"] == "paused" and r
+
+
+def ended(store, run_id):
+    return lambda: (r := store.get_run(run_id)) and r["status"] in ("completed", "failed") and r
+
+
+async def test_without_pause_the_run_never_stops(store, enroll_net, tmp_path, monkeypatch):
+    statuses = []
+    original = store.update_run
+    monkeypatch.setattr(store, "update_run", lambda rid, **f: statuses.append(f.get("status")) or original(rid, **f))
+    run = await start(store, enroll_net, "q5", tmp_path, pause=False, checks=False)
+    assert run["status"] == "completed", run["error"]
+    assert "paused" not in statuses
+    assert not any("Enrollment in the field started" in e["message"] for e in store.events("q5"))
+
+
+@pytest.mark.parametrize("protocol,count", [("est", 1), ("cmpv2", 2)])
+async def test_pause_waits_with_the_passcodes_in_dtm_until_the_field_starts(store, enroll_net, cmp_openssl, tmp_path,
+                                                                           protocol, count):
+    task = run_in_background(store, enroll_net, "z5", tmp_path, protocol=protocol, pause=True, **batch(count))
+    run = await until(paused(store, "z5"), "the pause")
+    names = evergreen.common_names("z5", protocol, count, UC)
+    # the factory step is done: one bound passcode per device, unused; nothing enrolled yet
+    own = passcodes(enroll_net, "robot-z5-uc05-passcode-0")
+    assert sorted(o["registered_cn"] for o in own.values()) == sorted(names)
+    assert all(enroll_net.passcode_usage(o) == 0 for o in own.values())
+    assert enroll_net.enroll_requests == []
+    cmp_openssl.sync_to_dtm()
+    assert enroll_net.issued() == []
+    # the result so far is saved (the page shows the policy), nothing is in progress
+    assert run["result"]["policy"] == "robot-z5-uc05-policy" and run["result"]["provisioning"]["count"] == count
+    assert run["progress"] is None and not task.done()
+    events = [e["message"] for e in store.events("z5")]
+    assert any(m.startswith("Passcodes are in DTM") for m in events)
+    assert not any("Enrollment in the field started" in m for m in events)
+    # still waiting after many more polls
+    import asyncio
+    for _ in range(200):
+        await asyncio.sleep(0)
+    assert store.get_run("z5")["status"] == "paused" and not task.done()
+    # the presenter clicks: paused → running, the run enrolls and completes like without the pause
+    assert store.claim_status("z5", "paused", "running")
+    run = await asyncio.wait_for(task, 30)
+    assert run["status"] == "completed", run["error"]
+    r = run["result"]
+    assert [c["common_name"] for c in r["certificates"]] == names
+    assert [c["ok"] for c in r["checks"]] == [True, True, True]
+    assert all(enroll_net.passcode_usage(o) == 1 for o in own.values())
+    events = [e["message"] for e in store.events("z5")]
+    assert events.index("Enrollment in the field started") > next(
+        i for i, m in enumerate(events) if m.startswith("Passcodes are in DTM"))
+    cmp_openssl.sync_to_dtm()
+    assert sorted(c["common_name"] for c in enroll_net.issued()) == sorted(names)
+    run = await do_cleanup(store, enroll_net, "z5", "full", tmp_path)
+    assert run["cleanup_status"] == "done" and enroll_net.violations == []
+
+
+async def test_rollback_during_the_pause_ends_the_run_and_removes_the_passcodes(store, enroll_net, tmp_path,
+                                                                                 monkeypatch):
+    import asyncio
+    updates = []
+    original = store.update_run
+    monkeypatch.setattr(store, "update_run", lambda rid, **f: updates.append(f) or original(rid, **f))
+    task = run_in_background(store, enroll_net, "r5", tmp_path, pause=True, **batch(2))
+    await until(paused(store, "r5"), "the pause")
+    assert len(passcodes(enroll_net, "robot-r5-uc05-passcode-0")) == 2
+    cleanup_run = await do_cleanup(store, enroll_net, "r5", "full", tmp_path)
+    run = await asyncio.wait_for(task, 30)
+    assert run["status"] == "failed" and run["error"] == "rolled back before the enrollment in the field"
+    assert run["finished_at"]
+    # the run task neither logs its end nor resets the progress – the cleanup's heartbeat owns both
+    (failed,) = [u for u in updates if u.get("status") == "failed"]
+    assert "progress" not in failed
+    assert not any(e["message"].startswith("Run failed") for e in store.events("r5"))
+    assert cleanup_run["cleanup_status"] == "done", store.events("r5")[-5:]
+    assert store.get_run("r5")["cleanup_status"] == "done"
+    assert enroll_net.enroll_requests == [] and enroll_net.issued() == []
+    assert all(o["status"] == "DELETED" for o in enroll_net.auth_objects["passcode"].values())
+    assert enroll_net.policies == {} and enroll_net.divisions == {} and enroll_net.violations == []
+
+
+async def test_pause_ends_after_the_time_limit(store, enroll_net, tmp_path, monkeypatch):
+    import asyncio
+    import time as real_time
+    clock = {"offset": 0.0}
+
+    class Time:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        @staticmethod
+        def monotonic():
+            return real_time.monotonic() + clock["offset"]
+
+    monkeypatch.setattr(enrollment, "time", Time())
+    monkeypatch.setattr(enrollment, "PAUSE_MAX_S", 120)
+    task = run_in_background(store, enroll_net, "t5", tmp_path, pause=True)
+    await until(paused(store, "t5"), "the pause")
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert store.get_run("t5")["status"] == "paused"  # within the limit it keeps waiting
+    clock["offset"] = 121
+    run = await asyncio.wait_for(task, 30)
+    assert run["status"] == "failed"
+    assert run["error"] == "the enrollment in the field was not started within 2 minutes"
+    assert enroll_net.enroll_requests == []
+    run = await do_cleanup(store, enroll_net, "t5", "full", tmp_path)
+    assert run["cleanup_status"] == "done"
+    assert all(o["status"] == "DELETED" for o in enroll_net.auth_objects["passcode"].values())
+
+
+def test_production_pause_limit_is_an_hour():
+    assert enrollment.PAUSE_MAX_S == 3600 and enrollment.PAUSE_POLL_S > 0
+
+
+async def test_deleting_the_run_during_the_pause_ends_the_task_quietly(store, enroll_net, tmp_path):
+    import asyncio
+    task = run_in_background(store, enroll_net, "x5", tmp_path, pause=True)
+    await until(paused(store, "x5"), "the pause")
+    store.delete_run("x5")
+    assert await asyncio.wait_for(task, 30) is None  # no exception, nothing recreated
+    assert store.get_run("x5") is None and enroll_net.enroll_requests == []

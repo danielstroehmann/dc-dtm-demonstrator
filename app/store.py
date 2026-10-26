@@ -210,7 +210,7 @@ class Store:
 
     def mark_interrupted(self) -> None:
         """Background tasks die with the process; make that visible after a restart."""
-        self._exec("UPDATE runs SET status = 'interrupted' WHERE status IN ('pending', 'running')")
+        self._exec("UPDATE runs SET status = 'interrupted' WHERE status IN ('pending', 'running', 'paused')")
         # An interrupted renewal leaves the device with its previous, still valid certificate.
         self._exec("UPDATE runs SET status = 'completed' WHERE status = 'renewing'")
         self._exec("UPDATE runs SET cleanup_status = 'interrupted' WHERE cleanup_status = 'running'")

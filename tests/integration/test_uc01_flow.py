@@ -126,6 +126,59 @@ async def test_failed_job_fails_the_run(store, fake, tmp_path):
     assert {o["kind"] for o in store.objects("b3")} == {"division", "policy", "batch_job"}
 
 
+async def test_transient_failed_job_status_keeps_waiting_until_completed(store, fake, tmp_path):
+    # DTM reported "failed" mid-processing once and then completed the job – the run must not abort.
+    fake.job_steps = ["in_progress", "failed", "failed", "in_progress", "completed"]
+    run = await start(store, fake, "b3t", tmp_path, mode="batch", count=2)
+    assert run["status"] == "completed", [e["message"] for e in store.events("b3t")][-5:]
+    assert run["result"]["certificate_total"] == 2
+    assert len(fake.issued()) == 2
+    events = store.events("b3t")
+    waits = [e for e in events if e["message"] == "DTM reports the job as failed – checking that it stays failed"]
+    assert len(waits) == 1 and waits[0]["level"] == "wait"  # once per failed streak, not per poll
+    assert not any(e["level"] == "error" for e in events)
+
+
+async def test_persistent_failed_job_fails_after_bounded_confirm_polls(store, fake, tmp_path):
+    fake.job_steps = ["in_progress"] + ["failed"] * 200
+    run = await start(store, fake, "b3p", tmp_path, mode="batch", count=2)
+    assert run["status"] == "failed"
+    assert run["error"] == "batch job ended with status failed"
+    # 1 in_progress poll + exactly FAILED_CONFIRM_POLLS failed polls – bounded, not until the deadline
+    assert len(fake.names("job")) == 1 + evergreen.FAILED_CONFIRM_POLLS
+    record = [e for e in store.events("b3p") if e["message"].startswith("DTM job record:")]
+    assert len(record) == 1 and record[0]["level"] == "error"
+    assert record[0]["message"] == "DTM job record: 0 issued, 2 failed, error report not available"
+    assert fake.names("result") == []
+
+
+async def test_failed_streak_restarts_after_progress(store, fake, tmp_path):
+    # Two separate failed streaks, each shorter than the confirm window, must not add up.
+    short = evergreen.FAILED_CONFIRM_POLLS - 1
+    fake.job_steps = ["failed"] * short + ["in_progress"] + ["failed"] * short + ["completed"]
+    run = await start(store, fake, "b3s", tmp_path, mode="batch", count=1)
+    assert run["status"] == "completed", [e["message"] for e in store.events("b3s")][-5:]
+    waits = [e for e in store.events("b3s") if e["message"].startswith("DTM reports the job as failed")]
+    assert len(waits) == 2
+
+
+async def test_failed_status_past_the_deadline_gets_its_confirmation(store, fake, tmp_path, monkeypatch):
+    # The clock passes the deadline while DTM reports failed: no deadline error and no wait stories
+    # while confirming – the job's later "completed" wins.
+    import itertools
+    fake.job_steps = ["in_progress"] + ["failed"] * 15 + ["completed"]
+    clock = itertools.count(0, 20)  # a few clock reads per poll – the 600 s deadline passes mid-failed
+    monkeypatch.setattr(evergreen.time, "monotonic", lambda: next(clock))
+    run = await start(store, fake, "b3d", tmp_path, mode="batch", count=1)
+    assert run["status"] == "completed", [e["message"] for e in store.events("b3d")][-5:]
+    messages = [e["message"] for e in store.events("b3d")]
+    stories = {s.split(" {")[0][:30] for s in evergreen.WAIT_STORY["server_side"]}
+    is_story = lambda m: any(m.startswith(s) for s in stories)
+    assert any(is_story(m) for m in messages[:messages.index("Job status: failed")])  # stories ran before ...
+    confirming = messages[messages.index("Job status: failed"):messages.index("Job status: completed")]
+    assert not any(is_story(m) for m in confirming)  # ... but not while failed is being confirmed
+
+
 async def test_batch_deadline(store, fake, tmp_path, monkeypatch):
     fake.job_steps = ["in_progress"] * 50
     clock = iter(range(0, 10_000, 100))

@@ -389,3 +389,18 @@ def test_row_route_needs_login(web, configured_store, store):
     htmx = web.get("/runs/r1/row", headers={"HX-Request": "true"}, follow_redirects=False)
     assert htmx.status_code == 401 and htmx.headers["hx-redirect"] == "/login"
     assert 'id="run-r1"' not in plain.text + htmx.text
+
+
+@pytest.mark.parametrize("progress,text", [
+    ({"label": "Deleting certificate policy robot-r1-uc01-policy and verifying it is gone",
+      "short": "Deleting policy"}, "Deleting policy"),
+    ({"label": "Checking that no batch job is still issuing", "short": "Checking jobs"}, "Checking jobs"),
+    ({"label": "Revoking certificates (pass 1)", "short": "Revoking", "total": 8, "done": 2}, "Revoking 2/8"),
+    ({"label": "Preparing the cleanup"}, "Rolling back"),  # a progress of an older release: no short name
+])
+def test_meter_shows_the_short_phase_and_the_full_label_as_tooltip(configured_store, user, store, progress, text):
+    store.create_run("r1", "uc01", BASE)
+    store.update_run("r1", status="completed", cleanup_mode="full", cleanup_status="running", progress=progress)
+    slot = action_slot(user.get("/").text, "r1")
+    assert f"<span>{text}</span>" in slot
+    assert f'data-tip="{progress["label"]}"' in slot and f'aria-valuetext="{progress["label"]}"' in slot

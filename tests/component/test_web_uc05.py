@@ -19,8 +19,12 @@ def uc05_form(**overrides) -> dict:
 def test_uc05_form(configured_user, fake):
     html = configured_user.get("/runs/new/uc05").text
     assert '<span class="seg-label" id="l-protocol">Protocol</span>' in html
-    assert re.search(r'<label class="switch-cell"><input type="checkbox" name="checks" value="true" role="switch" '
-                     r'checked> Run the checks</label>', html)  # on by default
+    stack = html[html.index('<div class="switch-stack">'):]
+    stack = stack[:stack.index("</div>")]
+    # both on by default, stacked: the checks, then the pause before the field
+    assert re.search(r'<label><input type="checkbox" name="checks" value="true" role="switch" checked> Run checks'
+                     r'</label>\s*<label data-tip="[^"]+"><input type="checkbox" name="pause" value="true" '
+                     r'role="switch" checked> Pause before certificate enrollment</label>', stack)
     assert '<span class="seg-label" id="l-mode">Devices</span>' in html and "<h3>Issuance</h3>" in html
     assert re.search(r'<div class="choice-with-count">.*?<input id="count" type="number" name="count" class="short" '
                      r'value="2"[^>]*aria-label="Number of devices" data-when="mode=batch">', html, re.S)
@@ -213,3 +217,133 @@ def test_batch_overview_says_all_requests(configured_user, store, enroll_net):
     assert finished(store, "p5")["status"] == "completed"
     html = configured_user.get("/runs/p5").text
     assert "<small>All requests</small>" in html and "Upload done" not in html
+
+
+# --- the pause before the field -----------------------------------------------------------------
+
+def enroll_card(html: str) -> str | None:
+    if "<h2>Enrollment in the field</h2>" not in html:
+        return None
+    card = html[html.rindex('<article', 0, html.index("<h2>Enrollment in the field</h2>")):]
+    return card[:card.index("</article>")]
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_paused_run_shows_the_enroll_card_and_continues_on_click(configured_user, store, enroll_net, count):
+    configured_user.post("/runs", data=uc05_form(pause="true", mode="batch" if count > 1 else "single",
+                                                 count=str(count)))
+    run = finished(store, "p5")  # stops at the pause
+    assert run["status"] == "paused" and run["params"]["pause"] is True, run["error"]
+    assert enroll_net.enroll_requests == []
+    html = configured_user.get("/runs/p5").text
+    card = enroll_card(html)
+    assert card and 'action="/runs/p5/enroll"' in card
+    assert ("Enroll devices" if count > 1 else "Enroll device") in card
+    passcode_text = f"{count} passcode{'s' if count > 1 else ''} ready in DTM – policy"
+    assert passcode_text in card and "robot-p5-uc05-policy" in card
+    assert "<h2>Overview</h2>" not in html and '<div class="phase-pair">' not in html  # no result yet
+    assert '<li class="current" aria-current="step">Run</li>' in html
+    # the live view of a paused run reloads into this page (it does not keep polling)
+    live = configured_user.get("/runs/p5/live", headers={"hx-request": "true"})
+    assert live.headers.get("hx-refresh") == "true"
+    # the click continues the run
+    response = configured_user.post("/runs/p5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/p5"
+    run = finished(store, "p5")
+    assert run["status"] == "completed", run["error"]
+    assert len(run["result"]["certificates"]) == count and [c["ok"] for c in run["result"]["checks"]] == [True] * 3
+    html = configured_user.get("/runs/p5").text
+    assert enroll_card(html) is None and "<h2>Overview</h2>" in html
+    # a later click on the (stale) button just shows the run as it is
+    response = configured_user.post("/runs/p5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/p5"
+    assert store.get_run("p5")["status"] == "completed"
+
+
+def test_pause_is_off_when_the_switch_is_not_sent(configured_user, store, enroll_net):
+    configured_user.post("/runs", data=uc05_form())  # an unticked checkbox is not sent
+    run = finished(store, "p5")
+    assert run["params"]["pause"] is False and run["status"] == "completed", run["error"]
+    assert enroll_card(configured_user.get("/runs/p5").text) is None
+
+
+def test_rollback_from_the_runs_list_during_the_pause(configured_user, store, enroll_net):
+    configured_user.post("/runs", data=uc05_form(pause="true", mode="batch", count="2"))
+    assert finished(store, "p5")["status"] == "paused"
+    # paused is not active: the runs list offers the rollback, and it is accepted
+    response = configured_user.post("/runs/p5/cleanup", data={"mode": "full"}, follow_redirects=False)
+    assert response.status_code in (200, 303)
+    run = finished_cleanup(store, "p5")
+    assert run["cleanup_status"] == "done"
+    from tests.conftest import wait_for
+    run = wait_for(lambda: (r := store.get_run("p5"))["status"] == "failed" and r, what="the run to end")
+    assert run["error"] == "rolled back before the enrollment in the field"
+    assert enroll_net.enroll_requests == []
+    assert all(o["status"] == "DELETED" for o in enroll_net.auth_objects["passcode"].values())
+    assert enroll_card(configured_user.get("/runs/p5").text) is None
+    assert configured_user.post("/runs/p5/enroll", follow_redirects=False).status_code == 303
+    assert store.get_run("p5")["status"] == "failed" and enroll_net.enroll_requests == []
+
+
+def paused_run(store, run_id="e5", use_case="uc05", **fields):
+    store.create_run(run_id, use_case, {"dtm_host": enrollment_host(), "protocol": "est", "auth": "passcode",
+                                        "count": 1, "mode": "single", "variant": "api", "pause": True})
+    store.update_run(run_id, status="paused", result={"policy": f"robot-{run_id}-{use_case}-policy"}, **fields)
+
+
+def enrollment_host():
+    from tests.fakedtm import HOST
+    return HOST
+
+
+@pytest.mark.parametrize("use_case", ["uc03", "uc04"])
+def test_enroll_refused_for_other_use_cases(configured_user, store, use_case):
+    paused_run(store, use_case=use_case)
+    assert configured_user.post("/runs/e5/enroll", follow_redirects=False).status_code == 409
+    assert store.get_run("e5")["status"] == "paused"
+    assert enroll_card(configured_user.get("/runs/e5").text) is None
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted", "pending"])
+def test_enroll_changes_nothing_unless_paused(configured_user, store, status):
+    """A stale button: no error, the run page shows the run as it is."""
+    paused_run(store)
+    store.update_run("e5", status=status)
+    response = configured_user.post("/runs/e5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/e5"
+    assert store.get_run("e5")["status"] == status
+    assert enroll_card(configured_user.get("/runs/e5").text) is None
+
+
+@pytest.mark.parametrize("cleanup_status", ["running", "done", "failed"])
+def test_enroll_does_not_continue_once_a_rollback_started(configured_user, store, cleanup_status):
+    paused_run(store, cleanup_status=cleanup_status)
+    response = configured_user.post("/runs/e5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/e5"
+    assert store.get_run("e5")["status"] == "paused"
+    assert enroll_card(configured_user.get("/runs/e5").text) is None
+
+
+def test_double_click_while_running_just_redirects(configured_user, store):
+    paused_run(store)
+    store.update_run("e5", status="running")  # the first click already claimed the run
+    response = configured_user.post("/runs/e5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/runs/e5"
+    assert store.get_run("e5")["status"] == "running"
+
+
+def test_enroll_unknown_run_and_without_login(configured_user, store, web):
+    assert configured_user.post("/runs/nope/enroll", follow_redirects=False).status_code == 404
+    paused_run(store)
+    web.cookies.clear()
+    response = web.post("/runs/e5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/login"
+    assert store.get_run("e5")["status"] == "paused"
+
+
+def test_paused_run_page_and_list(configured_user, store):
+    paused_run(store)
+    html = configured_user.get("/runs/e5").text
+    assert enroll_card(html) and "1 passcode ready in DTM – policy" in html and "Enroll device<" in html
+    assert '<span class="pill ">paused</span>' in html  # waiting for the presenter: no pulsing dot
+    assert "<h2>Overview</h2>" not in html

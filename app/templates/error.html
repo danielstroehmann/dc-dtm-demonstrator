@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Error · DTM Demonstrator{% endblock %}
+{% from "_page_head.html" import page_head %}
+{% block title %}Error · Demonstrator · Device Trust Manager{% endblock %}
 {% block content %}
+{{ page_head("Not found" if status == 404 else "Error", [("Not found" if status == 404 else "Error", none)]) }}
 <article class="card">
   {% if status == 404 %}
-  <div class="card-head"><h2>Not found</h2></div>
   <p>{{ message }}</p>
   {% else %}
-  <div class="card-head"><h2>Something went wrong</h2></div>
   <p class="error" role="alert">{{ message }}</p>
   {% endif %}
   <div class="action-bar"><a href="/" role="button" class="outline btn-sm">Back to runs</a></div>

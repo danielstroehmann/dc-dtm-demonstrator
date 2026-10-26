@@ -95,7 +95,7 @@ def main() -> None:
     if config.get("auto_state"):  # replay tests: DTM now lists this certificate as issued
         state_file = Path(sys.argv[0]).resolve().parent / "state.json"
         state = json.loads(state_file.read_text()) if state_file.exists() else {}
-        alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1]
+        alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1].split("/")[0]
         state.setdefault(alternative_id, []).append(format(cert.serial_number, "x"))
         state_file.write_text(json.dumps(state))
 
@@ -144,7 +144,7 @@ def key_update(config: dict, options: dict, files: dict) -> None:
     if not all(f in files for f in ("-cert", "-key", "-extracerts", "-trusted", "-newkey")):
         fail("kur needs -cert, -key, -extracerts, -trusted and -newkey")
     state = json.loads((Path(sys.argv[0]).resolve().parent / "state.json").read_text())
-    alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1]
+    alternative_id = str(options.get("-server", "")).rsplit("DIOT_", 1)[-1].split("/")[0]
     current = x509.load_pem_x509_certificate(files["-cert"].encode())
     signer = serialization.load_pem_private_key(files["-key"].encode(), None)
     if format(current.serial_number, "x") not in state.get(alternative_id, []):

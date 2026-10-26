@@ -23,7 +23,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import cleanup, dtm, enrollment, evergreen, snippets
+from . import cleanup, devices, dtm, enrollment, evergreen, snippets
 from .auth import COOKIE, Auth
 from .config import APP_VERSION, DATA_DIR
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -53,6 +53,11 @@ ClientFactory = Callable[[DTMConfig, Callable[[str], None]], DTMClient]
 USE_CASES = evergreen.USE_CASES
 
 
+def max_renewals(run: dict) -> int:
+    """Renewal rounds per run – the route and the button use the same limit."""
+    return devices.MAX_RENEWALS if run["use_case"] == "uc06" else enrollment.MAX_RENEWALS
+
+
 def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClient,
                data_dir: Path = DATA_DIR) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -68,8 +73,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["catalog"] = evergreen.CATALOG
     templates.env.globals["snippets"] = snippets
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
-    templates.env.globals["auths"] = enrollment.AUTHS
-    templates.env.globals["max_renewals"] = enrollment.MAX_RENEWALS
+    templates.env.globals["auths"] = enrollment.AUTHS | {"apikey": "API key"}
+    templates.env.globals["max_renewals"] = max_renewals
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     limiter = Limiter(key_func=get_remote_address)
     app.state.limiter = limiter
@@ -392,6 +397,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                       profile_status=profile_status, profile_mode=profile_mode, connection=_public(conn),
                       default_connection=_public(conn), several=len(store.connections()) > 1,
                       max_batch=evergreen.MAX_BATCH, max_passcode_batch=enrollment.MAX_PASSCODE_BATCH,
+                      max_devices=devices.MAX_DEVICES,
                       default_run_id=new_run_id())
 
     @app.post("/runs")
@@ -400,7 +406,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                          approval: bool = Form(False),
                          use_case: str = Form("uc01"), connection_id: str = Form(""),
                          protocol: str = Form(""), auth_method: str = Form(""), key_location: str = Form(""),
-                         checks: bool = Form(False)):
+                         checks: bool = Form(False), pause: bool = Form(False), field: str = Form("est"), identity: str = Form("serial")):
         run_id = run_id.strip().lower() or new_run_id()
         if use_case == "evergreen":
             if key_location not in ("server", "factory") or mode not in ("single", "batch"):
@@ -410,6 +416,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(400, "Unknown use case")
         if mode == "single":  # a single device is exactly one certificate
             count = 1
+        if use_case == "uc06":  # checked before DTM is asked for anything
+            protocol, auth_method = protocol or "rest", auth_method or "apikey"
+            if problem := devices.check_choice(protocol, auth_method, field, identity):
+                raise HTTPException(400, problem)
         enrolled = use_case in ("uc03", "uc04", "uc05")  # all run on the enrollment engine
         if use_case in ("uc04", "uc05"):  # renewal per click (uc04) / one-time passcodes in the field (uc05)
             protocol = protocol or "est"
@@ -448,6 +458,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             error = "Invalid variant or mode."
         elif not 1 <= count <= evergreen.MAX_BATCH:
             error = f"Number of certificates: 1–{evergreen.MAX_BATCH}."
+        elif use_case == "uc06" and count > devices.MAX_DEVICES:
+            error = f"Number of devices: 1–{devices.MAX_DEVICES}."
         elif use_case == "uc05" and count > enrollment.MAX_PASSCODE_BATCH:
             error = f"Number of devices: 1–{enrollment.MAX_PASSCODE_BATCH} (one passcode each)."
         elif ca_id not in cas or cas[ca_id]["key_type"] not in evergreen.KEY_TYPES:
@@ -468,11 +480,14 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if enrolled:
             params |= {"protocol": protocol, "auth": auth_method}
         if use_case == "uc05":
-            params["checks"] = checks
+            params |= {"checks": checks, "pause": pause}
+        if use_case == "uc06":  # sequential requests per device – no portal, no approval
+            params |= {"variant": "api", "approval": False, "protocol": protocol, "auth": auth_method,
+                       "field": field, "identity": identity}
         # A reused run ID must not inherit files of a deleted run (e.g. an old batch.zip).
         shutil.rmtree(data_dir / "runs" / run_id, ignore_errors=True)
         store.create_run(run_id, use_case, params)
-        engine = enrollment.run if enrolled else evergreen.run
+        engine = enrollment.run if enrolled else devices.run if use_case == "uc06" else evergreen.run
         spawn(lambda c: engine(store, c, run_id, data_dir / "runs" / run_id), run_id)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -538,15 +553,34 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     @app.post("/runs/{run_id}/renew")
     async def renew_run(run_id: str):
         run = get_run_or_404(run_id)
-        if run["use_case"] == "uc04" and run["status"] == "renewing":  # double click: just show the run
+        renewable = run["use_case"] in ("uc04", "uc06")
+        if renewable and run["status"] == "renewing":  # double click: just show the run
             return RedirectResponse(f"/runs/{run_id}", status_code=303)
-        if run["use_case"] != "uc04" or run["status"] != "completed" or run.get("cleanup_status"):
+        if not renewable or run["status"] != "completed" or run.get("cleanup_status"):
             raise HTTPException(409, "Only a completed run of renewable device certificates that is not cleaned up can be renewed")
-        if len((run.get("result") or {}).get("renewals") or []) >= enrollment.MAX_RENEWALS:
-            raise HTTPException(409, f"At most {enrollment.MAX_RENEWALS} renewals per run")
+        limit = max_renewals(run)
+        if len((run.get("result") or {}).get("renewals") or []) >= limit:
+            raise HTTPException(409, f"At most {limit} renewals per run")
         # Claim the run before the task starts – a concurrent request must not start a second renewal.
         if store.claim_status(run_id, "completed", "renewing"):
-            spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
+            if run["use_case"] == "uc06":  # renewed through the management API
+                try:
+                    spawn(lambda c: devices.renew(store, c, run_id, data_dir / "runs" / run_id), run_id)
+                except Exception:  # no client (connection gone or changed) – the run must not stay "renewing"
+                    store.claim_status(run_id, "renewing", "completed")
+                    raise
+            else:
+                spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    @app.post("/runs/{run_id}/enroll")
+    async def enroll_run(run_id: str):
+        """UC-5: the run paused after the factory step continues with the enrollment in the field."""
+        run = get_run_or_404(run_id)
+        if run["use_case"] != "uc05":
+            raise HTTPException(409, "Only a passcode-bound run waits for the enrollment in the field")
+        if not run.get("cleanup_status"):  # a double click or a stale page just shows the run as it is
+            store.claim_status(run_id, "paused", "running")
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     @app.get("/runs/{run_id}/certificates/{serial}.pem")

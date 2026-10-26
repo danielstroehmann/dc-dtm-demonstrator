@@ -1,0 +1,15 @@
+{# Every page starts the same way – breadcrumb, then the heading – so headings sit at the same height
+   on every page. trail: [(label, href or none)] after "Use-Case Central"; empty on the home page (space kept, nothing shown). #}
+{% macro page_head(title, trail=[], home="/", badge="", sub="") -%}
+{%- if not trail %}{# home: no breadcrumb, but its space – the heading stays where it is on every page #}
+<nav aria-label="breadcrumb" aria-hidden="true" class="crumb-spacer"><ul><li>Use-Case Central</li></ul></nav>
+{%- else %}
+<nav aria-label="breadcrumb"><ul><li><a href="{{ home }}">Use-Case Central</a></li>
+  {%- for label, href in trail %}<li{% if loop.last %} aria-current="page"{% endif %}>{% if href %}<a href="{{ href }}">{{ label }}</a>{% else %}{{ label }}{% endif %}</li>{% endfor %}
+</ul></nav>
+{%- endif %}
+<div class="page-head">
+  <div><h1>{{ title }}{% if badge %} {{ badge }}{% endif %}</h1>{% if sub %}
+  <p>{{ sub }}</p>{% endif %}</div>
+</div>
+{%- endmacro %}

@@ -52,7 +52,8 @@ def test_first_connection_redirects_home_later_ones_to_settings(user, store, fak
     first = save(user, name="US")
     assert first.status_code == 303 and first.headers["location"] == "/"
     home = user.get("/").text
-    assert '<article class="tile">' in home and "<h1>Welcome</h1>" not in home and "<h1>" not in home
+    assert '<article class="tile">' in home and "<h1>Welcome</h1>" not in home
+    assert re.search(r'<nav aria-label="breadcrumb" aria-hidden="true" class="crumb-spacer">.*?</nav>\s*<div class="page-head">\s*<div><h1>Use-Case Central</h1></div>', home, re.S)
     second = save(user, name="US backup")  # the fake DTM knows one account; a second name is enough
     assert second.status_code == 303 and second.headers["location"] == "/settings"
     (us,) = [c for c in store.connections() if c["name"] == "US"]
@@ -99,13 +100,13 @@ def test_failed_later_save_stays_on_settings(configured_user, store, fake):
 
 def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fake):
     html = configured_user.get("/").text
-    assert "<h1>" not in html  # no "Start a demo" heading – the tiles say it (author: less text)
-    assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 3
+    assert re.search(r'<nav aria-label="breadcrumb" aria-hidden="true" class="crumb-spacer">.*?</nav>\s*<div class="page-head">\s*<div><h1>Use-Case Central</h1></div>', html, re.S) and "Start a demo" not in html
+    assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 4
     for key, use_case in evergreen.CATALOG.items():
         assert html.count(f'formaction="/runs/new/{key}"') == 1
         assert f'aria-label="Start {use_case.title}"' in html
     assert (html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
-            < html.index('formaction="/runs/new/uc05"'))
+            < html.index('formaction="/runs/new/uc05"') < html.index('formaction="/runs/new/uc06"'))
     assert "Server-side or factory keys" in html and "Renewal per click" in html and "One-time passcode" in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html
@@ -133,7 +134,8 @@ def test_connection_select_only_with_several_connections(two, store):
 
 def test_empty_state_without_runs(configured_user):
     html = configured_user.get("/").text
-    assert "<h2>Recent runs</h2>" in html and "No runs yet." in html and "<table" not in html
+    assert '<div class="section-title"><h2>Recent</h2></div>' in html and "<table" not in html
+    assert re.search(r'<div class="empty"><svg[^>]*>.*?</svg><p>Nothing</p></div>', html, re.S)
 
 
 @pytest.mark.parametrize("status,kind", [
@@ -144,7 +146,7 @@ def test_recent_runs_status_pills(configured_store, user, store, status, kind):
     store.create_run("p1", "uc01", BASE_PARAMS)
     store.update_run("p1", status=status)
     html = user.get("/").text
-    assert "No runs yet." not in html
+    assert '<div class="empty">' not in html and "<p>Nothing</p>" not in html
     row = re.search(r'<tr id="run-p1"[^>]*>\s*<td><a href="/runs/p1">p1</a></td>.*?</tr>', html, re.S).group(0)
     assert f'<span class="pill {kind}">{status}</span>' in row
     assert "<td>–</td>" in row  # no cleanup yet
@@ -208,8 +210,9 @@ def test_anonymous_error_pages_have_no_app_shell(configured_store, web, method, 
     response = web.request(method, path, data={} if method != "get" else None, follow_redirects=False)
     assert response.status_code == status
     html = response.text
-    # still the error page (404: "Not found", plain text; other errors: "Something went wrong" + alert) …
-    assert ("<h2>Not found</h2>" if status == 404 else "<h2>Something went wrong</h2>") in html
+    # still the error page (404: "Not found", plain text; other errors: "Error" + alert) …
+    assert ("<h1>Not found</h1>" if status == 404 else "<h1>Error</h1>") in html
+    assert (status == 404) == ('role="alert"' not in html)
     # … but without what only a logged-in user may see: connection name/host, navigation, log-out
     assert "conn-chip" not in html and f"Default · {HOST}" not in html
     assert 'class="nav-link"' not in html and 'action="/logout"' not in html
@@ -217,7 +220,7 @@ def test_anonymous_error_pages_have_no_app_shell(configured_store, web, method, 
 
 def test_logged_in_error_page_keeps_the_app_shell(configured_user):
     html = configured_user.get("/nope").text
-    assert "<h2>Not found</h2>" in html and 'class="conn-chip"' in html and 'action="/logout"' in html
+    assert "<h1>Not found</h1>" in html and 'class="conn-chip"' in html and 'action="/logout"' in html
 
 
 # --- run page: header pill, phase stepper, live line ------------------------------------------------

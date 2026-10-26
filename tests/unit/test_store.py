@@ -104,7 +104,7 @@ def test_list_runs_newest_first(store, monkeypatch):
 
 def test_mark_interrupted_only_touches_active_states(store):
     for run_id, status in (("p", "pending"), ("r", "running"), ("w", "waiting"), ("c", "completed"),
-                           ("f", "failed")):
+                           ("f", "failed"), ("u", "paused")):
         store.create_run(run_id, "uc01", {})
         store.update_run(run_id, status=status)
     store.update_run("c", cleanup_status="running")
@@ -112,7 +112,16 @@ def test_mark_interrupted_only_touches_active_states(store):
     store.mark_interrupted()
     status = {r["id"]: (r["status"], r["cleanup_status"]) for r in store.list_runs()}
     assert status == {"p": ("interrupted", None), "r": ("interrupted", None), "w": ("waiting", None),
-                      "c": ("completed", "interrupted"), "f": ("failed", "done")}
+                      "c": ("completed", "interrupted"), "f": ("failed", "done"),
+                      "u": ("interrupted", None)}  # a paused UC-5 run's task died with the process
+
+
+def test_claim_status_is_a_compare_and_set(store):
+    store.create_run("a", "uc05", {})
+    store.update_run("a", status="paused")
+    assert store.claim_status("a", "paused", "running") is True
+    assert store.claim_status("a", "paused", "running") is False  # the second click loses
+    assert store.get_run("a")["status"] == "running"
 
 
 def test_object_ledger(store):

@@ -21,6 +21,7 @@ class UseCase:
     summary: str
     key_generation: str  # "server_side" (DTM creates the key pairs) or "client_side" (factory CSRs)
     tags: tuple[str, ...] = ()
+    license: str = "essentials"  # "advanced": needs DTM's Advanced license (device management)
 
 
 USE_CASES = {
@@ -53,6 +54,12 @@ USE_CASES = {
         "The factory only writes a one-time passcode to the device, bound to its common name. In the field the "
         "device enrolls via EST or CMPv2 – DTM checks the request against the passcode and accepts it once.",
         "client_side", ("EST · CMPv2", "Single · Batch", "One-time passcode")),
+    "uc06": UseCase(
+        "Managed devices",
+        "The factory creates each device in DTM and requests its certificate for it – the common name is the "
+        "device name, DTM files the certificate under the device. Renewal per click renews every device; the new "
+        "certificate lands under the same device. Needs the Advanced license.",
+        "client_side", ("Advanced license", "Single · Batch", "Renewal per click"), license="advanced"),
 }
 # The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.
 GUIDE = UseCase(
@@ -60,7 +67,7 @@ GUIDE = UseCase(
     "Long-lived device certificates for the factory – answer a few questions and the run shows the matching "
     "flow end to end.",
     "client_side", ("REST · EST · CMPv2 · SCEP", "Single · Batch", "Server-side or factory keys"))
-CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"], "uc05": USE_CASES["uc05"]}
+CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"], "uc05": USE_CASES["uc05"], "uc06": USE_CASES["uc06"]}
 # What the UI calls a run's use case: the catalog entry it was started from (no internal UC numbers).
 DISPLAY_NAMES = {uc: (GUIDE if uc in ("uc01", "uc02", "uc03") else use_case).title for uc, use_case in USE_CASES.items()}
 
@@ -80,6 +87,9 @@ DIVISION_DESCRIPTION = "dc-dtm-demonstrator run – safe to delete"
 # Verified up to 1000 (≈2 min issuance); every certificate consumes a license and slows cleanup.
 MAX_BATCH = 2_000
 POLL_INTERVAL = 0.5
+# DTM reported "failed" mid-processing once and then completed the job (2026-10-26, NL) – a failed
+# status counts only once it persists this many polls (≈15 s).
+FAILED_CONFIRM_POLLS = 30
 STORY_INTERVAL = 5.0
 # DTM key type for the policy, derived from the issuing CA's algorithm.
 KEY_TYPES = {"ecdsa": "P_256", "rsa": "RSA_2048"}
@@ -439,7 +449,7 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
 
     approval_s = None
     deadline = upload_done + max(600, len(names) * 2)
-    status, done, polls, poll_seconds = None, None, 0, 0.0
+    status, done, polls, poll_seconds, failed_polls = None, None, 0, 0.0, 0
     stories, story, next_story = WAIT_STORY[p["key_generation"]], 0, upload_done + STORY_INTERVAL
     started_wall = time.time()
     try:
@@ -455,7 +465,10 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
                 store.update_run(run_id, progress={
                     "label": f"DTM is issuing {len(names)} certificates", "status": status,
                     "started": started_wall, "total": len(names), "done": done})
-            if status in ("completed", "failed", "rejected"):
+            failed_polls = failed_polls + 1 if status == "failed" else 0
+            if failed_polls == 1:
+                log("DTM reports the job as failed – checking that it stays failed", "wait")
+            if status in ("completed", "rejected") or failed_polls >= FAILED_CONFIRM_POLLS:
                 break
             if p.get("approval") and approval_s is None and status == "pending_approval":  # verified live
                 log("Approval required – approving via API")
@@ -468,12 +481,12 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
                                       "body_file": "empty.json"})
                 approval_s = round(time.monotonic() - upload_done, 2)
                 log(f"Approved after {approval_s}s", "success")
-            if time.monotonic() >= next_story and status != "pending_approval":
+            if time.monotonic() >= next_story and status not in ("pending_approval", "failed"):
                 progress = f" – {done} of {len(names)} issued so far" if done else ""
                 log(stories[story % len(stories)].format(**p) + progress, "wait")
                 story += 1
                 next_story = time.monotonic() + STORY_INTERVAL
-            if time.monotonic() > deadline:
+            if time.monotonic() > deadline and not failed_polls:  # a failed status gets its confirmation
                 raise ValueError(f"batch job did not complete within {deadline - upload_done:.0f}s")
             await asyncio.sleep(POLL_INTERVAL)
     finally:  # also shown when the job failed or timed out
@@ -482,6 +495,9 @@ async def _batch(client: DTMClient, api: ApiCalls, store: Store, run_id: str, po
                 spec={"method": "GET", "path": f"{JOBS_PATH}/{{JOB_ID}}", "until": {"status": "completed"}})
     measured = time.monotonic() - upload_done
     if status != "completed":
+        if status == "failed":
+            log(f"DTM job record: {job.get('success_items')} issued, {job.get('failed_items')} failed, "
+                f"error report {'available' if job.get('error_report_available') else 'not available'}", "error")
         raise ValueError(f"batch job ended with status {status}")
     log(f"Batch completed after {measured:.2f}s – {len(names)} certificates", "success")
 

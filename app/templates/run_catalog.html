@@ -1,6 +1,7 @@
 {% extends "base.html" %}
-{% block title %}New run · DTM Demonstrator{% endblock %}
+{% from "_page_head.html" import page_head %}
+{% block title %}New run · Demonstrator · Device Trust Manager{% endblock %}
 {% block content %}
-<div class="page-head"><h1>Start a demo</h1></div>
+{{ page_head("Use-Case Central") }}
 {% if connections %}{% include "_use_cases.html" %}{% else %}{% include "_welcome.html" %}{% endif %}
 {% endblock %}

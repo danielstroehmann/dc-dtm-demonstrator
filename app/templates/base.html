@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
-  <meta name="description" content="DTM Demonstrator – DigiCert Device Trust Manager use cases">
-  <title>{% block title %}DTM Demonstrator{% endblock %}</title>
+  <meta name="description" content="Demonstrator · Device Trust Manager – DigiCert Device Trust Manager use cases">
+  <title>{% block title %}Demonstrator · Device Trust Manager{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
   <link rel="preload" href="/static/fonts/roboto-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/pico.min.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
@@ -16,7 +17,7 @@
 <body>
   <header class="site-header">
     <nav class="container">
-      <ul><li><a href="/" class="brand">{{ icon("shield") }}<span class="brand-name">DTM Demonstrator <span>· Device Trust Manager</span></span></a></li></ul>
+      <ul><li><a href="/" class="brand">{{ icon("shield") }}<span class="brand-name">Demonstrator <span>· Device Trust Manager</span></span></a></li></ul>
       {% block nav %}{% if authenticated %}
       <ul>
         <li><a class="nav-link" href="/" {% if nav == "runs" %}aria-current="page"{% endif %}>Runs</a></li>

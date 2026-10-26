@@ -1,4 +1,4 @@
-# DTM Demonstrator
+# Demonstrator · Device Trust Manager
 
 A demonstrator for **DigiCert® Device Trust Manager (DTM)**: it runs typical DTM use cases
 end to end – configuration in DTM, simulated devices (one container each) that obtain and
@@ -24,11 +24,17 @@ curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/late
 ```
 
 Then open one of the printed URLs. Options: `--version vX.Y.Z`, `--host NAME` (repeatable),
-`--tls custom --tls-cert … --tls-key …`, `--port N`, `--http-port N` (plain HTTP, redirects to HTTPS; default 80), `--yes` (no questions; a password is generated
+`--tls-cert … --tls-key …` (own PEM pair), `--port N`, `--http-port N` (plain HTTP, redirects to HTTPS; default 80), `--yes` (no questions; a password is generated
 and shown once), `--uninstall [--purge]`.
 
 Settings live in `/opt/dtm-demonstrator/.env` (e.g. `SITE_HOSTS` for the certificate names). After editing it, reboot or run
-`systemctl restart dtm-demonstrator` – the containers are recreated with the new values. Re-running
+`systemctl restart dtm-demonstrator` – the containers are recreated with the new values.
+
+**TLS** is set in the same `.env`: `TLS_CERT_FILE` and `TLS_KEY_FILE` point to a PEM certificate (with chain) and
+key – by default a self-signed pair the installer created in `./tls`; point them to your own files, e.g. from
+Let's Encrypt. Alternatively clear both and set `TLS_PKCS12_FILE` and `TLS_PKCS12_PASSWORD` (PEM wins when both are
+set). The files are checked and loaded at every `systemctl restart dtm-demonstrator`; if something is wrong,
+`docker compose -p dtm-demonstrator logs tls` says what. Re-running
 the one-liner updates the installation and keeps data, password and settings.
 
 ## Documentation

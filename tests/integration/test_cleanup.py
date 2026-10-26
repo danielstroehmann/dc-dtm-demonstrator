@@ -190,6 +190,36 @@ async def test_waits_for_running_batch_job_before_revoking(store, fake, tmp_path
     assert any("Waiting for batch job" in e["message"] for e in store.events("j1"))
 
 
+async def test_cleanup_waits_through_transient_failed_job_status(store, fake, tmp_path):
+    fake.job_steps = ["in_progress", "completed"]
+    await start(store, fake, "j1f", tmp_path, mode="batch", count=2, approval=False)
+    # Interrupted run; DTM then reports "failed" once while the job keeps issuing.
+    job = next(iter(fake.jobs.values()))
+    job.update(status="in_progress", steps=["failed", "in_progress", "completed"], issued=[])
+    for c in list(fake.certificates.values()):
+        del fake.certificates[c["id"]]
+    fake.calls.clear()
+    run = await do_cleanup(store, fake, "j1f", "full", tmp_path)
+    assert run["cleanup_status"] == "done", store.events("j1f")
+    assert job["status"] == "completed" and len(job["issued"]) == 2  # issued after the transient failed ...
+    assert fake.issued() == []                                         # ... and revoked
+    order = fake.route_order()
+    assert order.count("job") == 3 and order.index("revoke") > max(i for i, n in enumerate(order) if n == "job")
+    assert any("(failed) to finish before revoking" in e["message"] for e in store.events("j1f"))
+
+
+async def test_cleanup_proceeds_after_persistent_failed_job_status(store, fake, tmp_path):
+    fake.job_steps = ["in_progress", "completed"]
+    await start(store, fake, "j1p", tmp_path, mode="batch", count=2, approval=False)
+    job = next(iter(fake.jobs.values()))
+    job.update(status="in_progress", steps=["failed"] * 100)
+    fake.calls.clear()
+    run = await do_cleanup(store, fake, "j1p", "full", tmp_path)
+    assert run["cleanup_status"] == "done", store.events("j1p")
+    assert fake.route_order().count("job") == 2  # failed confirmed on the second check, no endless wait
+    assert fake.issued() == [] and fake.policies == {} and fake.divisions == {}
+
+
 async def test_cleanup_rejects_job_stuck_in_pending_approval(store, fake, tmp_path):
     fake.fail["approve"] = httpx.Response(500, json={"error": "approval service down"})
     run = await start(store, fake, "j2", tmp_path, mode="batch", count=2, approval=True)
@@ -230,6 +260,19 @@ async def test_job_wait_times_out(store, fake, tmp_path, monkeypatch):
     assert run["cleanup_status"] == "failed"
     assert any("still in_progress" in e["message"] for e in store.events("j5"))
     assert len(fake.policies) == 1  # nothing deleted while the job may still issue
+
+
+async def test_job_wait_deadline_gives_a_failed_status_its_second_check(store, fake, tmp_path, monkeypatch):
+    fake.job_steps = ["in_progress", "completed"]
+    await start(store, fake, "j5f", tmp_path, mode="batch", count=1)
+    job = next(iter(fake.jobs.values()))
+    job.update(status="in_progress", steps=["failed", "completed"], issued=[])
+    for c in list(fake.certificates.values()):
+        del fake.certificates[c["id"]]
+    monkeypatch.setattr(cleanup, "JOB_WAIT_S", 0.0)  # the deadline has passed at the first check
+    run = await do_cleanup(store, fake, "j5f", "full", tmp_path)
+    assert run["cleanup_status"] == "done", [e["message"] for e in store.events("j5f")][-3:]
+    assert len(job["issued"]) == 1 and fake.issued() == []
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -440,3 +483,42 @@ async def test_heartbeat_names_the_slow_issued_listing(store, fake, tmp_path, mo
     assert len(loading) >= 3, messages
     stale = [m for m in messages if m.startswith("Checking that no batch job")]
     assert len(stale) <= 1, messages  # the job check is quick; the slow part is reported as listing
+
+
+SHORT_PHASES = {"Preparing", "Checking jobs", "Listing certs", "Revoking", "Confirming", "Waiting for DTM",
+                "Other policies", "Deleting policy", "Deleting profile", "Deleting passcode", "Deleting credential",
+                "Deleting auth", "Deleting division"}
+
+
+async def test_heartbeat_mirrors_a_short_phase_name(store, fake, tmp_path, monkeypatch):
+    """Every progress the runs list may show carries a short phase name from the agreed set, next to
+    the full label (the tooltip)."""
+    monkeypatch.setattr(cleanup, "HEARTBEAT_S", 0.001)
+    await start(store, fake, "h1", tmp_path, mode="batch", count=3)
+    fake.revoke_delay = 0.01
+    seen = []
+    original = store.update_run
+
+    def spy(run_id, **fields):
+        if fields.get("progress"):
+            seen.append(fields["progress"])
+        return original(run_id, **fields)
+    monkeypatch.setattr(store, "update_run", spy)
+    run = await do_cleanup(store, fake, "h1", "full", tmp_path)
+    assert run["cleanup_status"] == "done"
+    assert seen and all(p["short"] in SHORT_PHASES and p["label"] for p in seen), {p["short"] for p in seen}
+    assert "Revoking" in {p["short"] for p in seen}
+    assert store.get_run("h1")["progress"] is None  # cleared at the end
+
+
+def test_short_names_cover_every_credential_kind():
+    from app.dtm import AUTH_KINDS
+    assert set(cleanup.AUTH_SHORT) == set(AUTH_KINDS) and set(cleanup.AUTH_SHORT.values()) <= SHORT_PHASES
+
+
+def test_heartbeat_keeps_the_last_short_name():
+    beat = cleanup.Heartbeat(None, "x", lambda *a: None)
+    assert beat.short == "Preparing"
+    beat.set("Deleting certificate policy p", short="Deleting policy")
+    beat.set("Something without a short name")
+    assert (beat.phase, beat.short) == ("Something without a short name", "Deleting policy")

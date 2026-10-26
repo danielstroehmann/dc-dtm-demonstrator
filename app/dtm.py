@@ -7,6 +7,7 @@ OpenAPI spec deviates in several places (see docs/design/uc-01-evergreen.md).
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,6 +23,10 @@ DIVISIONS = "/devicetrustmanager/api/v4/division"
 POLICIES = "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"
 PROFILES = "/devicetrustmanager/certificate-configuration-service/api/v1/certificate-profile"
 AUTH = "/devicetrustmanager/authentication-service/api/v1"
+SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # IDs from DTM that end up in URL paths
+DEVICES = "/devicetrustmanager/api/v4/device"
+DEVICE_GROUPS = "/devicetrustmanager/api/v4/device-group"
+CERTIFICATES = "/devicetrustmanager/certificate-issuance-service/api/v2/certificate"
 # Ledger kind → authentication-service collection (UC-3). Deleted objects stay as status DELETED.
 AUTH_KINDS = {"auth_certificate": "authentication-certificate", "passcode": "passcode",
               "auth_policy": "authentication-policy"}
@@ -79,14 +84,14 @@ def passcode_body(name: str, account_id: str, auth_policy_id: str, passcode: str
 
 
 def enrollment_policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, key_type: str,
-                           auth_policy_id: str, protocol: str) -> dict:
+                           auth_policy_id: str, protocol: str, device_group: bool = False) -> dict:
     """UC-3: one enrollment protocol, client-side keys, authenticated by an authentication policy
     (passcode or factory certificate) – no device group, so the Essentials license is enough."""
     method = ENROLLMENT_METHODS[protocol]
     body = {"name": name, "division_id": division_id, "certificate_profile_id": profile_id, "ica_id": ica_id,
             "certificate_management_methods": [method], "authentication_policy_id": auth_policy_id,
             "key_generation_option": "client_side", "key_generation_type": key_type,
-            "require_device_group_for_enroll": False, "require_approval_for_enroll": False,
+            "require_device_group_for_enroll": device_group, "require_approval_for_enroll": False,
             "require_approval_for_renew": False}
     if method == "CMP_V2":
         body["cmp_request_parameters"] = {}  # required; DTM fills in its defaults
@@ -96,6 +101,48 @@ def enrollment_policy_body(*, name: str, division_id: str, profile_id: str, ica_
             "encryption_certificate_source": "provided", "include_chain_option": "include_ica_and_root",
             "response_with_certificate_only": False, "split_certificate_response": True}
     return {"certificate_policy": body}
+
+
+def device_policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, key_type: str,
+                       protocols: tuple[str, ...], auth_policy_id: str | None = None) -> dict:
+    """UC-6: the factory's and the field's protocol in one policy (e.g. REST in the factory, CMPv2 in the
+    field – verified live: one policy may carry SINGLE, EST and CMP_V2; CMPv2 needs a bare-key profile),
+    only for a device of a group – nothing is issued unmanaged. Without an authentication policy the API
+    key authenticates the (REST) requests."""
+    args = {"name": name, "division_id": division_id, "profile_id": profile_id, "ica_id": ica_id,
+            "key_type": key_type, "auth_policy_id": auth_policy_id or "", "device_group": True}
+    body = enrollment_policy_body(protocol=protocols[0], **args)
+    policy = body["certificate_policy"]
+    methods = list(dict.fromkeys(ENROLLMENT_METHODS[p] for p in protocols))
+    policy["certificate_management_methods"] = methods
+    for protocol in protocols[1:]:  # each method brings its own parameters
+        policy |= {k: v for k, v in enrollment_policy_body(protocol=protocol, **args)["certificate_policy"].items()
+                   if k.endswith("_parameters")}
+    if not auth_policy_id:
+        del policy["authentication_policy_id"]
+    return body
+
+
+def device_group_body(name: str, division_id: str, account_id: str, policy_id: str, attribute: str) -> dict:
+    """A static group with the policy assigned. The mapping makes DTM match a certificate's common name
+    to the device's inventory attribute (serial_number, mac_address) – not to its name. DTM refuses an
+    assignment without status."""
+    return {"name": name, "division_id": division_id, "account_id": account_id, "is_static": True,
+            "attributes": [attribute],
+            "policies": [{"policy_id": policy_id, "assignment_name": f"{name}-policy", "type": "bootstrapCertificate",
+                          "status": "ACTIVE",
+                          "device_field_mappings": [{"key": attribute, "field": "subject.common_name"}]}]}
+
+
+def device_body(name: str, account_id: str, group_id: str, description: str, attribute: str, value: str) -> dict:
+    return {"name": name, "account_id": account_id, "device_group_id": group_id, "description": description,
+            "attributes": [{"key": attribute, "value": value}]}
+
+
+def device_certificate_body(policy_id: str, group_id: str, device_id: str, common_name: str, csr: str) -> dict:
+    return {"certificate_policy_id": policy_id, "device_group_id": group_id, "device_id": device_id, "csr": csr,
+            "certificate_profile_attributes": [{"id": "subject.common_name", "value": common_name}],
+            "split_certificate_response": True, "include_certificate_chain": True}
 
 
 @dataclass(frozen=True)
@@ -511,6 +558,94 @@ class DTMClient:
                 return data["id"], "created"
         raise DTMError(f"could not create profile {spec.name}: {clash}")
 
+    # devices (UC-6, Advanced license) – verified live on NL 2026-10-26
+    async def create_device_policy(self, **kwargs) -> str:
+        body = device_policy_body(**kwargs)
+        data = _json(await self._request("POST", POLICIES, expect=(200, 201), json=body))
+        policy_id = (data.get("certificate_policy") or {}).get("id")
+        _safe(policy_id)  # it goes into URL paths next
+        return policy_id
+
+    async def create_device_group(self, name: str, division_id: str, policy_id: str, attribute: str) -> str:
+        """DTM answers without the ID – it is looked up by the name right after (lists lag a moment)."""
+        await self._request("POST", DEVICE_GROUPS, expect=(200, 201),
+                            json=device_group_body(name, division_id, self.config.account_id, policy_id, attribute))
+        for attempt in range(LOOKUP_RETRIES):
+            found = await self.device_group_ids(name)
+            if len(found) == 1:
+                return found[0]
+            await asyncio.sleep(1 + attempt)
+        raise DTMError(f"device group {name} was created but not found by its name")
+
+    async def device_group_ids(self, name: str) -> list[str]:
+        records = await self._list(DEVICE_GROUPS, params={"name": name})
+        return [r["id"] for r in records if r.get("name") == name and r.get("account_id") == self.config.account_id
+                and str(r.get("status", "")).upper() != "DELETED"]
+
+    async def device_ids(self, group_id: str, prefix: str) -> list[tuple[str, str]]:
+        """(id, name) of this account's devices in the group that carry the run's name prefix or the name
+        DTM gives a device it creates itself on an unknown EST identity. A record that names its groups
+        must be a member; a device someone else put into the group is never returned."""
+        records = await self._list(DEVICES, params={"device_group_id": group_id})
+        found = []
+        for r in records:
+            member = _in_group(r, group_id)
+            if (r.get("account_id") == self.config.account_id and SAFE_ID.fullmatch(str(r.get("id", "")))
+                    and str(r.get("status", "")).upper() != "DELETED"
+                    and member is not False and run_device(str(r.get("name", "")), prefix)):
+                found.append((r["id"], r["name"]))
+        return found
+
+    async def enroll_device(self, name: str, group_id: str, description: str, attribute: str, value: str) -> str:
+        """Creates the device with its inventory attribute (the identity DTM maps the certificate by)."""
+        data = _json(await self._request("POST", f"{DEVICES}/enroll", expect=(200, 201), json=device_body(
+            name, self.config.account_id, group_id, description, attribute, value)))
+        return data["device_id"]
+
+    async def issue_device_certificate(self, policy_id: str, group_id: str, device_id: str, common_name: str,
+                                       csr: str) -> dict:
+        return _json(await self._request("POST", CERTIFICATES, json=device_certificate_body(
+            policy_id, group_id, device_id, common_name, csr)))
+
+    async def renew_certificate(self, certificate_id: str, csr: str) -> dict:
+        """REST renewal with the API key and a new CSR – the new certificate stays under the device."""
+        _safe(certificate_id)
+        return _json(await self._request("PUT", f"{CERTIFICATES}/{certificate_id}/renew", json={"csr": csr}))
+
+    async def device_certificates(self, device_id: str, quiet: bool = False) -> list[dict]:
+        data = _json(await self._request("GET", f"{DEVICES}/certificates", quiet=quiet,
+                                         params={"device_id": device_id, "sort_key": "createdOn", "limit": 100}))
+        return data.get("records") or []
+
+    async def _own(self, path: str, what: str) -> dict | None:
+        """The object if it is this account's and not deleted yet; None when gone. The device endpoints
+        ignore account_id, so the account is checked on the object itself before anything changes."""
+        _safe(path.rsplit("/", 1)[-1])
+        response = await self._request("GET", path, expect=(200, 404))
+        if response.status_code == 404:
+            return None
+        data = _json(response)
+        if data.get("account_id") != self.config.account_id:
+            raise DTMError(f"refusing to touch {what}: it belongs to another account")
+        return None if str(data.get("status", "")).upper() == "DELETED" else data
+
+    async def _disable_and_delete(self, path: str, what: str) -> None:
+        """Devices and groups: DTM deletes only disabled ones (a soft delete, listed 14 more days)."""
+        if await self._own(path, what) is None:
+            return
+        await self._request("PATCH", f"{path}/disable", expect=(200, 204, 400),
+                            json={"reason": "dc-dtm-demonstrator cleanup"})  # 400: already disabled
+        await self._request("PATCH", f"{path}/delete", expect=(200, 204), json={})
+        if await self._own(path, what) is not None:
+            raise DTMError(f"{what} still exists after the delete")
+
+    async def delete_device(self, device_id: str) -> None:
+        """Deleting a device does not revoke its certificates (verified live) – revoke them first."""
+        await self._disable_and_delete(f"{DEVICES}/{device_id}", f"device {device_id}")
+
+    async def delete_device_group(self, group_id: str) -> None:
+        await self._disable_and_delete(f"{DEVICE_GROUPS}/{group_id}", f"device group {group_id}")
+
     # issuance
     async def issue_single(self, policy_id: str, common_name: str, csr: str | None = None) -> dict:
         response = await self._request(
@@ -586,6 +721,30 @@ class DTMClient:
             if exc.status in (401, 403):  # a broken key will not heal by retrying
                 raise
             return "already" if exc.status == 400 else "retry"
+
+
+def _safe(dtm_id: str) -> None:
+    if not SAFE_ID.fullmatch(str(dtm_id)):
+        raise DTMError(f"unexpected ID {str(dtm_id)[:40]!r}")
+
+
+AUTO_DEVICE = re.compile(r"Device-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def run_device(name: str, prefix: str) -> bool:
+    """A device of the run: named by it, or created by DTM in the run's group on an unknown identity."""
+    return name.startswith(prefix) or bool(AUTO_DEVICE.fullmatch(name))
+
+
+def _in_group(record: dict, group_id: str) -> bool | None:
+    """Whether a device list record belongs to the group (checked here, in case DTM ignores the filter);
+    None when the record does not say."""
+    groups = record.get("device_groups")
+    if isinstance(groups, list):
+        return any(isinstance(g, dict) and g.get("id") == group_id for g in groups)
+    if "device_group_id" in record:
+        return record["device_group_id"] == group_id
+    return None
 
 
 def _error_text(response: httpx.Response) -> str:

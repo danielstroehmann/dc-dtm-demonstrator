@@ -40,7 +40,7 @@
   {% if recurring %}
   <section class="box accent">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory enrollment", "uc05": "Factory provisioning"}.get(run.use_case, "Certificate order") }}</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory enrollment", "uc05": "Factory provisioning", "uc06": "Device registration"}.get(run.use_case, "Certificate order") }}</h3>
       <button class="btn-sm outline" data-copy="script-recurring-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "recurring", group = recurring %}{% include "_api_call_list.html" %}{% endwith %}

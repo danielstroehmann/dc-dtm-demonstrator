@@ -5,7 +5,44 @@
 {% if r.duration_s is defined or r.response or r.portal_values or r.checks %}
 <article class="card">
   <div class="card-head"><h2>Overview</h2></div>
-  {% if r.provisioning %}{% set pv = r.provisioning %}
+  {% if r.devices %}{% set done = (r.renewals or []) | rejectattr("failed") | list %}{% set last = done[-1] if done else none %}
+  {# UC-6: registration in the factory, renewal per click – same four columns each #}
+  <div class="phase-pair">
+    <section class="box accent">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>Device registration <small>{{ {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}.get(run.params.protocol, "REST API") }}</small></h3></div>
+      <div class="metrics metrics-4">
+        <div><small data-tip="Create the device + its certificate, all devices">All devices</small><p class="metric">{{ r.duration_s }} s</p></div>
+        <div><small>Per device</small><p class="metric">{{ "%.2f" | format(r.per_certificate_s or r.duration_s) }} s</p></div>
+        <div><small>Per minute</small><p class="metric">{{ r.per_minute or "–" }}</p></div>
+        {% if r.estimate_min is defined %}<div><small data-tip="Median per device, one station, sequential">{{ "{:,}".format(r.estimate_devices) }} devices ≈</small><p class="metric">{{ r.estimate_min }} min</p></div>
+        {% else %}<div><small data-tip="Device record / certificate">Device · certificate</small><p class="metric">{{ "%.2f" | format(r.create_s) }} · {{ "%.2f" | format(r.issue_s) }} s</p></div>{% endif %}
+      </div>
+    </section>
+    <section class="box accent field">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Renewal in the field <small>{{ {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}.get(run.params.field, "REST API") }}</small></h3></div>
+      <div class="metrics metrics-4">
+        <div><small data-tip="Last round, all devices">All devices</small><p class="metric">{{ last.duration_s ~ " s" if last else "–" }}</p></div>
+        <div><small>Per device</small><p class="metric">{{ "%.2f s" | format(last.per_certificate_s or last.duration_s) if last else "–" }}</p></div>
+        <div><small>Rounds</small><p class="metric">{{ r.renewals | length }}</p></div>
+        <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
+      </div>
+    </section>
+  </div>
+  <section class="devices">
+    <div class="box-head"><h3>Devices in DTM <small>group {{ r.group }}</small></h3></div>
+    <table class="data-table devices-table">
+      <colgroup><col class="c-device"><col class="c-ident"><col class="c-serial"><col class="c-state"><col class="c-until"></colgroup>
+      <thead><tr><th>Device name</th><th>Identity in certificate (CN)</th><th>Certificate</th><th>Status</th><th>Valid until</th></tr></thead>
+      <tbody>{% for d in r.devices %}{% set first_device = loop.first %}{% if not d.certificates %}<tr{% if not first_device %} class="group-start"{% endif %}>
+        <td data-tip="{{ d.name }}">{{ icon("chip") }} {{ d.name }}</td><td class="mono">{{ d.identity }}</td><td class="muted" colspan="3">DTM lists no certificate yet</td></tr>{% endif %}{% for c in d.certificates or [] %}<tr{% if loop.first and not first_device %} class="group-start"{% endif %}>
+        <td data-tip="{{ d.name }}">{% if loop.first %}{{ icon("chip") }} {{ d.name }}{% endif %}</td>
+        <td class="mono" data-tip="{{ (r.identity or 'Identity') ~ ' – DTM matched it to ' ~ d.name }}">{{ c.common_name or d.identity }}</td>
+        <td class="mono" data-tip="{{ c.serial }} · {{ 'renewal' if c.renewed_from else 'registration' }}">{{ c.serial }}</td>
+        <td>{{ pill("active" if c.status == "issued" and not c.renewed else c.status if c.status != "issued" else "renewed") }}</td>
+        <td>{{ c.valid_to }}</td></tr>{% endfor %}{% endfor %}</tbody>
+    </table>
+  </section>
+  {% elif r.provisioning %}{% set pv = r.provisioning %}
   {# UC-5: the two phases side by side, in the colours of the reproducible steps; same four columns each #}
   <div class="phase-pair">
     <section class="box accent">

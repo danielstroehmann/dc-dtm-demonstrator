@@ -141,3 +141,12 @@ Spec deviations and details found (all calls with `account_id`):
 - **Policy delete via `api-ui` works with revoked certificates attached**; then division delete.
   Verified cleanup order: revoke certificates → delete policy (`api-ui`) → delete division.
 - Batch jobs cannot be deleted; they expire after 30 days (`expire_at`) – accepted residue (history).
+
+## Transient `failed` job status (2026-10-26, NL)
+
+- A 50-item batch job reported `status: failed` about 4 s in, while DTM was still issuing
+  (item ≈16 of 50). It then went on to `completed`, `result: success`, 50/50, `failed_items: 0`,
+  `retry_count: 0`; the audit log shows no error. Reported to DTM development.
+- Consequence: `failed` is final only once it persists – the run polls it for
+  `FAILED_CONFIRM_POLLS` (≈15 s), the cleanup re-checks it once (10 s) before revoking. A final
+  failure logs the job record's issued/failed counts.

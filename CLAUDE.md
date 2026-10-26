@@ -64,6 +64,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - Test credentials live only in the local, gitignored `.env` – never in chat logs, docs or commits.
 
 ### UI (overrides commons ui-ux "unified look across projects")
+- Official product name (author, 2026-10-26): **Demonstrator · Device Trust Manager** – never "DTM Demonstrator"
+  (DTM *is* Device Trust Manager). The installer's self-signed marker `O=DTM Demonstrator self-signed` stays (detection).
 - Style guide and **quality bar** (one grid per row, phase boxes, no raw API text, less text, done = seen in the
   browser): `docs/design/04-ui-design.md` – binding for every screen.
 - **Desktop browsers only** (author, 2026-10-25) – overrides the commons' iPhone target (and the mobile
@@ -94,6 +96,9 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
   bug is fixed); other hosts are refused. See `docs/design/05-guide-and-shared-profiles.md`.
 - UC-5 (`uc05`, one-time passcode bound to the device's CN, enrollment in the field via EST/CMPv2; DTM
   checks the CN, it never overrides it) – see `docs/design/uc-05-passcode-bound-enrollment.md`.
+- UC-6 (`uc06`, managed devices, Advanced license: device `…-minion-nnnn` + certificate under it; CN = a fictitious
+  serial/MAC mapped by inventory attribute, not the name; factory REST/EST/CMPv2, field renewal EST/CMPv2/REST independently – one policy carries both methods)
+  lives in `app/devices.py` on the device-group endpoints – see `docs/design/uc-06-managed-devices.md`.
 - UC-4 (`uc04`, one device: EST enrollment + renewal in the field per click) also runs on
   `app/enrollment.py` (`renew`); the simulated device's key lives in the run dir until the rollback.
 
@@ -102,7 +107,8 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 - Python 3.14, FastAPI, Jinja2 + htmx (server-rendered, polling for live views), Pico CSS
   (light theme), httpx (DTM client), cryptography (CMS/X.509), PyJWT (login cookie),
   SQLite with `PRAGMA user_version` migrations under `./data`.
-- Caddy as reverse proxy (TLS `selfsigned` via `tls internal` or admin-provided cert).
+- Caddy as reverse proxy; TLS from `.env` (`TLS_CERT_FILE`/`TLS_KEY_FILE` PEM – default a self-signed pair – or
+  `TLS_PKCS12_FILE`/`TLS_PKCS12_PASSWORD`, PEM wins), prepared at every start by the `tls` service (`app/tls_setup.py`).
 - Tests: pytest (unit, integration with mocked DTM, component via TestClient), smoke
   against a live URL, `live` marker for the DTM test account (local stage 1 only).
 - Run tests: `python -m pytest` (live: `python -m pytest -m live`, needs `.env`).

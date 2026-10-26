@@ -1,4 +1,4 @@
-# Vision – DTM Demonstrator
+# Vision – Demonstrator · Device Trust Manager
 
 > Status: draft for discussion, as of 2026-10-23. Design phase – nothing is implemented yet.
 > Basis: [../research/dtm-api-overview.md](../research/dtm-api-overview.md).

@@ -1,5 +1,5 @@
 """Rollback of everything a run created. Order matters: wait for batch jobs → certificates →
-policies → the run's profile (NL; DTM deletes it only once no policy uses it) → authentication objects
+devices and their group (UC-6; deleting a device does not revoke) → policies → the run's profile (NL; DTM deletes it only once no policy uses it) → authentication objects
 (UC-3) → division (deleting a division does not cascade, R-2)."""
 
 import asyncio
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import evergreen
-from .dtm import AUTH_KINDS, PLATFORMS, DTMClient, DTMError
+from .dtm import AUTH_KINDS, PLATFORMS, DTMClient, DTMError, run_device
 from .store import Store
 
 REVOKE_PARALLEL = 16
@@ -21,6 +21,8 @@ STRAY_SAMPLE = 10  # portal runs: names checked from each end before searching a
 CLOCK_SKEW = timedelta(minutes=5)  # the host's clock vs. DTM's when telling this run's certificates apart
 HEARTBEAT_S = 1.5  # a cleanup must never look frozen during a demo
 TERMINAL_JOB_STATES = {"completed", "failed", "rejected"}
+# What the runs list shows in the rollback button's box while these are deleted (fits 7.5rem)
+AUTH_SHORT = {"passcode": "Deleting passcode", "auth_certificate": "Deleting credential", "auth_policy": "Deleting auth"}
 
 
 class Heartbeat:
@@ -30,11 +32,14 @@ class Heartbeat:
     def __init__(self, store: Store, run_id: str, log):
         self.store, self.run_id, self.log = store, run_id, log
         self.phase, self.total, self.revoked, self.already, self.retry = "Preparing the cleanup", 0, 0, 0, 0
+        self.short = "Preparing"
         self.started = time.time()
         self._task: asyncio.Task | None = None
 
-    def set(self, phase: str, total: int = 0) -> None:
+    def set(self, phase: str, total: int = 0, short: str = "") -> None:
+        """short: the phase in a few words – the runs list shows it inside the rollback button's box."""
         self.phase, self.total, self.revoked, self.already, self.retry = phase, total, 0, 0, 0
+        self.short = short or self.short
 
     def count(self, outcome: str) -> None:
         if outcome == "revoked":
@@ -56,7 +61,7 @@ class Heartbeat:
             await asyncio.sleep(HEARTBEAT_S)
             self.log(self.message(), "wait")
             self.store.update_run(self.run_id, progress={
-                "label": self.phase, "started": self.started, "total": self.total or None,
+                "label": self.phase, "short": self.short, "started": self.started, "total": self.total or None,
                 "done": (self.revoked + self.already + self.retry) if self.total else None})
 
     def __enter__(self):
@@ -86,12 +91,12 @@ async def revoke_all(client: DTMClient, policy_id: str, log, expected: int = 0, 
     idle_passes = 0
     for attempt in range(1, MAX_PASSES + 1):
         if beat:
-            beat.set("Loading the list of issued certificates from DTM")
+            beat.set("Loading the list of issued certificates from DTM", short="Listing certs")
         issued = await client.issued_certificates(policy_id)
         if not issued:
             # The issued list lags behind; confirm before the policy gets deleted.
             if beat:
-                beat.set("Confirming that DTM lists no issued certificate any more")
+                beat.set("Confirming that DTM lists no issued certificate any more", short="Confirming")
             await asyncio.sleep(CONFIRM_DELAY_S)
             issued = await client.issued_certificates(policy_id)
             if not issued and await client.count_certificates(policy_id, "revoked") >= expected:
@@ -102,7 +107,7 @@ async def revoke_all(client: DTMClient, policy_id: str, log, expected: int = 0, 
             continue
         log(f"Revocation pass {attempt}: {len(issued)} certificates still issued")
         if beat:
-            beat.set(f"Revoking certificates (pass {attempt})", len(issued))
+            beat.set(f"Revoking certificates (pass {attempt})", len(issued), short="Revoking")
         outcomes = await asyncio.gather(*(one(c["id"]) for c in issued), return_exceptions=True)
         auth_errors = [o for o in outcomes if isinstance(o, DTMError) and o.status in (401, 403)]
         if auth_errors:
@@ -114,7 +119,7 @@ async def revoke_all(client: DTMClient, policy_id: str, log, expected: int = 0, 
         idle_passes = idle_passes + 1 if revoked == 0 or retry > len(issued) / 2 else 0
         if idle_passes:
             if beat:
-                beat.set("Waiting for DTM to catch up – its lists are eventually consistent")
+                beat.set("Waiting for DTM to catch up – its lists are eventually consistent", short="Waiting for DTM")
             await asyncio.sleep(IDLE_BACKOFF_S * idle_passes)
     raise DTMError(f"certificates still issued after {MAX_PASSES} revocation passes")
 
@@ -132,7 +137,7 @@ async def wait_for_jobs(store: Store, client: DTMClient, run_id: str, log) -> No
             log(f"Found {len(portal)} batch job(s) started in the DTM portal under the run's policy")
         jobs |= portal
     for job_id in sorted(jobs):
-        deadline = time.monotonic() + JOB_WAIT_S
+        deadline, failed_once = time.monotonic() + JOB_WAIT_S, False
         while True:
             try:
                 status = (await client.batch_job(job_id, quiet=True)).get("status")
@@ -140,14 +145,16 @@ async def wait_for_jobs(store: Store, client: DTMClient, run_id: str, log) -> No
                 if exc.status == 404:  # jobs expire after 30 days – nothing left to wait for
                     break
                 raise
-            if status in TERMINAL_JOB_STATES:
+            # DTM once reported "failed" mid-processing and kept issuing – failed must persist one wait
+            if status in TERMINAL_JOB_STATES and (status != "failed" or failed_once):
                 break
+            failed_once = status == "failed"
             if status == "pending_approval":
                 # Never approved (approve failed, the app restarted, or nobody approved it in the
                 # portal) – reject so it ends.
                 log(f"Rejecting batch job {job_id} that is still waiting for approval")
                 await client.reject_batch(job_id)
-            elif time.monotonic() > deadline:
+            elif time.monotonic() > deadline and status != "failed":
                 raise DTMError(f"batch job {job_id} still {status} – try the cleanup again later")
             else:
                 log(f"Waiting for batch job {job_id} ({status}) to finish before revoking", "wait")
@@ -208,7 +215,9 @@ async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
                ("policy", f"{base}-policy", client.policy_ids)]
     if PLATFORMS.get(client.config.host) == "per_run":  # never block a rollback on the host check
         lookups.append(("profile", f"{base}-profile", client.profile_ids))
-    if run["use_case"] in ("uc03", "uc04", "uc05"):  # the credential lives in its own authentication policy
+    credential = run["use_case"] in ("uc03", "uc04", "uc05") or (
+        run["use_case"] == "uc06" and run["params"].get("auth") in ("passcode", "certificate"))
+    if credential:  # the credential lives in its own authentication policy
         if run["use_case"] == "uc05":  # one passcode per device (-passcode-0001 …) plus the check's
             lookups.append(("passcode", f"{base}-passcode-",
                             lambda n: client.auth_objects_named("passcode", n, prefix=True)))
@@ -218,6 +227,13 @@ async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
                            else ("passcode", "passcode")]
         lookups += [(kind, f"{base}-{suffix}", lambda n, k=kind: client.auth_object_ids(k, n))
                     for kind, suffix in (*credentials, ("auth_policy", "auth"))]
+    if run["use_case"] == "uc06":  # devices are found through the run's group
+        groups = {o["dtm_id"] for o in store.objects(run_id, "device_group")}
+        groups |= set(await client.device_group_ids(f"{base}-group"))
+        lookups.append(("device_group", f"{base}-group", client.device_group_ids))
+        for group_id in groups:
+            # the run's devices in its group – also one a replayed step or DTM itself created
+            lookups.append(("device", f"{base}-minion-", lambda n, g=group_id: client.device_ids(g, n)))
     for kind, name, lookup in lookups:
         known = {o["dtm_id"] for o in store.objects(run_id, kind)}
         for found in await lookup(name):
@@ -237,9 +253,11 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
             await discover(store, client, run_id, log)
             for obj in store.objects(run_id):
                 # Ledger entries are ours by construction; the name check guards against corruption.
-                if not obj["name"].startswith(expected_prefix):
+                # Devices: the run's name or DTM's own name for a device it created in the run's group.
+                if not (run_device(obj["name"], expected_prefix) if obj["kind"] == "device"
+                        else obj["name"].startswith(expected_prefix)):
                     raise DTMError(f"refusing to touch {obj['kind']} {obj['name']!r}: outside run prefix")
-            beat.set("Checking that no batch job is still issuing")
+            beat.set("Checking that no batch job is still issuing", short="Checking jobs")
             await wait_for_jobs(store, client, run_id, log)
             result = store.get_run(run_id).get("result") or {}
             for policy in store.objects(run_id, "policy"):
@@ -252,28 +270,38 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
             # portal step with a policy of its own: a run that failed earlier ordered nothing, and its
             # names may belong to another run with the same ID.
             if run["params"].get("variant") == "webui" and run["status"] == "waiting" and own:
-                beat.set("Looking for the run's certificates under other policies")
+                beat.set("Looking for the run's certificates under other policies", short="Other policies")
                 await revoke_portal_strays(client, run, own, log)
             if mode == "full":
+                for kind, label, delete in (("device", "device", client.delete_device),
+                                            ("device_group", "device group", client.delete_device_group)):
+                    objects = store.objects(run_id, kind)
+                    for done, obj in enumerate(objects, 1):
+                        log(f"Deleting {label} {obj['name']}")
+                        beat.set(f"Deleting {label} {obj['name']} ({done} of {len(objects)})",
+                                 short="Deleting devices" if kind == "device" else "Deleting group")
+                        await delete(obj["dtm_id"])
+                        store.mark_removed(run_id, kind, obj["dtm_id"])
                 for policy in store.objects(run_id, "policy"):
                     log(f"Deleting certificate policy {policy['name']}")
-                    beat.set(f"Deleting certificate policy {policy['name']} and verifying it is gone")
+                    beat.set(f"Deleting certificate policy {policy['name']} and verifying it is gone", short="Deleting policy")
                     await client.delete_policy(policy["dtm_id"])
                     store.mark_removed(run_id, "policy", policy["dtm_id"])
                 for profile in store.objects(run_id, "profile"):
                     log(f"Deleting certificate profile {profile['name']}")
-                    beat.set(f"Deleting certificate profile {profile['name']} and verifying it is gone")
+                    beat.set(f"Deleting certificate profile {profile['name']} and verifying it is gone", short="Deleting profile")
                     await client.delete_profile(profile["dtm_id"])
                     store.mark_removed(run_id, "profile", profile["dtm_id"])
                 for kind in AUTH_KINDS:  # credentials first, their authentication policy last
                     for obj in store.objects(run_id, kind):
                         log(f"Deleting {kind.replace('_', ' ')} {obj['name']}")
-                        beat.set(f"Deleting {kind.replace('_', ' ')} {obj['name']} and verifying it is gone")
+                        beat.set(f"Deleting {kind.replace('_', ' ')} {obj['name']} and verifying it is gone",
+                                 short=AUTH_SHORT[kind])
                         await client.delete_auth_object(kind, obj["dtm_id"])
                         store.mark_removed(run_id, kind, obj["dtm_id"])
                 for division in store.objects(run_id, "division"):
                     log(f"Deleting division {division['name']}")
-                    beat.set(f"Deleting division {division['name']} and verifying it is gone")
+                    beat.set(f"Deleting division {division['name']} and verifying it is gone", short="Deleting division")
                     await client.delete_division(division["dtm_id"])
                     store.mark_removed(run_id, "division", division["dtm_id"])
                 shutil.rmtree(run_dir, ignore_errors=True)

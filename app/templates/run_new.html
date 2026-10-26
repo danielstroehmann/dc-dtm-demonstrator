@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% from "_icons.html" import icon %}
-{% block title %}New run · DTM Demonstrator{% endblock %}
+{% block title %}New run · Demonstrator · Device Trust Manager{% endblock %}
 {% macro choice(name, label, options, checked) -%}
 <div class="seg-group"><span class="seg-label" id="l-{{ name }}">{{ label }}</span>
   <div role="radiogroup" aria-labelledby="l-{{ name }}" class="segmented">
@@ -9,10 +10,7 @@
 {%- endmacro %}
 {% block content %}
 {% set guide = use_case_id == "evergreen" %}
-<nav aria-label="breadcrumb"><ul><li><a href="/runs/new?connection={{ connection.id }}">Use cases</a></li><li>{{ use_case.title }}</li></ul></nav>
-<div class="page-head">
-  <div><h1>{{ use_case.title }}</h1></div>
-</div>
+{{ page_head(use_case.title, [(use_case.title, none)], home="/runs/new?connection=" ~ connection.id) }}
 <article class="card">
 {# The guide shows each question only when it applies (data-when, see app.js); the server resolves
    the answers to UC-1, UC-2 or UC-3 and checks them again. #}
@@ -58,7 +56,27 @@
                aria-label="Number of devices" data-when="mode=batch">
       </div>
       {{ choice("protocol", "Protocol", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
-      <label class="switch-cell"><input type="checkbox" name="checks" value="true" role="switch" checked> Run the checks</label>
+      <div class="switch-stack">
+        <label><input type="checkbox" name="checks" value="true" role="switch" checked> Run checks</label>
+        <label data-tip="Stops after the passcodes are created, so they can be shown in DTM first"><input type="checkbox" name="pause" value="true" role="switch" checked> Pause before certificate enrollment</label>
+      </div>
+      <input type="hidden" name="variant" value="api">
+      {% elif use_case_id == "uc06" %}
+      {# Fixed slots: factory in the first row, field and identity in the second #}
+      <div class="slot r1c1 choice-with-count">
+        {{ choice("mode", "Devices", [("single", "Single", ""), ("batch", "Batch", "")], "single") }}
+        <input id="count" type="number" name="count" class="short" value="2" min="1" max="{{ max_devices }}"
+               aria-label="Number of devices" data-when="mode=batch">
+      </div>
+      <div class="slot r1c2">{{ choice("protocol", "Factory enrollment",
+                [("rest", "REST API", ""), ("est", "EST", ""), ("cmpv2", "CMPv2", "")], "rest") }}</div>
+      <div class="slot r1c3">{{ choice("auth_method", "Authentication",
+                [("apikey", "API key", "protocol=rest"), ("passcode", "Passcode", ""),
+                 ("certificate", "Factory certificate", "")], "apikey") }}</div>
+      <div class="slot r2c1">{{ choice("field", "Renewal in the field",
+                [("est", "EST", ""), ("cmpv2", "CMPv2", ""), ("rest", "REST API", "")], "est") }}</div>
+      <div class="slot r2c2">{{ choice("identity", "Certificate identity",
+                [("serial", "Serial number", ""), ("mac", "MAC address", "")], "serial") }}</div>
       <input type="hidden" name="variant" value="api">
       {% else %}
       {{ choice("protocol", "Protocol", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
@@ -99,6 +117,9 @@
       {% elif use_case_id == "uc05" %}
       {{ profile_field("robot-evergreen-5y-profile", "5 years", "protocol=est") }}
       {{ profile_field("robot-evergreen-cmp-5y-profile", "5 years · bare key", "protocol=cmpv2") }}
+      {% elif use_case_id == "uc06" %}
+      {{ profile_field("robot-renewal-6m-profile", "6 months · renew any time", "protocol=rest field=est | protocol=rest field=rest | protocol=est field=est | protocol=est field=rest") }}
+      {{ profile_field("robot-renewal-cmp-6m-profile", "6 months · renew any time · bare key", "protocol=cmpv2 | field=cmpv2") }}
       {% else %}
       {{ profile_field("robot-renewal-6m-profile", "6 months · renew any time", "protocol=est") }}
       {{ profile_field("robot-renewal-cmp-6m-profile", "6 months · renew any time · bare key", "protocol=cmpv2") }}

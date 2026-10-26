@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DTM Demonstrator installer – prepares a fresh Ubuntu Server and starts the demonstrator.
+# Demonstrator · Device Trust Manager installer – prepares a fresh Ubuntu Server and starts the demonstrator.
 # Re-running it updates the installation in place (data and secrets are kept).
 #
 #   curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.sh | sudo bash
@@ -24,9 +24,10 @@ usage() {
 Options:
   --version vX.Y.Z      install this release (default: latest release, asked interactively)
   --branch NAME         install the preview image of a branch instead of a release
-  --tls selfsigned|custom
-  --tls-cert PATH       certificate (PEM, full chain) for --tls custom
-  --tls-key PATH        private key (PEM) for --tls custom
+  --tls-cert PATH       use this certificate (PEM, with chain) – written to TLS_CERT_FILE in .env
+  --tls-key PATH        use this private key (PEM) – written to TLS_KEY_FILE in .env
+  --tls selfsigned      back to the generated self-signed certificate
+                        (TLS is configured in .env: TLS_CERT_FILE/TLS_KEY_FILE or TLS_PKCS12_FILE)
   --host NAME           host name or IP the UI is reached by (repeatable; default: host name + IPs)
   --port N              HTTPS port (default 443)
   --http-port N         HTTP port that redirects to HTTPS (default 80)
@@ -64,7 +65,9 @@ VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
 [ -z "$branch" ] || [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid branch: $branch"
 [ -z "$port" ] || { [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "invalid port: $port"
 [ -z "$http_port" ] || { [[ "$http_port" =~ ^[0-9]+$ ]] && [ "$http_port" -ge 1 ] && [ "$http_port" -le 65535 ]; } || die "invalid HTTP port: $http_port"
+# "custom" is kept for older command lines: it means --tls-cert/--tls-key
 [ -z "$tls_mode" ] || [[ "$tls_mode" =~ ^(selfsigned|custom)$ ]] || die "--tls must be selfsigned or custom"
+[ "$tls_mode" != custom ] || [ -n "$tls_cert$tls_key" ] || die "--tls custom needs --tls-cert and --tls-key"
 
 compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrator "$@"; }
 
@@ -159,10 +162,18 @@ fetch() { curl -fsSL "https://raw.githubusercontent.com/$REPO/$ref/$1" -o "$2" |
 env_file="$INSTALL_DIR/.env"
 if [ ! -s "$env_file" ]; then
 	cat >"$env_file" <<'EOF'
-# DTM Demonstrator settings. Edit, then reboot or run: systemctl restart dtm-demonstrator
+# Demonstrator · Device Trust Manager settings. Edit, then reboot or run: systemctl restart dtm-demonstrator
 # SITE_HOSTS: space-separated host names / IPv4 addresses the HTTPS certificate covers.
 # DEFAULT_SNI: the address used when a browser connects by IP (no SNI).
 # HTTPS_PORT / HTTP_PORT: published ports; plain HTTP redirects to HTTPS.
+EOF
+fi
+if ! grep -q '^# TLS:' "$env_file"; then
+	cat >>"$env_file" <<'EOF'
+# TLS: TLS_CERT_FILE + TLS_KEY_FILE – PEM certificate (with chain) and private key, e.g. from Let's Encrypt
+#   (default: a self-signed pair in ./tls). Or TLS_PKCS12_FILE + TLS_PKCS12_PASSWORD – used only when
+#   TLS_CERT_FILE and TLS_KEY_FILE are empty. Paths absolute or relative to this directory, readable by root.
+#   Applied at every start: systemctl restart dtm-demonstrator
 EOF
 fi
 chmod 600 "$env_file"
@@ -179,7 +190,6 @@ env_set() { env_rewrite "$1" "$2"; }
 
 # Settings: kept from the previous run unless given again. The port checks run before a
 # password is generated – a generated password is only shown at the end and would be lost otherwise.
-tls_mode="${tls_mode:-$(env_get TLS_MODE)}"; tls_mode="${tls_mode:-selfsigned}"
 port="${port:-$(env_get HTTPS_PORT)}"; port="${port:-443}"
 previous_http_port=$(env_get HTTP_PORT)
 http_port="${http_port:-$previous_http_port}"; http_port="${http_port:-80}"
@@ -250,27 +260,60 @@ else
 fi
 
 env_set DEMONSTRATOR_IMAGE "$image"
-env_set TLS_MODE "$tls_mode"
 env_set HTTPS_PORT "$port"
 env_set HTTP_PORT "$http_port"
 env_set SITE_HOSTS "$hosts"
 env_rewrite SITE_ADDRESSES  # derived from SITE_HOSTS when the proxy starts (older installs stored it)
 env_set DEFAULT_SNI "$default_sni"
 
-mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
+mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-live" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
+chmod 700 "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-live"
 chown "$APP_UID" "$INSTALL_DIR/data" && chmod 700 "$INSTALL_DIR/data"
-if [ "$tls_mode" = custom ]; then
-	if [ -n "$tls_cert" ] || [ -n "$tls_key" ]; then
-		[ -r "$tls_cert" ] && [ -r "$tls_key" ] || die "--tls custom needs readable --tls-cert and --tls-key"
-		openssl x509 -in "$tls_cert" -noout 2>/dev/null || die "$tls_cert is not a PEM certificate"
-		openssl pkey -in "$tls_key" -noout 2>/dev/null || die "$tls_key is not a PEM private key"
-		install -m 0644 "$tls_cert" "$INSTALL_DIR/tls/cert.pem"
-		install -m 0600 "$tls_key" "$INSTALL_DIR/tls/key.pem"
+
+# --- TLS: .env names the certificate files; the `tls` service checks and applies them at every start
+SELF_CERT="$INSTALL_DIR/tls/cert.pem" SELF_KEY="$INSTALL_DIR/tls/key.pem"
+self_signed() { # the default: a self-signed PEM pair for the configured host names
+	local san="" h
+	for h in $hosts; do if [[ "$h" =~ ^[0-9.]+$ ]]; then san="$san,IP:$h"; else san="$san,DNS:$h"; fi; done
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 730 \
+		-subj "/O=DTM Demonstrator self-signed/CN=$default_sni" -addext "subjectAltName=${san#,}" \
+		-addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" \
+		-addext "extendedKeyUsage=serverAuth" -keyout "$SELF_KEY.new" -out "$SELF_CERT.new" 2>/dev/null \
+		|| die "could not create the self-signed certificate"
+	chmod 600 "$SELF_KEY.new" && chmod 644 "$SELF_CERT.new"
+	mv "$SELF_KEY.new" "$SELF_KEY" && mv "$SELF_CERT.new" "$SELF_CERT"
+}
+self_signed_by_us() { openssl x509 -in "$SELF_CERT" -noout -subject 2>/dev/null | grep -q "DTM Demonstrator self-signed"; }
+self_signed_fits() { # covers every configured host and is valid for 30 more days
+	local names h
+	names=$(openssl x509 -in "$SELF_CERT" -noout -ext subjectAltName 2>/dev/null) || return 1
+	openssl x509 -in "$SELF_CERT" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
+	for h in $hosts; do [[ "$names" == *"DNS:$h"* || "$names" == *"IP Address:$h"* ]] || return 1; done
+}
+legacy_tls=$(env_get TLS_MODE)  # installs before v0.3: selfsigned (Caddy's internal CA) or custom (./tls)
+if [ -n "$tls_cert$tls_key" ]; then
+	{ [ -r "$tls_cert" ] && [ -r "$tls_key" ]; } || die "--tls-cert and --tls-key need readable files"
+	openssl x509 -in "$tls_cert" -noout 2>/dev/null || die "$tls_cert is not a PEM certificate"
+	openssl pkey -in "$tls_key" -noout -passin pass: 2>/dev/null || die "$tls_key is not an unencrypted PEM private key"
+	env_set TLS_CERT_FILE "$(realpath "$tls_cert")"
+	env_set TLS_KEY_FILE "$(realpath "$tls_key")"
+elif [ "$tls_mode" = selfsigned ] || ! grep -q '^TLS_CERT_FILE=' "$env_file"; then
+	if [ "$legacy_tls" = custom ] && [ "$tls_mode" != selfsigned ] && [ -s "$SELF_CERT" ] && [ -s "$SELF_KEY" ]; then
+		: # an older install with its own pair in ./tls – keep using it
+	elif ! { self_signed_by_us && self_signed_fits; }; then
+		self_signed
 	fi
-	[ -f "$INSTALL_DIR/tls/cert.pem" ] && [ -f "$INSTALL_DIR/tls/key.pem" ] || die "--tls custom: no certificate installed yet"
+	env_set TLS_CERT_FILE ./tls/cert.pem
+	env_set TLS_KEY_FILE ./tls/key.pem
+elif [ "$(env_get TLS_CERT_FILE)" = ./tls/cert.pem ] && self_signed_by_us && ! self_signed_fits; then
+	self_signed  # other host names or about to expire
 fi
+env_rewrite TLS_MODE
+grep -q '^TLS_PKCS12_FILE=' "$env_file" || env_set TLS_PKCS12_FILE ""
+grep -q '^TLS_PKCS12_PASSWORD=' "$env_file" || env_set TLS_PKCS12_PASSWORD ""
+
 fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"
-fetch "deploy/Caddyfile.$tls_mode" "$INSTALL_DIR/Caddyfile"
+fetch deploy/Caddyfile "$INSTALL_DIR/Caddyfile"
 
 # --- boot integration: apply .env changes on every start ------------------------------------
 # Containers keep the environment they were created with; `compose up -d` at boot recreates the
@@ -279,7 +322,7 @@ docker_bin=$(command -v docker)
 [[ "$docker_bin" == /snap/* ]] && die "Docker from the snap store is not supported – remove it and re-run (the installer sets up Docker Engine)"
 cat >/etc/systemd/system/dtm-demonstrator.service <<EOF
 [Unit]
-Description=DTM Demonstrator
+Description=Demonstrator · Device Trust Manager
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -290,6 +333,8 @@ RemainAfterExit=yes
 WorkingDirectory=$INSTALL_DIR
 # No ExecStop: Docker's restart policy stays the fallback if this unit fails at boot.
 ExecStart=$docker_bin compose --project-directory $INSTALL_DIR -p dtm-demonstrator up -d --remove-orphans
+# TLS files may have changed in place (e.g. a renewed certificate): check them again and let Caddy load them.
+ExecStart=$docker_bin compose --project-directory $INSTALL_DIR -p dtm-demonstrator up -d --force-recreate tls proxy
 TimeoutStartSec=300
 Restart=on-failure
 RestartSec=10
@@ -328,11 +373,13 @@ redirect=$(curl -s -m 5 -o /dev/null -w '%{http_code} %{redirect_url}' -H "Host:
 [ "$redirect" = "302 $https_url" ] || echo "WARNING: http://$default_sni:$http_port/ does not redirect to $https_url (got: $redirect)" >&2
 
 echo
-info "DTM Demonstrator $ref is running:"
+info "Demonstrator · Device Trust Manager $ref is running:"
 for h in $hosts; do
 	echo "      https://$h$([ "$port" = 443 ] || echo ":$port")/"
 done
-if [ "$tls_mode" = selfsigned ]; then echo "    (self-signed certificate – your browser will ask you to accept it)"; fi
+if [ "$(env_get TLS_CERT_FILE)" = ./tls/cert.pem ] && self_signed_by_us; then
+	echo "    (self-signed certificate – your browser will ask you to accept it; your own: TLS_* in $env_file)"
+fi
 if [ -n "$shown_password" ]; then
 	echo
 	echo "    Login password (shown only once, stored in $env_file):"

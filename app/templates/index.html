@@ -1,13 +1,15 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% from "_icons.html" import icon, pill %}
 {% block content %}
 {% if not configured %}
-<div class="page-head"><h1>Welcome</h1></div>
+{{ page_head("Welcome", [("Welcome", none)]) }}
 {% include "_welcome.html" %}
 {% else %}
+{{ page_head("Use-Case Central") }}
 <section class="block">{% include "_use_cases.html" %}</section>
 <section class="block">
-  <div class="section-title"><h2>Recent runs</h2></div>
+  <div class="section-title"><h2>Recent</h2></div>
   <article class="card">
   {% if runs %}
   <div class="overflow-auto">
@@ -20,7 +22,7 @@
   </table>
   </div>
   {% else %}
-  <div class="empty">{{ icon("inbox") }}<p>No runs yet.</p></div>
+  <div class="empty">{{ icon("inbox") }}<p>Nothing</p></div>
   {% endif %}
   </article>
 </section>

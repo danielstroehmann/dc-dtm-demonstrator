@@ -15,10 +15,32 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
 
+  # Resolves the TLS settings of .env at every start (PEM pair, else PKCS#12) and hands Caddy a checked
+  # PEM pair in ./tls-live; on a problem it stops with a clear message and the proxy does not start.
+  # An unset path is mounted as /dev/null (read as empty); a set one must exist (no directory is created).
+  tls:
+    image: ${DEMONSTRATOR_IMAGE}
+    restart: "no"
+    user: "0"  # writes files the proxy (root, without CAP_DAC_OVERRIDE) can read; reads root-owned keys
+    command: ["python", "-m", "app.tls_setup"]
+    environment:
+      TLS_PKCS12_PASSWORD: ${TLS_PKCS12_PASSWORD:-}
+    volumes:
+      - {type: bind, source: "${TLS_CERT_FILE:-/dev/null}", target: /tls-in/cert.pem, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TLS_KEY_FILE:-/dev/null}", target: /tls-in/key.pem, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TLS_PKCS12_FILE:-/dev/null}", target: /tls-in/keystore.p12, read_only: true, bind: {create_host_path: false}}
+      - ./tls-live:/tls
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
   proxy:
     image: caddy:2.10.2-alpine
     restart: unless-stopped
-    depends_on: [app]
+    depends_on:
+      app: {condition: service_started}
+      tls: {condition: service_completed_successfully}
     environment:
       SITE_HOSTS: ${SITE_HOSTS}
       DEFAULT_SNI: ${DEFAULT_SNI}
@@ -37,7 +59,7 @@ services:
       - "${HTTP_PORT:-80}:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./tls:/tls:ro
+      - ./tls-live:/tls:ro
       - ./caddy-data:/data
     networks: [internal]
     cap_drop: [ALL]

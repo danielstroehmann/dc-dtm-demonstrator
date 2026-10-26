@@ -1,4 +1,4 @@
-"""Contract of the deploy files (no Docker): the HTTP → HTTPS redirect in both Caddyfiles, the ports and
+"""Contract of the deploy files (no Docker): the HTTP → HTTPS redirect and TLS of the Caddyfile, the ports and
 environment compose hands the proxy, and the proxy entrypoint snippet – executed for real with /bin/sh
 and a stub `caddy`, not re-implemented."""
 
@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 DEPLOY = Path(__file__).resolve().parents[2] / "deploy"
-CADDYFILES = ["Caddyfile.selfsigned", "Caddyfile.custom"]
+CADDYFILE = DEPLOY / "Caddyfile"
 
 
 def site_block(text: str, address: str) -> list[str]:
@@ -37,9 +37,8 @@ REDIR = "redir @known https://{host}{$HTTPS_SUFFIX}{uri} 302"
 NOT_FOUND = 'respond "Unknown host name – use one of the configured addresses." 404'
 
 
-@pytest.mark.parametrize("name", CADDYFILES)
-def test_http_block_redirects_known_hosts_only(name):
-    lines = site_block((DEPLOY / name).read_text(), "http://")
+def test_http_block_redirects_known_hosts_only():
+    lines = site_block(CADDYFILE.read_text(), "http://")
     assert "@known host {$SITE_HOSTS}" in lines
     assert "header -Server" in lines
     # Every redirect is bound to the host matcher – an unguarded redir would be an open redirect.
@@ -50,16 +49,42 @@ def test_http_block_redirects_known_hosts_only(name):
     assert lines.index(NOT_FOUND) > lines.index(REDIR)
 
 
-def test_both_caddyfiles_share_the_same_http_block():
-    blocks = [site_block((DEPLOY / name).read_text(), "http://") for name in CADDYFILES]
-    assert blocks[0] == blocks[1]
+def test_one_caddyfile_only():
+    assert sorted(p.name for p in DEPLOY.glob("Caddyfile*")) == ["Caddyfile"]
 
 
-@pytest.mark.parametrize("name", CADDYFILES)
-def test_https_block_is_unchanged_and_still_serves_tls(name):
-    lines = site_block((DEPLOY / name).read_text(), "{$SITE_ADDRESSES}")
+def test_https_block_serves_the_prepared_pem_pair():
+    text = CADDYFILE.read_text()
+    lines = site_block(text, "{$SITE_ADDRESSES}")
     assert "reverse_proxy app:8000" in lines and "header -Server" in lines
-    assert any(line.startswith("tls ") for line in lines)
+    assert [line for line in lines if line.startswith("tls")] == ["tls /tls/cert.pem /tls/key.pem"]
+    # no ACME and no internal CA: Caddy only serves what the tls service prepared
+    globals_ = re.search(r"^\{\n(.*?)^\}", text, re.M | re.S).group(1)
+    assert "auto_https off" in globals_ and "default_sni {$DEFAULT_SNI}" in globals_
+    code = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+    assert "internal" not in code and "acme" not in code.lower()
+
+
+def test_compose_tls_service_contract():
+    services = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text())["services"]
+    tls = services["tls"]
+    assert tls["image"] == "${DEMONSTRATOR_IMAGE}" and tls["restart"] == "no" and tls["user"] == "0"
+    assert tls["command"] == ["python", "-m", "app.tls_setup"]
+    assert tls["environment"] == {"TLS_PKCS12_PASSWORD": "${TLS_PKCS12_PASSWORD:-}"}
+    binds = [v for v in tls["volumes"] if isinstance(v, dict)]
+    assert [(b["source"], b["target"]) for b in binds] == [
+        ("${TLS_CERT_FILE:-/dev/null}", "/tls-in/cert.pem"), ("${TLS_KEY_FILE:-/dev/null}", "/tls-in/key.pem"),
+        ("${TLS_PKCS12_FILE:-/dev/null}", "/tls-in/keystore.p12")]
+    for b in binds:  # read-only, and a missing path is an error instead of a created directory
+        assert b["type"] == "bind" and b["read_only"] is True and b["bind"] == {"create_host_path": False}
+    assert "./tls-live:/tls" in tls["volumes"]
+    assert tls["network_mode"] == "none" and tls["read_only"] is True and tls["cap_drop"] == ["ALL"]
+    assert tls["security_opt"] == ["no-new-privileges:true"] and "ports" not in tls
+    proxy = services["proxy"]
+    assert proxy["depends_on"] == {"app": {"condition": "service_started"},
+                                   "tls": {"condition": "service_completed_successfully"}}
+    assert "./tls-live:/tls:ro" in proxy["volumes"] and "./Caddyfile:/etc/caddy/Caddyfile:ro" in proxy["volumes"]
+    assert not any(str(v).startswith("./tls:") for v in proxy["volumes"])  # the proxy never reads the sources
 
 
 def test_compose_publishes_http_and_https_ports():

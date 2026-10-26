@@ -1,6 +1,6 @@
 {% from "_icons.html" import icon %}
 {# Use-case tiles: GET form so the selected connection travels along with the chosen use case. #}
-{% set icons = {"evergreen": "infinity", "uc04": "refresh", "uc05": "shield"} %}
+{% set icons = {"evergreen": "infinity", "uc04": "refresh", "uc05": "shield", "uc06": "chip"} %}
 <form method="get">
   {% if connections | length > 1 %}
   <label class="conn-select">Connection
@@ -12,7 +12,7 @@
   <div class="tiles">
     {% for key, uc in catalog.items() %}
     <article class="tile">
-      <div class="tile-top"><span class="tile-icon">{{ icon(icons.get(key, "key")) }}</span>
+      <div class="tile-top"><span class="tile-icon{% if uc.license == "advanced" %} advanced{% endif %}"{% if uc.license == "advanced" %} data-tip="Advanced license"{% endif %}>{{ icon(icons.get(key, "key")) }}</span>
         <h3>{{ uc.title }}</h3></div>
       <ul class="tags">{% for tag in uc.tags %}<li>{{ tag }}</li>{% endfor %}</ul>
       <div class="tile-foot"><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"

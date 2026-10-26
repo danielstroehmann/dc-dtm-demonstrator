@@ -51,7 +51,7 @@ def _free_port() -> int:
 
 
 def _write_cert(directory: Path) -> None:
-    """Throwaway self-signed cert for the custom-TLS Caddyfile (Caddy refuses to start without one)."""
+    """Throwaway self-signed pair where the tls service would put it (Caddy refuses to start without one)."""
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "demo.local")])
     now = datetime.datetime.now(datetime.UTC)
@@ -72,18 +72,18 @@ def _write_cert(directory: Path) -> None:
     directory.chmod(0o755)
 
 
-@pytest.fixture(scope="module", params=[("selfsigned", "443"), ("selfsigned", "8443"),
-                                        ("custom", "443"), ("custom", "8443")], ids=lambda p: f"{p[0]}-{p[1]}")
+@pytest.fixture(scope="module", params=["443", "8443"])
 def proxy(request, tmp_path_factory):
-    tls_mode, https_port = request.param
+    https_port = request.param
     proxy_service = _compose()["services"]["proxy"]
     tls_dir = tmp_path_factory.mktemp("tls")
-    if tls_mode == "custom":
-        _write_cert(tls_dir)
+    _write_cert(tls_dir)
     port, name = _free_port(), f"dtm-test-proxy-{uuid.uuid4().hex[:8]}"
     command = ["docker", "run", "-d", "--name", name, "-p", f"127.0.0.1:{port}:80",
                "-e", f"SITE_HOSTS={HOSTS}", "-e", "DEFAULT_SNI=192.0.2.10", "-e", f"HTTPS_PORT={https_port}",
-               "-v", f"{DEPLOY / f'Caddyfile.{tls_mode}'}:/etc/caddy/Caddyfile:ro", "-v", f"{tls_dir}:/tls:ro",
+               # --mount, not -v: a missing source fails instead of Docker creating a directory in the repo
+               "--mount", f"type=bind,source={DEPLOY / 'Caddyfile'},target=/etc/caddy/Caddyfile,readonly",
+               "--mount", f"type=bind,source={tls_dir},target=/tls,readonly",
                "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges:true",
                "--entrypoint", "/bin/sh", proxy_service["image"],
                "-c", proxy_service["entrypoint"][2].replace("$$", "$")]
@@ -99,7 +99,7 @@ def proxy(request, tmp_path_factory):
                                          capture_output=True, text=True).stdout.strip()
                 if running != "true" or time.monotonic() > deadline:
                     logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
-                    pytest.fail(f"proxy did not come up ({tls_mode}, {https_port}):\n{logs.stdout}{logs.stderr}")
+                    pytest.fail(f"proxy did not come up ({https_port}):\n{logs.stdout}{logs.stderr}")
                 time.sleep(0.3)
         yield base, "" if https_port == "443" else f":{https_port}", https_port
     finally:
@@ -213,3 +213,34 @@ def test_compose_publishes_http_port_from_env(tmp_path):
     custom = config(HTTP_PORT="8080", HTTPS_PORT="8443")
     assert published(custom) == {80: "8080", 443: "8443"}
     assert custom["environment"]["HTTPS_PORT"] == "8443"
+
+
+def test_compose_resolves_the_tls_inputs(tmp_path):
+    """docker compose turns unset TLS paths into /dev/null and keeps set ones; the PKCS#12 password
+    defaults to empty."""
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
+    base_env = {k: v for k, v in os.environ.items() if not k.startswith("TLS_")}
+    base_env.update(DEMONSTRATOR_IMAGE="example/image:test", SITE_HOSTS=HOSTS, DEFAULT_SNI="192.0.2.10",
+                    ADMIN_PASSWORD="x" * 16, JWT_SECRET="y" * 32)
+
+    def tls_service(**env) -> dict:
+        result = subprocess.run(["docker", "compose", "-f", str(DEPLOY / "docker-compose.yml"), "--env-file",
+                                 str(env_file), "config", "--format", "json"], capture_output=True, text=True,
+                                timeout=60, env={**base_env, **env}, check=True)
+        return json.loads(result.stdout)["services"]["tls"]
+
+    def sources(service: dict) -> dict[str, str]:
+        return {v["target"]: v["source"] for v in service["volumes"]}
+
+    unset = tls_service()
+    assert {t: s for t, s in sources(unset).items() if t.startswith("/tls-in")} == {
+        "/tls-in/cert.pem": "/dev/null", "/tls-in/key.pem": "/dev/null", "/tls-in/keystore.p12": "/dev/null"}
+    assert unset["environment"]["TLS_PKCS12_PASSWORD"] == ""
+    assert unset["network_mode"] == "none" and unset["read_only"] is True
+    cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
+    set_ = tls_service(TLS_CERT_FILE=str(cert), TLS_KEY_FILE=str(key), TLS_PKCS12_PASSWORD="pw")
+    assert sources(set_)["/tls-in/cert.pem"] == str(cert) and sources(set_)["/tls-in/key.pem"] == str(key)
+    assert sources(set_)["/tls-in/keystore.p12"] == "/dev/null" and set_["environment"]["TLS_PKCS12_PASSWORD"] == "pw"
+    assert all(v.get("bind", {}).get("create_host_path") is False for v in set_["volumes"]
+               if v["target"].startswith("/tls-in"))

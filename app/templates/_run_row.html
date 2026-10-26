@@ -19,7 +19,7 @@
     <span class="row-action rollback-meter {{ 'indeterminate' if share is none else 'p-%d' % share }}" role="progressbar" aria-label="Full rollback running" tabindex="0"
           aria-valuetext="{{ pg.label or 'Rolling back' }}"
           {% if share is not none %}aria-valuenow="{{ share }}" aria-valuemin="0" aria-valuemax="100"{% endif %}
-          data-tip="{{ pg.label or 'Rolling back' }}"><span>{% if share is not none %}Revoking {{ pg.done }}/{{ pg.total }}{% else %}Rolling back{% endif %}</span></span>
+          data-tip="{{ pg.label or 'Rolling back' }}"><span>{% if share is not none %}Revoking {{ pg.done }}/{{ pg.total }}{% else %}{{ pg.short or "Rolling back" }}{% endif %}</span></span>
     {% elif run.rolled_back %}
     <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">
       <button type="submit" class="row-action secondary outline" aria-label="Delete run {{ run.id }}">Delete</button>

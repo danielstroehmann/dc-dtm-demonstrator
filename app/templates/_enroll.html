@@ -1,0 +1,9 @@
+{% from "_icons.html" import icon %}
+{# UC-5: the run waits after the factory step – the passcodes can be shown in DTM before the devices enroll. #}
+<article class="card focus">
+  <div class="card-head"><h2>Enrollment in the field</h2>
+    <form method="post" action="/runs/{{ run.id }}/enroll" class="inline">
+      <button type="submit" class="btn-icon">{{ icon("play") }}{{ "Enroll devices" if run.params.count > 1 else "Enroll device" }}</button>
+    </form></div>
+  <p class="muted">{{ run.params.count }} passcode{{ "s" if run.params.count != 1 }} ready in DTM – policy <span class="mono">{{ run.result.policy }}</span></p>
+</article>

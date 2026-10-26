@@ -442,14 +442,23 @@ def test_record_names_must_be_plain(name):
 def test_until_is_bounded_and_stops_on_failure_states():
     poll = {"method": "GET", "path": f"{JOBS}/{{JOB_ID}}", "until": {"status": "completed"}}
     bash = snippets.render(poll, "curl")
-    assert bash.startswith("for i in $(seq 1 300); do\n")
-    assert 'case "$STATUS" in completed) break ;; failed|rejected|""|null) ' in bash
+    assert bash.startswith("F=0\nfor i in $(seq 1 300); do\n")
+    # "failed" ends the loop only once it persists (DTM once reported failed mid-processing); the others at once
+    assert ('case "$STATUS" in completed) break ;; failed) F=$((F+1)); [ "$F" -ge 8 ] && '
+            '{ echo "job failed" >&2; break; } ;; rejected|""|null) ') in bash
+    assert "*) F=0 ;; esac" in bash  # any other status resets the counter
     assert '/jobs/${JOB_ID}?account_id=' in bash and bash.endswith("  sleep 2\ndone")
     wait = snippets.render(poll | {"until": {"status": "pending_approval", "stop": ["completed", "failed"]}}, "wget")
-    assert 'case "$STATUS" in pending_approval) break ;; completed|failed|""|null) ' in wait and "wget --method=GET" in wait
+    assert 'case "$STATUS" in pending_approval) break ;; failed) F=$((F+1));' in wait and "wget --method=GET" in wait
+    assert ' completed|""|null) ' in wait
     ps = snippets.render(poll, "powershell")
-    assert ps.startswith("foreach ($i in 1..300) {\n  try { $r = Invoke-RestMethod -Method Get `")
-    assert "catch { Write-Host" in ps and "if ($r.status -in 'completed', 'failed', 'rejected') { break }" in ps
+    assert ps.startswith("$f = 0\nforeach ($i in 1..300) {\n  try { $r = Invoke-RestMethod -Method Get `")
+    assert "catch { Write-Host" in ps and "if ($r.status -in 'completed', 'rejected') { break }" in ps
+    assert "if ($r.status -eq 'failed') { $f++; if ($f -ge 8) { break } } else { $f = 0 }" in ps
+    # without "failed" among the stop states there is no counter at all
+    plain = poll | {"until": {"status": "completed", "stop": ["rejected"]}}
+    assert "F=" not in snippets.render(plain, "curl") and "$f" not in snippets.render(plain, "powershell")
+    assert 'case "$STATUS" in completed) break ;; rejected|""|null) ' in snippets.render(plain, "curl")
 
 
 def test_command_tokens_become_shell_variables_but_written_ones_stay():
@@ -576,7 +585,10 @@ def test_create_capture_sets_the_id_or_stops(jq_shell):
 
 @pytest.mark.parametrize("statuses,polls,stderr", [
     (["in_progress", "in_progress", "completed", "completed"], 3, ""),
-    (["in_progress", "failed"], 2, "job failed"),
+    (["in_progress"] + ["failed"] * 20, 9, "job failed"),  # failed persists 8 polls → ends, bounded
+    (["in_progress", "failed", "failed", "in_progress", "completed"], 5, ""),  # transient failed
+    (["failed"] * 7 + ["in_progress"] + ["failed"] * 7 + ["completed"], 16, ""),  # the counter resets
+    (["failed", "failed", "rejected"], 3, "job rejected"),  # rejected still ends at once
     (["in_progress", None], 2, "job null"),   # an answer without status (e.g. an error) ends the loop
 ])
 def test_until_polls_until_a_final_state(jq_shell, statuses, polls, stderr):
@@ -584,7 +596,10 @@ def test_until_polls_until_a_final_state(jq_shell, statuses, polls, stderr):
     answers = [{"status": s} if s else {"errors": []} for s in statuses]
     result = jq_shell(snippets.render(poll, "curl"), answers)
     assert result.returncode == 0 and jq_shell.calls() == polls
-    assert stderr in result.stderr
+    if stderr:
+        assert stderr in result.stderr
+    else:  # completed: no stop message, and the last answer read was the completed one
+        assert "job " not in result.stderr and result.stdout.splitlines()[-1] == "status: completed"
     assert result.stdout.splitlines()[-1].startswith("status: ")
 
 
