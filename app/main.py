@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import importlib.util
 import logging
 import re
 import secrets
@@ -26,7 +27,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles, trustedge
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
-from .config import APP_VERSION, DATA_DIR
+from .config import APP_VERSION, BUILD, DATA_DIR, DEV_MODE, build_label
 from .dtm import DTMClient, DTMConfig, DTMError
 from .store import Store
 
@@ -61,10 +62,10 @@ def max_renewals(run: dict) -> int:
 
 
 def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClient,
-               data_dir: Path = DATA_DIR) -> FastAPI:
+               data_dir: Path = DATA_DIR, dev_mode: bool = DEV_MODE) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=HERE / "templates")
-    templates.env.globals["version"] = APP_VERSION
+    templates.env.globals["build_label"] = build_label(dev_mode)
     # Cache busting: static URLs carry a hash of the files, so a new build is never hidden by the cache.
     templates.env.globals["asset_v"] = _asset_hash(HERE / "static")
     templates.env.globals["use_cases"] = USE_CASES
@@ -87,6 +88,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["max_minions"] = trustedge.MAX_DEVICES
     templates.env.globals["store_catalog"] = store  # the firmware card reads the cached catalogue
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    # Feedback overlay: dev mode only, and only where its code exists – the release image does not contain it.
+    dev_tools = dev_mode and importlib.util.find_spec(f"{__package__}.devtools") is not None
+    if dev_tools:
+        from .devtools import feedback
+        feedback.install(app, data_dir / "feedback", BUILD)
+    templates.env.globals["dev_tools"] = dev_tools
     limiter = Limiter(key_func=get_remote_address)
     app.state.limiter = limiter
     tasks: set[asyncio.Task] = set()
@@ -96,7 +103,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         # Shell (nav, connection chip) only for logged-in users – error pages are also served anonymously.
         authenticated = auth.is_authenticated(request)
         default = store.connection(None) if authenticated else None
-        ctx = {"nav": None, "authenticated": authenticated,
+        ctx = {"nav": None, "authenticated": authenticated, "page_template": name,
                "default_connection": _public(default) if default else None} | ctx
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
@@ -166,7 +173,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if request.method == "POST" and not _same_origin(request):
             # SameSite treats other apps on this host (any port) as same-site; Origin does not.
             return HTMLResponse("Cross-origin request refused", status_code=403)
-        public = request.url.path in ("/login", "/setup", "/healthz") or request.url.path.startswith("/static/")
+        public = request.url.path in ("/login", "/setup", "/healthz", "/version") or request.url.path.startswith("/static/")
         if not public and not auth.is_authenticated(request):
             if request.headers.get("hx-request"):
                 return HTMLResponse("", status_code=401, headers={"HX-Redirect": "/login"})
@@ -207,6 +214,11 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     @app.get("/healthz")
     async def healthz():
         return {"status": "ok", "version": APP_VERSION}
+
+    @app.get("/version")
+    async def version():
+        """Build identity – public like the version in the login page's footer; nothing secret."""
+        return BUILD | {"dev": dev_tools}
 
     @app.get("/login")
     async def login_page(request: Request):

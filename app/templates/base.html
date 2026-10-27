@@ -12,6 +12,11 @@
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <script src="/static/htmx.min.js?v={{ asset_v }}" defer></script>
   <script src="/static/app.js?v={{ asset_v }}" defer></script>
+  {% if dev_tools and authenticated %}
+  <link rel="stylesheet" href="/devtools/static/feedback.css">
+  <script src="/devtools/static/vendor/html2canvas-1.4.1.min.js" defer></script>
+  <script type="module" src="/devtools/static/feedback.js"></script>
+  {% endif %}
 </head>
 {% block body %}
 <body>
@@ -28,10 +33,10 @@
       {% endif %}{% endblock %}
     </nav>
   </header>
-  <main class="container">
+  <main class="container"{% if dev_tools %} data-component="{{ page_template }}"{% endif %}>
     {% block content %}{% endblock %}
   </main>
-  <footer class="container"><small>Version {{ version }}</small></footer>
+  <footer class="container"><small data-build>{{ build_label }}</small></footer>
   <dialog id="confirm-dialog" aria-labelledby="confirm-title">
     <article>
       <h3 id="confirm-title">Please confirm</h3>

@@ -36,7 +36,7 @@ def is_setup_form(text: str) -> bool:
 def protected_get_paths(app) -> list[str]:
     paths = {r.path for r in app.routes if "GET" in (getattr(r, "methods", None) or set())}
     return sorted(p.replace("{run_id}", "r1").replace("{use_case}", "uc01").replace("{connection_id}", "1")
-                  for p in paths if p not in ("/login", "/healthz") and not p.startswith("/static"))
+                  for p in paths if p not in ("/login", "/healthz", "/version") and not p.startswith("/static"))
 
 
 # --- fresh app ------------------------------------------------------------------------------------------

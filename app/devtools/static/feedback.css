@@ -1,0 +1,31 @@
+/* Feedback overlay (dev builds only) – DigiCert colours from app.css, Pico components for the dialog. */
+.fb-button {
+  position: fixed; right: var(--s4); bottom: var(--s4); z-index: 2000;
+  width: auto; margin: 0; padding: var(--s2) var(--s4); border: 0; border-radius: 2rem;
+  background: var(--dc-orange); color: #fff; font-size: 0.85rem; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.fb-button:hover, .fb-button:focus-visible { background: var(--dc-orange-hover); }
+.fb-highlight {
+  position: fixed; z-index: 1999; display: none; pointer-events: none;
+  outline: 2px solid var(--dc-orange); background: rgba(245, 124, 0, 0.08); border-radius: 2px;
+}
+.fb-highlight.fb-on { display: block; }
+.fb-hint {
+  position: fixed; top: var(--s4); left: 50%; transform: translateX(-50%); z-index: 2000; display: none;
+  padding: var(--s2) var(--s4); border-radius: var(--pico-border-radius);
+  background: var(--dc-blue-dark); color: #fff; font-size: 0.85rem;
+}
+.fb-picking .fb-hint { display: block; }
+.fb-picking, .fb-picking * { cursor: crosshair !important; }
+.fb-dialog article { width: min(32rem, 100%); }
+.fb-dialog h3 { margin-bottom: var(--s3); }
+.fb-target { color: var(--pico-muted-color); font-size: 0.85rem; overflow-wrap: anywhere; margin-bottom: var(--s2); }
+.fb-dialog textarea { margin-bottom: var(--s2); }
+.fb-status { display: block; min-height: 1.2em; color: var(--bad); }
+.fb-actions { display: flex; justify-content: flex-end; gap: var(--s2); margin-top: var(--s2); }
+.fb-actions button { width: auto; margin: 0; }
+.fb-toast {
+  position: fixed; right: var(--s4); bottom: 4rem; z-index: 2000; display: none;
+  padding: var(--s2) var(--s4); border-radius: var(--pico-border-radius); background: var(--ok); color: #fff;
+}
+.fb-toast.fb-on { display: block; }

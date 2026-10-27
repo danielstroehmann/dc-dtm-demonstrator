@@ -1,3 +1,6 @@
 *
 !app
 !requirements.txt
+# Development-only code (feedback overlay) never enters an image – scripts/dev-up mounts it from the working tree.
+app/devtools
+**/__pycache__
