@@ -84,7 +84,8 @@ class FakeDocker:
         if method == "GET" and path == "/containers/json":
             label = json.loads(request.url.params.get("filters") or "{}").get("label", [""])[0]
             listed = [c for c in self.containers.values()
-                      if self.filter_ignored or f"{launcher.LABEL}={c['labels'].get(launcher.LABEL)}" == label]
+                      if self.filter_ignored or f"{launcher.LABEL}={c['labels'].get(launcher.LABEL)}" == label
+                      or (label == launcher.LABEL and launcher.LABEL in c["labels"])]  # label present, any value
             return httpx.Response(200, json=[{"Id": c["Id"], "Names": [f"/{c['name']}"], "Labels": c["labels"]}
                                              for c in listed])
         m = re.fullmatch(r"/containers/([0-9a-f]+)(/[a-z]+)?", path)

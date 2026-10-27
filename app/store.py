@@ -64,6 +64,19 @@ MIGRATIONS = [
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
+ACTIVE = {"pending", "running", "renewing"}
+
+
+def rolled_back(run: dict) -> bool:
+    return run.get("cleanup_mode") == "full" and run.get("cleanup_status") == "done"
+
+
+def active(run: dict) -> bool:
+    """Busy: a rollback must wait (the runs list and the watchdog). Needs the run's result (get_run)."""
+    return (run["status"] in ACTIVE or run.get("cleanup_status") == "running"
+            or bool((run.get("result") or {}).get("busy")))  # a device of an Advanced run is enrolling/renewing
+
+
 class SchemaTooNewError(RuntimeError):
     pass
 

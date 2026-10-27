@@ -159,6 +159,17 @@ async def test_remove_run_removes_only_the_runs_containers(docker, filter_ignore
     assert set(docker.containers) == {other["Id"], foreign["Id"]} and not {c["Id"] for c in mine} & set(docker.containers)
 
 
+@pytest.mark.parametrize("filter_ignored", [False, True])
+async def test_labelled_runs_lists_only_labelled_containers_read_only(docker, filter_ignored):
+    docker.filter_ignored = filter_ignored
+    for name, run_id in (("robot-t1-minion-0001", "t1"), ("robot-t1-minion-0002", "t1"), ("robot-t2-minion-0001", "t2"),
+                         ("odd", "Not/A-Run"), ("empty", "")):
+        docker.add(name, run_id)
+    docker.add("postgres", None)  # not the launcher's
+    assert await minions.labelled_runs() == ["t1", "t2"]
+    assert all(r.method == "GET" for r in docker.requests) and len(docker.containers) == 6
+
+
 async def test_remove_run_refuses_an_unexpected_run_id(docker):
     with pytest.raises(minions.MinionError, match="refused"):
         await minions.remove_run("t1&all=1")

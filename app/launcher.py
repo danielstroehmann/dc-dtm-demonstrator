@@ -109,6 +109,14 @@ async def state(container: str) -> dict:
     return {"status": info["State"].get("Status", "unknown"), "lines": lines(logs.content)}
 
 
+@api.get("/runs")
+async def runs() -> dict:
+    """The run IDs that labelled containers belong to – read-only, for the app's watchdog (dangling minions)."""
+    listed = await _call("GET", "/containers/json", params={"all": 1, "filters": json.dumps({"label": [LABEL]})})
+    labels = {(c.get("Labels") or {}).get(LABEL) for c in listed.json()}  # re-checked: never trust the filter alone
+    return {"runs": sorted(run for run in labels if run and RUN.fullmatch(run))}
+
+
 @api.delete("/runs/{run_id}")
 async def remove_run(run_id: str) -> dict:
     """Removes every minion of the run (found by its label). Returns how many."""

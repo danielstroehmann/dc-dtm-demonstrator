@@ -147,7 +147,12 @@ table.runs-table td .pill { vertical-align: middle; }
 table.runs-table .c-run { width: 6rem; } table.runs-table .c-conn { width: 7rem; }
 table.runs-table .c-variant { width: 11rem; } table.runs-table .c-status { width: 7.5rem; }
 table.runs-table .c-cleanup { width: 6.5rem; } table.runs-table .c-created { width: 9.5rem; }
-table.runs-table .c-actions { width: 8.5rem; }
+/* the action slot: lifetime clock (1rem + gap) and the 7.5rem button fit without overflow – every row ends alike */
+table.runs-table .c-actions { width: 10rem; } table.runs-table td.actions-cell { padding-right: var(--s1); }
+/* Left of the row action: the run's lifetime until the automatic rollback (watchdog), filling in quarters */
+.actions-cell > .lifetime { align-items: center; margin-right: var(--s2); color: var(--ok); }
+.actions-cell > .lifetime.late { color: var(--dc-orange); }
+.lifetime svg { width: 1rem; height: 1rem; }
 
 /* The row's action slot: Full rollback, Delete and the running rollback share one box to the pixel */
 .actions-cell .row-action { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
