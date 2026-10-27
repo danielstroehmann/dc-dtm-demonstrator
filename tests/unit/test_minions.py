@@ -203,3 +203,25 @@ async def test_unreachable_launcher(monkeypatch):
     with pytest.raises(minions.MinionError, match="not reachable"):
         await minions.remove_run("t1")
     assert await minions.available() is False
+
+
+async def test_launcher_refuses_minions_above_the_host_cap(monkeypatch):
+    """The cap holds in the launcher itself – a compromised app cannot exhaust the host with minions."""
+    from fastapi import HTTPException
+
+    from app import launcher
+
+    class Listed:
+        def json(self):
+            return [{"Id": f"{i:064x}", "Labels": {launcher.LABEL: "r1"}} for i in range(launcher.MAX_MINIONS)]
+
+    calls = []
+
+    async def fake_call(method, path, expect=(200,), **kwargs):
+        calls.append((method, path))
+        return Listed()
+    monkeypatch.setattr(launcher, "_call", fake_call)
+    minion = launcher.Minion(run_id="r1", name="robot-r1-uc08-iot-minion-0001", env={"SERIAL": "SN-R1-0001"})
+    with pytest.raises(HTTPException) as refused:
+        await launcher.start(minion)
+    assert refused.value.status_code == 429 and ("POST", "/containers/create") not in calls

@@ -1040,7 +1040,7 @@ def test_page_structure_cards(configured_user, store):
     assert evergreen.GUIDE.title == "Evergreen device certificates"
     assert evergreen.USE_CASES["uc04"].title == "Renewable device certificates"
     assert re.search(r'<button type="submit" formaction="/runs/new/evergreen" class="btn-sm btn-icon"\s+'
-                     r'aria-label="Start [^"]+"><svg[^>]*>.*?</svg>Start</button>', catalog, re.S)
+                     r'aria-label="Start [^"]+"\s*><svg[^>]*>.*?</svg>Start</button>', catalog, re.S)
     settings = configured_user.get("/settings").text
     assert "<h1>Settings</h1>" in settings and "<h2>DTM connections</h2>" in settings
     assert "<h2>Add connection</h2>" in settings
