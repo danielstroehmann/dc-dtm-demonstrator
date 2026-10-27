@@ -9,6 +9,7 @@ import sqlite3
 import string
 import time
 import uuid
+from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlencode, urlsplit
 from collections.abc import Callable
 from datetime import datetime
@@ -25,11 +26,12 @@ from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles, trustedge
+from . import (cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles, trustedge,
+               watchdog)
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, BUILD, DATA_DIR, DEV_MODE, build_label
 from .dtm import DTMClient, DTMConfig, DTMError
-from .store import Store
+from .store import Store, active, rolled_back
 
 log = logging.getLogger("demonstrator")
 HERE = Path(__file__).parent
@@ -44,7 +46,6 @@ def new_run_id() -> str:
     return "".join(secrets.choice(RUN_ID_ALPHABET) for _ in range(6))
 NAME = re.compile(r"[A-Za-z0-9 ._-]{1,40}")
 HOST = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
-ACTIVE = {"pending", "running", "renewing"}
 SHOWN_EVENTS = 200
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
@@ -63,7 +64,15 @@ def max_renewals(run: dict) -> int:
 
 def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClient,
                data_dir: Path = DATA_DIR, dev_mode: bool = DEV_MODE) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        task = asyncio.create_task(dog.run())
+        yield
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.globals["build_label"] = build_label(dev_mode)
     # Cache busting: static URLs carry a hash of the files, so a new build is never hidden by the cache.
@@ -123,7 +132,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     def in_use(connection_id: int) -> bool:
         """Runs that still need this connection to roll back."""
-        return any(not _rolled_back(r) and (run_connection(r) or {}).get("id") == connection_id
+        return any(not rolled_back(r) and (run_connection(r) or {}).get("id") == connection_id
                    for r in store.list_runs())
 
     def client_for(run_id: str | None = None, connection_id: int | None = None) -> DTMClient:
@@ -152,6 +161,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if not conn:
             raise HTTPException(409, "DTM connection is not configured")
         return conn
+
+    dog = app.state.watchdog = watchdog.Watchdog(store, client_for, data_dir / "runs")
 
     def spawn(coro_factory, run_id: str, with_client: bool = True) -> None:
         client = client_for(run_id) if with_client else None  # fails in the request, before anything is started
@@ -191,7 +202,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     async def delete_run(run_id: str):
         run = get_run_or_404(run_id)
         # Only after a full rollback – the ledger is what a cleanup needs, so it must not vanish earlier.
-        if not _rolled_back(run):
+        if not rolled_back(run):
             raise HTTPException(409, "Only runs with a completed full rollback can be deleted")
         shutil.rmtree(data_dir / "runs" / run_id, ignore_errors=True)
         store.delete_run(run_id)
@@ -238,6 +249,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if not await run_in_threadpool(auth.set_password, password):  # another request was first
             return RedirectResponse("/login", status_code=303)
         log.warning("login password set from %s", get_remote_address(request))
+        watchdog.record_login(store)
         response = RedirectResponse("/", status_code=303)
         auth.set_cookie(response, auth.issue())
         return response
@@ -250,6 +262,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if not await run_in_threadpool(auth.check_password, password):  # Argon2: ~50 ms, not on the loop
             log.warning("failed login from %s", get_remote_address(request))
             return render(request, "login.html", 401, error="Wrong password.")
+        watchdog.record_login(store)
         response = RedirectResponse("/", status_code=303)
         auth.set_cookie(response, auth.issue())
         return response
@@ -261,8 +274,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return response
 
     def list_row(run: dict) -> dict:
-        """A run as the runs list shows it (rolled back?, connection name)."""
-        return run | {"rolled_back": _rolled_back(run),
+        """A run as the runs list shows it (rolled back?, lifetime clock, connection name)."""
+        return run | {"rolled_back": rolled_back(run), "lifetime": watchdog.lifetime(run, time.time()),
                       "connection": (run_connection(run) or {}).get("name")
                       or f"{run['params'].get('connection_name', '–')} (not configured)"}
 
@@ -568,7 +581,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         run = get_run_or_404(run_id)
         # busy: the devices acting when the page was rendered – one finishing reloads its tile's results
         now_busy = ",".join((run.get("result") or {}).get("busy") or [])
-        if request.headers.get("hx-request") and (not _active(run) or busy != now_busy):
+        if request.headers.get("hx-request") and (not active(run) or busy != now_busy):
             # The page was polling and the run/cleanup/a device just finished: reload once to show the result.
             return HTMLResponse("", headers={"HX-Refresh": "true"})
         return render(request, "_run_live.html", **live_context(run))
@@ -590,13 +603,13 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         start = _epoch(events[0]["ts"]) if events else 0
         timeline = [e | {"t": _clock(_epoch(e["ts"]) - start)} for e in reversed(events[-SHOWN_EVENTS:])]
         progress = run.get("progress")
-        if progress and _active(run):
+        if progress and active(run):
             progress = progress | {"elapsed": int(time.time() - progress.get("started", time.time()))}
         else:
             progress = None
-        return {"run": run, "events": timeline, "events_total": len(events), "active": _active(run),
+        return {"run": run, "events": timeline, "events_total": len(events), "active": active(run),
                 "progress": progress,
-                "rolled_back": _rolled_back(run),
+                "rolled_back": rolled_back(run),
                 "artifact_available": _artifact_path(data_dir, run) is not None}
 
     @app.get("/runs/{run_id}/devices")
@@ -773,9 +786,9 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         from_list = bool(request.headers.get("hx-request"))
         run = get_run_or_404(run_id)
         try:
-            if mode not in ("full", "certificates") or _active(run):
+            if mode not in ("full", "certificates") or active(run):
                 raise HTTPException(409, "Cleanup not possible right now")
-            if _rolled_back(run):
+            if rolled_back(run):
                 raise HTTPException(409, "This run has already been rolled back")
             spawn(lambda c: cleanup.cleanup(store, c, run_id, mode, data_dir / "runs" / run_id), run_id)
         except HTTPException as exc:
@@ -842,15 +855,6 @@ def _artifact_path(data_dir: Path, run: dict) -> Path | None:
     name = (run.get("result") or {}).get("artifact")
     path = data_dir / "runs" / run["id"] / name if name in ARTIFACTS else None
     return path if path and path.is_file() else None
-
-
-def _rolled_back(run: dict) -> bool:
-    return run.get("cleanup_mode") == "full" and run.get("cleanup_status") == "done"
-
-
-def _active(run: dict) -> bool:
-    return (run["status"] in ACTIVE or run.get("cleanup_status") == "running"
-            or bool((run.get("result") or {}).get("busy")))  # a device of an Advanced run is enrolling/renewing
 
 
 def build() -> FastAPI:

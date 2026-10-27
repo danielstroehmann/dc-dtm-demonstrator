@@ -136,7 +136,7 @@ async def test_field_start_until_the_operational_certificate(store, fake, docker
     assert (d["issued"], d["stage"]) == (1, "operational") and run["result"]["certificate_total"] == 2
     assert sorted(c["role"] for c in d["certificates"]) == ["bootstrap", "operational"]
     (container,) = docker.containers.values()
-    assert container["labels"] == {launcher.LABEL: "t2"} and d["container"] == container["Id"]
+    assert container["labels"] == {launcher.LABEL: "t2", launcher.INSTANCE_LABEL: launcher.INSTANCE} and d["container"] == container["Id"]
     (env,) = minion.started
     assert env["SERIAL"] == d["serial"] and env["BOOT_POLICY"] == policy(fake, "-boot-policy")["id"]
     assert not (tmp_path / "runs" / "t2" / "devices" / d["name"] / "passcode").exists()  # one-time: handed over

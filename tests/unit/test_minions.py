@@ -4,6 +4,7 @@ from a minion's log (multiplexed frames, timestamps, TrustEdge's lifecycle)."""
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -110,7 +111,7 @@ async def test_start_creates_a_labelled_unprivileged_container(docker):
     (created,) = docker.containers.values()
     assert created["Id"] == container and created["status"] == "running"
     body = created["body"]
-    assert body["Image"] == launcher.IMAGE and body["Labels"] == {launcher.LABEL: "t1"}
+    assert body["Image"] == launcher.IMAGE and body["Labels"] == {launcher.LABEL: "t1", launcher.INSTANCE_LABEL: launcher.INSTANCE}
     assert sorted(body["Env"]) == sorted(f"{k}={v}" for k, v in ENV.items())
     host = body["HostConfig"]
     assert "Binds" not in host and "Mounts" not in body and not host.get("Privileged") and "CapAdd" not in host
@@ -157,6 +158,59 @@ async def test_remove_run_removes_only_the_runs_containers(docker, filter_ignore
     foreign = docker.add("postgres", None)  # not the launcher's
     assert await minions.remove_run("t1") == 2
     assert set(docker.containers) == {other["Id"], foreign["Id"]} and not {c["Id"] for c in mine} & set(docker.containers)
+
+
+@pytest.mark.parametrize("filter_ignored", [False, True])
+async def test_labelled_runs_lists_only_labelled_containers_read_only(docker, filter_ignored):
+    docker.filter_ignored = filter_ignored
+    for name, run_id in (("robot-t1-minion-0001", "t1"), ("robot-t1-minion-0002", "t1"), ("robot-t2-minion-0001", "t2"),
+                         ("odd", "Not/A-Run"), ("empty", "")):
+        docker.add(name, run_id)
+    docker.add("postgres", None)  # not the launcher's
+    assert await minions.labelled_runs() == ["t1", "t2"]
+    assert all(r.method == "GET" for r in docker.requests) and len(docker.containers) == 6
+
+
+@pytest.mark.parametrize("filter_ignored", [False, True])
+async def test_another_installs_minions_are_neither_listed_nor_removed(docker, filter_ignored):
+    docker.filter_ignored = filter_ignored  # the launcher re-checks the labels itself
+    own = docker.add("robot-t1-minion-0001", "t1")
+    legacy = docker.add("robot-t1-minion-0002", "t1", instance="")  # created before v1.1.0: no instance label
+    other = docker.add("robot-t1-minion-0003", "t1", instance="other-demonstrator")
+    docker.add("robot-t9-minion-0001", "t9", instance="other-demonstrator")
+    docker.add("robot-t8-minion-0001", "t8", instance="")
+    assert await minions.labelled_runs() == ["t1"]  # strictly this install – the watchdog's listing
+    assert await minions.remove_run("t1") == 2  # the run's rollback: its own and its older minions
+    assert own["Id"] not in docker.containers and legacy["Id"] not in docker.containers
+    assert other["Id"] in docker.containers
+    with pytest.raises(minions.MinionError, match="unknown container"):
+        await minions.state(other["Id"])
+
+
+async def test_the_host_cap_counts_only_this_installs_minions(docker, monkeypatch):
+    monkeypatch.setattr(launcher, "MAX_MINIONS", 2)
+    docker.add("robot-x1-minion-0001", "x1", instance="other-demonstrator")
+    docker.add("robot-x2-minion-0001", "x2", instance="other-demonstrator")
+    docker.add("robot-t1-minion-0001", "t1")
+    await minions.start("t1", "robot-t1-minion-0002", {"SERIAL": "SN-T1-0002"})
+    with pytest.raises(minions.MinionError, match="at most 2 minions"):
+        await minions.start("t1", "robot-t1-minion-0003", {"SERIAL": "SN-T1-0003"})
+
+
+@pytest.mark.parametrize("instance, ok", [("dtm-1a2b3c4d", True), ("my_demo-2", True), ("Upper", False),
+                                          ("a b", False), ("x" * 41, False), ("", False)])
+def test_the_instance_name_is_validated_at_start(instance, ok):
+    import os
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "-c", "import app.launcher as l; print(l.INSTANCE)"],
+                            env=os.environ | {"MINION_INSTANCE": instance}, capture_output=True, text=True,
+                            cwd=Path(__file__).resolve().parents[2])
+    assert (result.returncode == 0) is ok, result.stderr
+    if ok:
+        assert result.stdout.strip() == instance
+    else:
+        assert "MINION_INSTANCE must match" in result.stderr
 
 
 async def test_remove_run_refuses_an_unexpected_run_id(docker):

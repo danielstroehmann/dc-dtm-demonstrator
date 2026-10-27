@@ -60,8 +60,23 @@ MIGRATIONS = [
     DELETE FROM settings WHERE key IN ('dtm_host', 'dtm_account_id', 'dtm_api_key')
         AND EXISTS (SELECT 1 FROM connections)
     """,
+    # v4: the watchdog's state of a run (failed automatic rollbacks, parked) – JSON
+    "ALTER TABLE runs ADD COLUMN watchdog TEXT",
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
+
+
+ACTIVE = {"pending", "running", "renewing"}
+
+
+def rolled_back(run: dict) -> bool:
+    return run.get("cleanup_mode") == "full" and run.get("cleanup_status") == "done"
+
+
+def active(run: dict) -> bool:
+    """Busy: a rollback must wait (the runs list and the watchdog). Needs the run's result (get_run)."""
+    return (run["status"] in ACTIVE or run.get("cleanup_status") == "running"
+            or bool((run.get("result") or {}).get("busy")))  # a device of an Advanced run is enrolling/renewing
 
 
 class SchemaTooNewError(RuntimeError):
@@ -200,10 +215,10 @@ class Store:
         # The overview needs no results (they hold every issued certificate).
         return [_run(r) for r in self._exec(
             "SELECT id, use_case, params, status, created_at, finished_at, NULL AS result, error, cleanup_mode, "
-            "cleanup_status, progress FROM runs ORDER BY created_at DESC").fetchall()]
+            "cleanup_status, progress, watchdog FROM runs ORDER BY created_at DESC").fetchall()]
 
     def update_run(self, run_id: str, **fields) -> None:
-        for key in ("params", "result", "progress"):
+        for key in ("params", "result", "progress", "watchdog"):
             if key in fields and fields[key] is not None:
                 fields[key] = json.dumps(fields[key])
         cols = ", ".join(f"{k} = ?" for k in fields)
@@ -290,4 +305,5 @@ def _run(row: sqlite3.Row) -> dict:
     run["params"] = json.loads(run["params"])
     run["result"] = json.loads(run["result"]) if run["result"] else None
     run["progress"] = json.loads(run["progress"]) if run.get("progress") else None
+    run["watchdog"] = json.loads(run["watchdog"]) if run.get("watchdog") else None
     return run

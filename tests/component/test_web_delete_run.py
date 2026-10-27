@@ -211,6 +211,16 @@ def test_index_delete_form_deletes_only_that_row(configured_user, store):
 # --- the action slot: one box, whatever state the run is in -------------------------------------------
 
 BASE = {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256", "count": 1}
+CLOCK = re.compile(r'<span class="lifetime q0" role="img" aria-label="Rolled back automatically at \d\d:\d\d UTC"'
+                   r'[^>]*>.*?</svg></span>', re.S)
+
+
+def without_clock(slot: str) -> str:
+    """The slot without the watchdog's lifetime clock, which every run not rolled back shows left of its action."""
+    assert len(CLOCK.findall(slot)) == 1, slot
+    return CLOCK.sub("", slot)
+
+
 ROLLBACK_CONFIRM = "Roll back run r1? Revokes its certificates and removes everything it created."
 
 
@@ -218,7 +228,7 @@ ROLLBACK_CONFIRM = "Roll back run r1? Revokes its certificates and removes every
 def test_busy_run_shows_a_disabled_rollback(configured_store, user, store, status, cleanup):
     store.create_run("r1", "uc01", BASE)
     store.update_run("r1", status=status)
-    slot = action_slot(user.get("/").text, "r1")
+    slot = without_clock(action_slot(user.get("/").text, "r1"))
     assert re.fullmatch(r'\s*<span data-tip="The run is still busy" tabindex="0"><button type="button" '
                         r'class="row-action outline" disabled>Full rollback</button></span>\s*', slot), slot
 
@@ -230,7 +240,7 @@ def test_rollback_button_otherwise(configured_store, user, store, status, cleanu
     store.create_run("r1", "uc01", BASE)
     store.update_run("r1", status=status, cleanup_mode=cleanup_mode, cleanup_status=cleanup_status)
     html = user.get("/").text
-    slot = action_slot(html, "r1")
+    slot = without_clock(action_slot(html, "r1"))
     form = re.search(r"<form ([^>]*)>", slot).group(1)
     assert 'action="/runs/r1/cleanup"' in form and 'hx-post="/runs/r1/cleanup"' in form
     assert 'hx-target="closest tr"' in form and 'hx-swap="outerHTML"' in form

@@ -1,4 +1,4 @@
-{% from "_icons.html" import pill %}
+{% from "_icons.html" import pill, lifetime_clock %}
 {# One row of the runs list. While a rollback runs, the row refreshes itself; its action slot shows the
    rollback in exactly the button's box (.row-action) – nothing else moves. #}
 {% set rolling = run.cleanup_status == "running" %}
@@ -12,21 +12,23 @@
   <td>{% if run.cleanup_status %}{{ pill(run.cleanup_status) }}{% else %}–{% endif %}</td>
   <td>{{ run.created_at[:16].replace("T", " ") }}</td>
   <td class="actions-cell">
-    {% if rolling %}
-    {% set pg = run.progress or {} %}
-    {# CSP allows no inline styles – the fill comes from a class in 5 % steps #}
-    {% set share = ((20 * pg.done / pg.total) | round | int) * 5 if pg.total and pg.done is not none else none %}
+    {#- no whitespace between the lifetime clock and the action: every row's button ends at the same edge #}
+    {% if run.lifetime %}{{ lifetime_clock(run.lifetime) }}{% endif -%}
+    {% if rolling -%}
+    {% set pg = run.progress or {} -%}
+    {# CSP allows no inline styles – the fill comes from a class in 5 % steps -#}
+    {% set share = ((20 * pg.done / pg.total) | round | int) * 5 if pg.total and pg.done is not none else none -%}
     <span class="row-action rollback-meter {{ 'indeterminate' if share is none else 'p-%d' % share }}" role="progressbar" aria-label="Full rollback running" tabindex="0"
           aria-valuetext="{{ pg.label or 'Rolling back' }}"
           {% if share is not none %}aria-valuenow="{{ share }}" aria-valuemin="0" aria-valuemax="100"{% endif %}
           data-tip="{{ pg.label or 'Rolling back' }}"><span>{% if share is not none %}Revoking {{ pg.done }}/{{ pg.total }}{% else %}{{ pg.short or "Rolling back" }}{% endif %}</span></span>
-    {% elif run.rolled_back %}
+    {% elif run.rolled_back -%}
     <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">
       <button type="submit" class="row-action secondary outline" aria-label="Delete run {{ run.id }}">Delete</button>
     </form>
-    {% elif run.status in ("pending", "running", "renewing") %}
+    {% elif run.status in ("pending", "running", "renewing") -%}
     <span data-tip="The run is still busy" tabindex="0"><button type="button" class="row-action outline" disabled>Full rollback</button></span>
-    {% else %}
+    {% else -%}
     <form method="post" action="/runs/{{ run.id }}/cleanup" class="inline" hx-post="/runs/{{ run.id }}/cleanup"
           hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Roll back run {{ run.id }}? Revokes its certificates and removes everything it created." data-confirm-label="Roll back">
       <input type="hidden" name="mode" value="full">

@@ -56,6 +56,11 @@ async def remove_run(run_id: str) -> int:
     return (await _call("DELETE", f"/runs/{run_id}"))["removed"]
 
 
+async def labelled_runs() -> list[str]:
+    """The run IDs that minion containers exist for (running or not)."""
+    return (await _call("GET", "/runs"))["runs"]
+
+
 # The agent's lifecycle as its log shows it (TrustEdge 26.6, INFO level) – the latest matching line wins
 AGENT = ((re.compile(r"Starting connection to MQTT endpoint"), "connecting"),
          (re.compile(r"Connected to endpoint|Connection established to MQTT"), "online"),
