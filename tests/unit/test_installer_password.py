@@ -47,7 +47,7 @@ def sh(tmp_path):
         _executable(bin_dir / name, f'#!/bin/sh\necho "{name} $*" >> "$CALLS"\n' + {
             "docker": 'case "$1" in inspect) echo "$HEALTH" ;; compose) shift; '
                       'case "$*" in *" ps -q "*) [ -n "$APP_RUNNING" ] && echo 4f2a9c ;; '
-                      '*" logs "*) printf "%s\\n" "$COMPOSE_LOGS" ;; esac ;; esac\nexit 0\n',
+                      '*" logs "*) cat "$COMPOSE_LOGS_FILE" ;; esac ;; esac\nexit 0\n',
             "openssl": 'case "$1" in rand) echo "rotated$$secret" ;; esac\nexit 0\n',
             "curl": 'case "$*" in *"/healthz"*) exit 0 ;; *"/login"*) printf "%s" "$LOGIN_PAGE"; exit 0 ;; '
                     '*) printf "302 https://192.0.2.10/"; exit 0 ;; esac\n',
@@ -60,8 +60,11 @@ def sh(tmp_path):
         else:
             env_file.write_text(env_lines)
         calls.unlink(missing_ok=True)
+        # The log goes through a file: Linux caps a single environment string at 128 KB.
+        logs_file = tmp_path / "compose.log"
+        logs_file.write_text(env.pop("COMPOSE_LOGS", "") + "\n")
         variables = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "INSTALL_DIR": str(install),
-                     "CALLS": str(calls), "HEALTH": "healthy", "APP_RUNNING": "1", "COMPOSE_LOGS": "",
+                     "CALLS": str(calls), "HEALTH": "healthy", "APP_RUNNING": "1", "COMPOSE_LOGS_FILE": str(logs_file),
                      "LOGIN_PAGE": "", "hosts": "demo.local", "port": "443", "http_port": "80",
                      "default_sni": "192.0.2.10", "ref": "v9.9.9", "reset_password": "true"} | env
         script = (PRELUDE + 'compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrator "$@"; }\n'
