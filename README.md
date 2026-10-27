@@ -76,6 +76,19 @@ are set). The files are checked at every start; if something is wrong,
 
 The DTM connection (host, account, API key) is entered in the web UI after the first login.
 
+## Development
+
+`scripts/dev-up` starts the full stack locally from the working tree with live reload (Docker required) and
+prints the URL – by default `https://localhost:9443` (self-signed; ports via `DEV_HTTPS_PORT`/`DEV_HTTP_PORT`).
+`scripts/dev-up logs` follows the app log, `scripts/dev-up down` stops it. Local state (generated `.env`, TLS
+pair, data) lives in `.local/dev/`.
+
+Dev builds show version, commit and build time in the footer (`GET /version` in every build) and add a
+**Feedback** button: pick an element, comment, save – each item lands as JSON plus screenshot in
+`.local/dev/data/feedback/` with `status` `open`/`done`. The overlay's code (`app/devtools/`, with vendored
+[html2canvas](https://html2canvas.hertzen.com) and [@medv/finder](https://github.com/antonmedv/finder), both MIT)
+is excluded from every image by `.dockerignore`.
+
 ## Release notes
 
 [docs/releases](docs/releases)

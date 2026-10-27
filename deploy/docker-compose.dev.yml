@@ -1,0 +1,20 @@
+# Local development, on top of docker-compose.yml – used by scripts/dev-up, not by the installer.
+# The code comes from the working tree (DEV_REPO) and reloads on every change; DEV_MODE adds the feedback
+# overlay, whose code exists only in the working tree, never in an image.
+services:
+  app:
+    environment:
+      DEV_MODE: "1"
+    volumes:
+      - ${DEV_REPO:?run scripts/dev-up}/app:/srv/app:ro
+    command: ["uvicorn", "app.main:build", "--factory", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*", "--no-server-header",
+              "--reload", "--reload-dir", "/srv/app"]
+  tls:
+    volumes:
+      - ${DEV_REPO:?run scripts/dev-up}/app:/srv/app:ro
+  launcher:
+    volumes:
+      - ${DEV_REPO:?run scripts/dev-up}/app:/srv/app:ro
+    command: ["uvicorn", "app.launcher:api", "--host", "0.0.0.0", "--port", "8080", "--no-server-header",
+              "--reload", "--reload-dir", "/srv/app"]

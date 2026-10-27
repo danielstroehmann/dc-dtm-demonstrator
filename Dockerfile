@@ -11,8 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
  && mkdir -p /data && chown app /data
 COPY app ./app
 
+# Build identity (/version, footer): CI passes tag or branch, commit and build time; scripts/dev-up the same from git.
 ARG APP_VERSION=dev
-ENV APP_VERSION=${APP_VERSION}
+ARG GIT_SHA=""
+ARG BUILD_TIME=""
+ENV APP_VERSION=${APP_VERSION} GIT_SHA=${GIT_SHA} BUILD_TIME=${BUILD_TIME}
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s \

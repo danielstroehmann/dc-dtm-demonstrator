@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Starts the demonstrator locally from this working tree with live reload: the full stack of
+# deploy/docker-compose.yml plus deploy/docker-compose.dev.yml (dev mode: feedback overlay, build identity
+# in the footer). State (.env with a generated JWT secret, self-signed TLS pair, data incl. feedback) lives in
+# .local/dev/ – gitignored.
+#   scripts/dev-up          build the image from this tree, start or update the stack, print the URL
+#   scripts/dev-up logs     follow the app's log
+#   scripts/dev-up down     stop the stack (state in .local/dev/ is kept)
+# DEV_HTTPS_PORT / DEV_HTTP_PORT pick the ports (default 9443 / 9080).
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+dir="$repo/.local/dev"
+name=$(basename "$repo" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_\n-' '-')
+project="dtm-dev-$name"  # one stack per checkout
+export DEV_REPO="$repo" DEMONSTRATOR_IMAGE="demonstrator:$project"
+export HTTPS_PORT="${DEV_HTTPS_PORT:-9443}" HTTP_PORT="${DEV_HTTP_PORT:-9080}"
+export SITE_HOSTS=localhost DEFAULT_SNI=localhost TLS_CERT_FILE=./tls/cert.pem TLS_KEY_FILE=./tls/key.pem
+compose() {
+	docker compose -p "$project" --project-directory "$dir" \
+		-f "$repo/deploy/docker-compose.yml" -f "$repo/deploy/docker-compose.dev.yml" "$@"
+}
+case "${1:-up}" in
+	down) compose down --remove-orphans; exit ;;
+	logs) compose logs -f app; exit ;;
+	up) ;;
+	*) echo "usage: scripts/dev-up [up|logs|down]" >&2; exit 2 ;;
+esac
+
+# Owners as install.sh sets them (TLS root, data the app's uid) – needs sudo on Linux; Docker Desktop maps owners.
+as_root=""; [ "$(uname)" = Linux ] && as_root="sudo"
+mkdir -p "$dir/tls" "$dir/tls-live" "$dir/caddy-data" "$dir/data"
+cp "$repo/deploy/Caddyfile" "$dir/Caddyfile"
+if [ ! -s "$dir/.env" ]; then
+	(umask 077 && printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >"$dir/.env")
+fi
+if ! $as_root test -s "$dir/tls/cert.pem"; then
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 825 -subj "/CN=localhost" \
+		-addext "subjectAltName=DNS:localhost" -keyout "$dir/tls/key.pem" -out "$dir/tls/cert.pem" 2>/dev/null
+	chmod 600 "$dir/tls/key.pem"
+	if [ -n "$as_root" ]; then
+		$as_root chown -R 0:0 "$dir/tls" "$dir/tls-live"
+		$as_root chown 10001 "$dir/data"
+	fi
+fi
+# UC-8 minions join this network (install.sh creates it on a real install).
+docker network inspect dtm-minions >/dev/null 2>&1 || docker network create dtm-minions >/dev/null
+
+sha=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
+[ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ] || sha="$sha-dirty"
+docker build -q -t "$DEMONSTRATOR_IMAGE" \
+	--build-arg APP_VERSION="$(git -C "$repo" describe --tags --always 2>/dev/null || echo dev)" \
+	--build-arg GIT_SHA="$sha" --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" >/dev/null
+compose up -d --pull never --remove-orphans
+
+url="https://localhost:$HTTPS_PORT"
+for _ in $(seq 1 60); do
+	if curl -fsk "$url/healthz" >/dev/null; then
+		echo "Demonstrator (dev, live reload from $repo): $url"
+		exit 0
+	fi
+	sleep 1
+done
+compose logs tls proxy app
+echo "dev-up: $url/healthz not reachable" >&2
+exit 1
