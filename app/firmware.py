@@ -8,6 +8,7 @@ artifact + release robot-firmware-<n>-<figure>-<colour> in the permanent divisio
 by every later run (re-enabled if someone disabled them). Only the deployment belongs to a run – the rollback aborts
 it, and it stays in DTM as aborted."""
 
+import html
 import io
 import json
 import random
@@ -74,7 +75,7 @@ def svg(look: dict, label: str | None = None) -> str:
     character = look.get("character") if look.get("character") in FIGURES else FACTORY["character"]
     color = look.get("color") if COLOR.fullmatch(str(look.get("color"))) else FACTORY["color"]
     return (f'<svg class="dancer {character}" viewBox="0 0 64 64" role="img" '
-            f'aria-label="{label or "Firmware " + semver(look)}">{FIGURES[character].replace("currentColor", color)}</svg>')
+            f'aria-label="{html.escape(label or "Firmware " + semver(look))}">{FIGURES[character].replace("currentColor", color)}</svg>')
 
 
 def semver(look: dict) -> str:
