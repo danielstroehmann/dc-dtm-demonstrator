@@ -17,7 +17,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import certs, dtm, enrollment
+from . import certs, dtm, enrollment, minions
 from .apicalls import ApiCalls
 from .dtm import DTMClient, DTMError
 from .evergreen import LIST, by_name, common_names, create_division, keygen_command, prefix, rates, use_profile
@@ -27,7 +27,7 @@ PROTOCOLS = {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}
 AUTHS = {"apikey": "API key", "passcode": "Passcode", "certificate": "Factory certificate"}
 IDENTITIES = {"serial": ("Serial number", "serial_number"), "mac": ("MAC address", "mac_address")}
 MAX_DEVICES = 100
-MAX_RENEWALS = 5  # rounds – each renews every device and consumes DTM requests (the route checks it)
+MAX_RENEWALS = 5  # per device – each renewal consumes DTM requests (the route checks it)
 ESTIMATE_DEVICES = 1000
 LIST_RETRIES = 5  # the device's certificate list lags a moment behind an issuance
 DEVICE_DESCRIPTION = "dc-dtm-demonstrator run – safe to delete"
@@ -157,44 +157,10 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
         spec = dtm.PROFILE_RENEWAL_CMP if "cmpv2" in protocols else dtm.PROFILE_RENEWAL
         profile_id = await use_profile(client, api, store, run_id, p["use_case"], spec, variables, log)
 
-        policy_name = f"{base}-policy"
-        log(f"Creating certificate policy {policy_name} ({' + '.join(dict.fromkeys(PROTOCOLS[x] for x in (protocol, p['field'])))}, "
-            f"device group required, {p['ca_name']})")
-        args = {"profile_id": profile_id, "ica_id": p["ca_id"], "key_type": p["key_type"]}
-        args |= {"protocols": protocols}
-        extra = {"auth_policy_id": auth_policy_id}
-        shown = args | {"profile_id": "{PROFILE_ID}", "ica_id": "{ICA_ID}",
-                        "auth_policy_id": "{AUTH_POLICY_ID}" if auth_policy_id else None}
-        body = dtm.device_policy_body(name="{RUN_NAME}-policy", division_id="{DIVISION_ID}", **shown)
-        methods = " + ".join(dict.fromkeys(PROTOCOLS[x] for x in protocols))
-        policy_id = await api.timed(
-            f"Create the certificate policy ({methods}, only for devices of a group)", "POST", dtm.POLICIES,
-            client.create_device_policy(name=policy_name, division_id=division_id, **args, **extra),
-            spec={"method": "POST", "path": dtm.POLICIES, "body_file": "policy.json", "json": body}, phase="setup")
-        api.add("Look up the policy ID by its name", "GET", dtm.POLICIES, None,
-                spec={"method": "GET", "path": dtm.POLICIES, "query": LIST,
-                      "capture": by_name("POLICY_ID", "{RUN_NAME}-policy")}, phase="setup")
-        store.add_object(run_id, "policy", policy_id, policy_name)
-        variables["POLICY_ID"] = policy_id
-        cmp_id, ca_chain_pem = await enrollment.read_endpoint(client, api, policy_id,
-                                                              "cmpv2" if "cmpv2" in protocols else protocol, variables)
-
-        group_name = f"{base}-group"
-        log(f"Creating device group {group_name} – policy assigned, {attribute} → common name")
-        group_id = await api.timed(
-            f"Create the device group (policy assigned, {attribute} → common name)", "POST", dtm.DEVICE_GROUPS,
-            client.create_device_group(group_name, division_id, policy_id, attribute),
-            spec={"method": "POST", "path": dtm.DEVICE_GROUPS, "body_file": "device-group.json",
-                  "json": dtm.device_group_body("{RUN_NAME}-group", "{DIVISION_ID}", "{DTM_ACCOUNT_ID}", "{POLICY_ID}",
-                                                attribute)},
-            phase="setup")
-        api.add("Look up the device group ID by its name", "GET", dtm.DEVICE_GROUPS, None,
-                spec={"method": "GET", "path": dtm.DEVICE_GROUPS, "query": LIST,
-                      "capture": by_name("GROUP_ID", "{RUN_NAME}-group")}, phase="setup")
-        store.add_object(run_id, "device_group", group_id, group_name)
-        variables["GROUP_ID"] = group_id
+        policy_id, cmp_id, ca_chain_pem, group_id = await setup_group(
+            client, api, store, run_id, base, division_id, profile_id, p, protocols, auth_policy_id, attribute, variables, log)
         log("DTM is configured for this run", "success")
-        result |= {"division": f"{base}-division", "policy": policy_name, "group": group_name, "cmp_id": cmp_id,
+        result |= {"division": f"{base}-division", "policy": f"{base}-policy", "group": f"{base}-group", "cmp_id": cmp_id,
                    "identity": label}
 
         with tempfile.TemporaryDirectory(prefix="dtm-uc06-") as tmp:
@@ -223,6 +189,48 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
         store.update_run(run_id, status="failed", error=type(exc).__name__, progress=None, finished_at=now(),
                          result=result)
         raise
+
+
+async def setup_group(client: DTMClient, api: ApiCalls, store: Store, run_id: str, base: str, division_id: str,
+                      profile_id: str, p: dict, protocols: tuple[str, ...], auth_policy_id: str | None, attribute: str, variables: dict,
+                      log, also: tuple[str, ...] = ()) -> tuple[str, str | None, str, str]:
+    """The run's certificate policy (only for devices of a group) and its device group, whose mapping files a
+    certificate under the device by attribute → common name. UC-6 and UC-7.
+    Returns (policy ID, CMPv2 endpoint ID, CA chain PEM, group ID)."""
+    policy_name = f"{base}-policy"
+    methods = " + ".join(dict.fromkeys(PROTOCOLS[x] for x in protocols))
+    log(f"Creating certificate policy {policy_name} ({methods}, device group required, {p['ca_name']})")
+    args = {"profile_id": profile_id, "ica_id": p["ca_id"], "key_type": p["key_type"], "protocols": protocols}
+    shown = args | {"profile_id": "{PROFILE_ID}", "ica_id": "{ICA_ID}",
+                    "auth_policy_id": "{AUTH_POLICY_ID}" if auth_policy_id else None}
+    body = dtm.device_policy_body(name="{RUN_NAME}-policy", division_id="{DIVISION_ID}", **shown)
+    policy_id = await api.timed(
+        f"Create the certificate policy ({methods}, only for devices of a group)", "POST", dtm.POLICIES,
+        client.create_device_policy(name=policy_name, division_id=division_id, auth_policy_id=auth_policy_id, **args),
+        spec={"method": "POST", "path": dtm.POLICIES, "body_file": "policy.json", "json": body}, phase="setup")
+    api.add("Look up the policy ID by its name", "GET", dtm.POLICIES, None,
+            spec={"method": "GET", "path": dtm.POLICIES, "query": LIST,
+                  "capture": by_name("POLICY_ID", "{RUN_NAME}-policy")}, phase="setup")
+    store.add_object(run_id, "policy", policy_id, policy_name)
+    variables["POLICY_ID"] = policy_id
+    cmp_id, ca_chain_pem = await enrollment.read_endpoint(client, api, policy_id,
+                                                          "cmpv2" if "cmpv2" in protocols else protocols[0], variables)
+
+    group_name = f"{base}-group"
+    log(f"Creating device group {group_name} – policy assigned, {attribute} → common name")
+    group_id = await api.timed(
+        f"Create the device group (policy assigned, {attribute} → common name)", "POST", dtm.DEVICE_GROUPS,
+        client.create_device_group(group_name, division_id, policy_id, attribute, also),
+        spec={"method": "POST", "path": dtm.DEVICE_GROUPS, "body_file": "device-group.json",
+              "json": dtm.device_group_body("{RUN_NAME}-group", "{DIVISION_ID}", "{DTM_ACCOUNT_ID}", "{POLICY_ID}",
+                                            attribute, also)},
+        phase="setup")
+    api.add("Look up the device group ID by its name", "GET", dtm.DEVICE_GROUPS, None,
+            spec={"method": "GET", "path": dtm.DEVICE_GROUPS, "query": LIST,
+                  "capture": by_name("GROUP_ID", "{RUN_NAME}-group")}, phase="setup")
+    store.add_object(run_id, "device_group", group_id, group_name)
+    variables["GROUP_ID"] = group_id
+    return policy_id, cmp_id, ca_chain_pem, group_id
 
 
 async def _register(client: DTMClient, api: ApiCalls, store: Store, run_id: str, run_dir: Path, station,
@@ -345,27 +353,51 @@ def _seed_renewal_steps(api: ApiCalls, p: dict) -> None:
                       "Move-Item -Force device-new.key device.key"}})
 
 
-def _count_renewal(calls: list[dict], seconds: float, count: int) -> None:
+def count_step(calls: list[dict], phase: str, seconds: float, count: int) -> None:
+    """A per-device action adds its count and time to the phase's timed step(s) of the reproducible steps."""
     for call in calls:
-        if call.get("phase") == "renewal" and call["method"] in ("PUT", "POST"):
+        if call.get("phase") == phase and call["method"] in ("PUT", "POST"):
             call["count"] += count
             call["seconds"] = round((call["seconds"] or 0) + seconds, 2)
 
 
-async def renew(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> None:
-    """Per click: every device renews with a new key – one after another, timed. Whatever happens, the
-    run leaves "renewing" again."""
+def renewals_of(result: dict, name: str) -> int:
+    """Renewal attempts of one device – the route and the tile use the same limit."""
+    return sum(1 for r in result.get("renewals") or [] if r.get("device") == name)
+
+
+def commit(store: Store, run_id: str, change) -> dict:
+    """Read, change and write the run's result without an await in between – devices act concurrently, each
+    task commits only its own device's changes onto the latest result."""
+    result = store.get_run(run_id)["result"]
+    change(result)
+    store.update_run(run_id, result=result)
+    return result
+
+
+def device_of(result: dict, name: str) -> dict:
+    return next(d for d in result["devices"] if d["name"] == name)
+
+
+async def device_action(store: Store, run_id: str, name: str, label: str, act) -> None:
+    """One device, per click (the route marked it busy). Devices act independently; whatever happens, the
+    device is no longer busy afterwards."""
     log = lambda msg, level="step": store.add_event(run_id, msg, level)  # noqa: E731
     try:
-        await _renew(store, client, run_id, run_dir, log)
-    except (DTMError, ValueError, OSError) as exc:
-        log(f"Renewal failed: {exc}", "error")
+        await act(log)
+    except (DTMError, ValueError, OSError, minions.MinionError) as exc:
+        log(f"{label} of {name} failed: {exc}", "error")
     except Exception as exc:
-        log(f"Renewal failed unexpectedly: {type(exc).__name__}", "error")
+        log(f"{label} of {name} failed unexpectedly: {type(exc).__name__}", "error")
         raise
     finally:
-        store.claim_status(run_id, "renewing", "completed")
-        store.update_run(run_id, progress=None)
+        commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != name]))
+
+
+async def renew(store: Store, client: DTMClient, run_id: str, run_dir: Path, name: str) -> None:
+    """Per click: one device renews with a new key – timed."""
+    await device_action(store, run_id, name, "Renewal",
+                        lambda log: _renew(store, client, run_id, run_dir, name, log))
 
 
 async def _renew_one(client: DTMClient, p: dict, result: dict, run_dir: Path, policy_id: str, group_id: str,
@@ -402,42 +434,41 @@ async def _renew_one(client: DTMClient, p: dict, result: dict, run_dir: Path, po
     return info | {"_key": key_pem}, seconds, keygen
 
 
-async def _renew(store: Store, client: DTMClient, run_id: str, run_dir: Path, log) -> None:
+async def _renew(store: Store, client: DTMClient, run_id: str, run_dir: Path, name: str, log) -> None:
     run_ = store.get_run(run_id)
-    p, result = run_["params"], run_["result"]
-    devices = result["devices"]
+    p, result = run_["params"], run_["result"]  # a snapshot – changes are committed onto the latest result
+    device = device_of(result, name)
     policies, groups = store.objects(run_id, "policy"), store.objects(run_id, "device_group")
     if not policies or not groups:
         raise DeviceError("the run has no certificate policy or device group any more")
     policy_id, group_id = policies[0]["dtm_id"], groups[0]["dtm_id"]
-    log(f"Renewing {len(devices)} device(s) one by one via {PROTOCOLS[p['field']]} – new key, same identity")
-    started_wall = time.time()
-    times, keygen, ok = [], 0.0, False
+    log(f"Renewing {name} via {PROTOCOLS[p['field']]} – new key, same identity")
+    seconds, ok = None, False
     try:
-        for done, device in enumerate(devices, 1):
-            info, seconds, took = await _renew_one(client, p, result, run_dir, policy_id, group_id, device, log)
-            times.append(seconds)
-            keygen += took
-            key_pem, pem = info.pop("_key", None), info["pem"]
-            certs.save_certificates(run_dir, [info])
-            # Stored at once: a round that breaks off later must not lose what DTM already issued
-            device["issued"] += 1
-            device["certificate_id"] = info.get("certificate_id") or device["certificate_id"]
-            result["certificates"].append(info | {"device": device["name"]})
-            result["certificate_total"] = len(result["certificates"])
-            store.update_run(run_id, result=result, progress={
-                "label": f"Renewing {len(devices)} devices", "started": started_wall, "total": len(devices),
-                "done": done})
-            if key_pem:  # only now the device switches to the new pair – the result knows the certificate
-                enrollment._save_device(run_dir, key_pem, pem, device_dir(run_dir, device["name"]))
-        await read_devices(client, devices)  # the new certificates must be filed under the same devices
+        info, seconds, _keygen = await _renew_one(client, p, result, run_dir, policy_id, group_id, device, log)
+        key_pem, pem = info.pop("_key", None), info["pem"]
+        certs.save_certificates(run_dir, [info])
+
+        def issued(r: dict) -> None:  # stored at once: a later failure must not lose what DTM already issued
+            d = device_of(r, name)
+            d["issued"] += 1
+            d["certificate_id"] = info.get("certificate_id") or d["certificate_id"]
+            d["last"] = {"action": "Renewed", "seconds": round(seconds, 2)}
+            r["certificates"].append(info | {"device": name})
+            r["certificate_total"] = len(r["certificates"])
+            count_step(r["api_calls"], "renewal", seconds, 1)
+            device.update(d)
+        commit(store, run_id, issued)
+        if key_pem:  # only now the device switches to the new pair – the result knows the certificate
+            enrollment._save_device(run_dir, key_pem, pem, device_dir(run_dir, name))
+        await read_devices(client, [device])  # the new certificate must be filed under the same device
+        commit(store, run_id, lambda r: device_of(r, name).update(certificates=device["certificates"],
+                                                                  certificate_id=device["certificate_id"]))
         ok = True
     finally:
-        # Every round counts against the limit, a broken one too – a device that always fails must not
-        # let the clicks renew the others without end
-        result["renewals"].append({**(_stats(times, keygen) if times else {}), "devices": len(times), "at": now(),
-                                   **({} if ok else {"failed": True})})
-        _count_renewal(result["api_calls"], sum(times), len(times))
-        store.update_run(run_id, result=result)
-    log(f"{len(times)} device(s) renewed in {sum(times):.2f}s – filed under the same devices; the previous "
-        "certificates stay valid until the rollback", "success")
+        # Every attempt counts against the limit, a broken one too – a device that always fails must not
+        # consume DTM requests without end
+        commit(store, run_id, lambda r: r.setdefault("renewals", []).append(
+            {"device": name, "seconds": round(seconds or 0, 2), "at": now(), **({} if ok else {"failed": True})}))
+    log(f"{name} renewed in {seconds:.2f}s – filed under the same device; the previous certificate stays valid "
+        "until the rollback", "success")

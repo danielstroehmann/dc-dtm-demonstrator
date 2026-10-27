@@ -6,9 +6,10 @@ services:
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}  # only an older .env's password, taken over once
       JWT_SECRET: ${JWT_SECRET}
+      MINION_LAUNCHER: http://launcher:8080  # UC-8: minions only through the launcher below
     volumes:
       - ./data:/data
-    networks: [internal]
+    networks: [internal, launcher]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -67,5 +68,48 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m
 
+  # UC-8 minions. The launcher alone reaches Docker: it builds every minion container itself (minion image, its
+  # network, no mounts, no privileges, labelled with the run) from a few checked values – the web app can ask it
+  # for nothing else. The socket proxy restricts the launcher to containers and images; it cannot check bodies,
+  # which is why the app does not reach it.
+  launcher:
+    image: ${DEMONSTRATOR_IMAGE}
+    restart: unless-stopped
+    command: ["uvicorn", "app.launcher:api", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+    healthcheck:  # the image's check targets the web app's port
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4)"]
+    environment:
+      MINION_DOCKER: http://docker:2375
+      MINION_IMAGE: dtm-minion:${MINION_VERSION:-26.6.3-567}
+      MINION_NETWORK: dtm-minions  # created by install.sh: out to DTM, away from the app
+    networks: [launcher, docker-api]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+
+  docker:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    environment:  # POST enables every writing method on the allowed paths
+      CONTAINERS: 1
+      IMAGES: 1
+      POST: 1
+      EVENTS: 0
+      VERSION: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+    read_only: true
+    tmpfs: [/run, /tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+
 networks:
   internal:
+  launcher:
+    internal: true  # app ↔ launcher only
+  docker-api:
+    internal: true  # launcher ↔ proxy only

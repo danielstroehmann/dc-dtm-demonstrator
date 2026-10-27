@@ -11,7 +11,8 @@ DIALECTS = {"curl": "curl", "wget": "wget", "powershell": "PowerShell 7"}
 # Only the variables the snippets define are tokens – other "{TEXT}" in DTM values stays as is.
 VARIABLES = ("DTM_HOST", "DTM_ACCOUNT_ID", "DIVISION_ID", "POLICY_ID", "JOB_ID", "CSR",
              "AUTH_POLICY_ID", "PROFILE_ID", "PASSCODE", "FACTORY_CERT", "RUN_NAME", "ICA_ID", "RZONE_ID",
-             "GROUP_ID", "DEVICE_ID", "CERT_ID", "DEVICE_NAME", "IDENTITY")
+             "GROUP_ID", "DEVICE_ID", "CERT_ID", "DEVICE_NAME", "IDENTITY", "FIRMWARE_DIVISION_ID", "PAYLOAD_ID",
+             "ARTIFACT_ID", "RELEASE_ID")
 TOKEN = re.compile(r"\{(" + "|".join(VARIABLES) + r")\}")
 # In local commands the shell variables are written out already – only bare {VAR} tokens are replaced.
 COMMAND_TOKEN = re.compile(r"(?<![$\w])\{(" + "|".join(VARIABLES) + r")\}")

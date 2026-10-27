@@ -12,7 +12,12 @@ everything back afterwards with one click.
 - **Passcode-bound device certificates** – one-time passcodes bound to each device's common name; field
   enrollment via EST or CMPv2, with an optional pause to show the passcodes in DTM first.
 - **Managed devices** (Advanced license) – each device is created in DTM and its certificate managed under it;
-  factory enrollment and field renewal via REST, EST or CMPv2.
+  factory enrollment and field renewal via REST, EST or CMPv2, one tile per device.
+- **Retrofit managed devices** (Advanced license) – devices that already carry a manufacturer's device-ID
+  certificate enroll a managed certificate in the field with it (EST or CMPv2).
+- **TrustEdge managed devices** (Advanced license, `one.digicert.com`) – IoT minions: real Docker containers running
+  DigiCert TrustEdge. The factory gives each only a one-time passcode; in the field it enrolls a bootstrap
+  certificate, and the TrustEdge agent fetches its operational certificate and firmware updates over MQTT.
 
 ## Platforms
 

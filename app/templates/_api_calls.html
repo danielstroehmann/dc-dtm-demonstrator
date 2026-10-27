@@ -9,6 +9,7 @@
 {% set recurring = calls | selectattr("phase", "equalto", "recurring") | list if has_phase else calls %}
 {% set renewal = calls | selectattr("phase", "equalto", "renewal") | list if has_phase else [] %}
 {% set field = calls | selectattr("phase", "equalto", "field") | list if has_phase else [] %}
+{% set firmware = calls | selectattr("phase", "equalto", "firmware") | list if has_phase else [] %}
 <article class="card api-calls" id="api-calls">
   <div class="card-head">
     <h2>Reproducible steps</h2>
@@ -40,7 +41,7 @@
   {% if recurring %}
   <section class="box accent">
     <div class="box-head">
-      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory enrollment", "uc05": "Factory provisioning", "uc06": "Device registration"}.get(run.use_case, "Certificate order") }}</h3>
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>{{ {"uc04": "Factory enrollment", "uc05": "Factory provisioning", "uc06": "Device registration", "uc07": "Factory provisioning", "uc08": "Factory provisioning"}.get(run.use_case, "Certificate order") }}</h3>
       <button class="btn-sm outline" data-copy="script-recurring-{{ dialect }}">Copy as script</button>
     </div>
     {% with phase = "recurring", group = recurring %}{% include "_api_call_list.html" %}{% endwith %}
@@ -65,6 +66,16 @@
     </div>
     {% with phase = "renewal", group = renewal %}{% include "_api_call_list.html" %}{% endwith %}
     <pre id="script-renewal-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "renewal") }}</pre>
+  </section>
+  {% endif %}
+  {% if firmware %}
+  <section class="box accent field">
+    <div class="box-head">
+      <h3 class="phase-title"><span class="phase-icon">{{ icon("upload") }}</span>Firmware over the air</h3>
+      <button class="btn-sm outline" data-copy="script-firmware-{{ dialect }}">Copy as script</button>
+    </div>
+    {% with phase = "firmware", group = firmware %}{% include "_api_call_list.html" %}{% endwith %}
+    <pre id="script-firmware-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect, "firmware") }}</pre>
   </section>
   {% endif %}
   <pre id="script-all-{{ dialect }}" hidden>{{ snippets.script(variables, calls, dialect) }}</pre>

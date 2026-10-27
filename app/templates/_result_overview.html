@@ -2,10 +2,57 @@
 {% from "_icons.html" import icon, pill %}
 {% set r = run.result %}
 {# A web UI batch run waiting for the portal has nothing to show yet – no empty card #}
-{% if r.duration_s is defined or r.response or r.portal_values or r.checks %}
+{% if r.duration_s is defined or r.devices or r.response or r.portal_values or r.checks %}
 <article class="card">
   <div class="card-head"><h2>Overview</h2></div>
   {% if r.devices %}{% set done = (r.renewals or []) | rejectattr("failed") | list %}{% set last = done[-1] if done else none %}
+  {# The devices themselves follow as tiles (_devices.html) #}
+  {% set retrofit = run.use_case == "uc07" %}
+  {% if run.use_case == "uc08" %}{% set f = r.factory or {} %}
+  {# UC-8: register + passcode in the factory, the minion's TrustEdge agent in the field #}
+  <div class="phase-pair">
+    <section class="box accent">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>Factory provisioning <small>passcode only</small></h3></div>
+      <div class="metrics metrics-4">
+        <div><small data-tip="Register the device + its passcode, all devices">All devices</small><p class="metric">{{ f.duration_s }} s</p></div>
+        <div><small>Per device</small><p class="metric">{{ "%.2f" | format(f.per_certificate_s or 0) }} s</p></div>
+        <div><small data-tip="Register the devices in DTM">Registration</small><p class="metric">{{ f.create_s }} s</p></div>
+        <div><small data-tip="One-time passcodes, bound to the serial numbers">Passcodes</small><p class="metric">{{ f.passcode_s }} s</p></div>
+      </div>
+    </section>
+    <section class="box accent field">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("container") }}</span>Field enrollment <small>TrustEdge agent</small></h3></div>
+      <div class="metrics metrics-4">
+        <div><small data-tip="IoT minions holding their operational certificate">Operational</small><p class="metric">{{ r.devices | selectattr("issued") | list | length }} / {{ r.devices | length }}</p></div>
+        <div><small data-tip="IoT minion start → operational certificate, median">Per device</small><p class="metric">{{ "%.0f s" | format(r.median_s) if r.median_s is defined else "–" }}</p></div>
+        <div><small data-tip="IoT minions started">Started</small><p class="metric">{{ r.devices | selectattr("container") | list | length }}</p></div>
+        <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
+      </div>
+    </section>
+  </div>
+  {% elif retrofit %}{% set f = r.factory or {} %}
+  {# UC-7: device-ID certificate + registration in the factory, enrollment (and renewal per click) in the field #}
+  <div class="phase-pair">
+    <section class="box accent">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("factory") }}</span>Factory provisioning <small>device-ID certificate</small></h3></div>
+      <div class="metrics metrics-4">
+        <div><small data-tip="Device-ID certificate + register the device, all devices">All devices</small><p class="metric">{{ f.duration_s }} s</p></div>
+        <div><small>Per device</small><p class="metric">{{ "%.2f" | format(f.per_certificate_s or f.duration_s or 0) }} s</p></div>
+        <div><small>Per minute</small><p class="metric">{{ f.per_minute or "–" }}</p></div>
+        <div><small data-tip="Register the device in DTM, all devices">Registration</small><p class="metric">{{ f.create_s }} s</p></div>
+      </div>
+    </section>
+    <section class="box accent field">
+      <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("key") }}</span>Field enrollment <small>{{ protocols[run.params.protocol] }}</small></h3></div>
+      <div class="metrics metrics-4">
+        <div><small data-tip="Round trips of the enrolled devices">Enrolled</small><p class="metric">{{ r.devices | selectattr("issued") | list | length }} / {{ r.devices | length }}</p></div>
+        <div><small data-tip="Median round trip">Per device</small><p class="metric">{{ "%.2f s" | format(r.median_s) if r.median_s is defined else "–" }}</p></div>
+        <div><small data-tip="Per click, per device">Renewals</small><p class="metric">{{ done | length }}</p></div>
+        <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
+      </div>
+    </section>
+  </div>
+  {% else %}
   {# UC-6: registration in the factory, renewal per click – same four columns each #}
   <div class="phase-pair">
     <section class="box accent">
@@ -21,27 +68,14 @@
     <section class="box accent field">
       <div class="box-head"><h3 class="phase-title"><span class="phase-icon">{{ icon("refresh") }}</span>Field renewal <small>{{ {"rest": "REST API", "est": "EST", "cmpv2": "CMPv2"}.get(run.params.field, "REST API") }}</small></h3></div>
       <div class="metrics metrics-4">
-        <div><small data-tip="Last round, all devices">All devices</small><p class="metric">{{ last.duration_s ~ " s" if last else "–" }}</p></div>
-        <div><small>Per device</small><p class="metric">{{ "%.2f s" | format(last.per_certificate_s or last.duration_s) if last else "–" }}</p></div>
-        <div><small>Rounds</small><p class="metric">{{ r.renewals | length }}</p></div>
+        <div><small data-tip="Round trip of the last renewal">Last renewal</small><p class="metric">{{ "%.2f s" | format(last.seconds if last.seconds is defined else last.duration_s) if last else "–" }}</p></div>
+        <div><small data-tip="Devices renewed at least once">Devices renewed</small><p class="metric">{{ done | selectattr("device", "defined") | map(attribute="device") | unique | list | length }}</p></div>
+        <div><small data-tip="Per click, per device">Renewals</small><p class="metric">{{ done | length }}</p></div>
         <div><small>Certificates</small><p class="metric">{{ r.certificate_total }}</p></div>
       </div>
     </section>
   </div>
-  <section class="devices">
-    <div class="box-head"><h3>Devices in DTM</h3></div>
-    <table class="data-table devices-table">
-      <colgroup><col class="c-device"><col class="c-ident"><col class="c-serial"><col class="c-state"><col class="c-until"></colgroup>
-      <thead><tr><th>Device name</th><th>Identity in certificate (CN)</th><th>Certificate</th><th>Status</th><th>Valid until</th></tr></thead>
-      <tbody>{% for d in r.devices %}{% set first_device = loop.first %}{% if not d.certificates %}<tr{% if not first_device %} class="group-start"{% endif %}>
-        <td data-tip="{{ d.name }}">{{ icon("chip") }} {{ d.name }}</td><td class="mono">{{ d.identity }}</td><td class="muted" colspan="3">DTM lists no certificate yet</td></tr>{% endif %}{% for c in d.certificates or [] %}<tr{% if loop.first and not first_device %} class="group-start"{% endif %}>
-        <td data-tip="{{ d.name }}">{% if loop.first %}{{ icon("chip") }} {{ d.name }}{% endif %}</td>
-        <td class="mono" data-tip="{{ (r.identity or 'Identity') ~ ' – DTM matched it to ' ~ d.name }}">{{ c.common_name or d.identity }}</td>
-        <td class="mono" data-tip="{{ c.serial }} · {{ 'renewal' if c.renewed_from else 'registration' }}">{{ c.serial }}</td>
-        <td>{{ pill("active" if c.status == "issued" and not c.renewed else c.status if c.status != "issued" else "renewed") }}</td>
-        <td>{{ c.valid_to }}</td></tr>{% endfor %}{% endfor %}</tbody>
-    </table>
-  </section>
+  {% endif %}
   {% elif r.provisioning %}{% set pv = r.provisioning %}
   {# UC-5: the two phases side by side, in the colours of the reproducible steps; same four columns each #}
   <div class="phase-pair">

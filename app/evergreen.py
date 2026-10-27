@@ -22,6 +22,8 @@ class UseCase:
     key_generation: str  # "server_side" (DTM creates the key pairs) or "client_side" (factory CSRs)
     tags: tuple[str, ...] = ()
     license: str = "essentials"  # "advanced": needs DTM's Advanced license (device management)
+    tip: str = ""  # 2–3 high-level sentences – the tooltip of the tile's icon
+    platform: str = ""  # only this DTM host (UC-8: the TrustEdge agent flow works on US only so far)
 
 
 USE_CASES = {
@@ -47,26 +49,53 @@ USE_CASES = {
         "Renewable device certificates",
         "Factory enrollment of one device via EST or CMPv2, field renewal per click – authenticated by the "
         "certificate the device already holds. No device group, so the Essentials license is enough.",
-        "client_side", ("EST · CMPv2", "Single device", "Renewal per click")),
+        "client_side", ("EST · CMPv2", "Single device", "Renewal per click"),
+        tip="A device gets a six-month certificate in the factory and renews it itself in the field. The certificate "
+            "it already holds authenticates the renewal – no passcode."),
     "uc05": UseCase(
         "Passcode-bound device certificates",
         "The factory only writes a one-time passcode to the device, bound to its common name. Field enrollment "
         "via EST or CMPv2 – DTM checks the request against the passcode and accepts it once.",
-        "client_side", ("EST · CMPv2", "Single · Batch", "One-time passcode")),
+        "client_side", ("EST · CMPv2", "Single · Batch", "One-time passcode"),
+        tip="The factory writes only a one-time passcode to the device, bound to its name. In the field the device "
+            "enrolls with it – DTM accepts the passcode once, and only for that name."),
     "uc06": UseCase(
         "Managed devices",
         "The factory creates each device in DTM and requests its certificate for it – the common name is a serial "
         "number or MAC address, DTM files the certificate under the device. Field renewal per click via EST, CMPv2 "
         "or REST; the new certificate lands under the same device. Needs the Advanced license.",
-        "client_side", ("Advanced license", "Single · Batch", "Renewal per click"), license="advanced"),
+        "client_side", ("Advanced license", "Single · Batch", "Renewal per click"), license="advanced",
+        tip="Every device is created in DTM and its certificate is filed under it – identified by a serial number "
+            "or MAC address. Each device renews individually. Advanced license."),
+    "uc07": UseCase(
+        "Retrofit managed devices",
+        "Devices leave the factory with a device-ID certificate from the manufacturer's own CA (CN = serial number) "
+        "and are registered in DTM by name. The manufacturer's ICA is the trust anchor in DTM. Field enrollment via "
+        "EST or CMPv2: each device gets a managed certificate with its device name, renewable per click. "
+        "Needs the Advanced license.",
+        "client_side", ("Advanced license", "EST · CMPv2", "Device-ID certificate"), license="advanced",
+        tip="Devices already carry a device-ID certificate from the manufacturer's own CA. DTM trusts that CA and "
+            "gives each device a managed, renewable certificate with its name in the field. Advanced license."),
+    "uc08": UseCase(
+        "TrustEdge managed devices",
+        "IoT minions – real Docker containers – run DigiCert TrustEdge. The factory registers each device and gives it only a "
+        "one-time passcode; in the field the agent enrolls its bootstrap certificate (serial number) and then "
+        "fetches its operational certificate (device name) over MQTT. Needs the Advanced license.",
+        "client_side", ("Advanced license", "TrustEdge agent", "IoT minions"), license="advanced",
+        tip="IoT minions – containers – run the real TrustEdge agent. With only a one-time passcode from the factory, each "
+            "IoT minion gets its bootstrap certificate and then its operational certificate from DTM. Advanced license, "
+            "US connections.", platform="one.digicert.com"),
 }
 # The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.
 GUIDE = UseCase(
     "Evergreen device certificates",
     "Long-lived device certificates for the factory – answer a few questions and the run shows the matching "
     "flow end to end.",
-    "client_side", ("REST · EST · CMPv2 · SCEP", "Single · Batch", "Server-side or factory keys"))
-CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"], "uc05": USE_CASES["uc05"], "uc06": USE_CASES["uc06"]}
+    "client_side", ("REST · EST · CMPv2 · SCEP", "Single · Batch"),
+    tip="Long-lived device certificates issued in the factory for the device's whole life. The keys come from DTM "
+        "or the factory; the certificates one by one or as a batch.")
+CATALOG = {"evergreen": GUIDE, "uc04": USE_CASES["uc04"], "uc05": USE_CASES["uc05"], "uc06": USE_CASES["uc06"],
+           "uc07": USE_CASES["uc07"], "uc08": USE_CASES["uc08"]}
 # What the UI calls a run's use case: the catalog entry it was started from (no internal UC numbers).
 DISPLAY_NAMES = {uc: (GUIDE if uc in ("uc01", "uc02", "uc03") else use_case).title for uc, use_case in USE_CASES.items()}
 

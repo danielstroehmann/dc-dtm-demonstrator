@@ -116,3 +116,15 @@ document.querySelectorAll("form[data-guide]").forEach((form) => {
   form.addEventListener("change", () => applyGuide(form));
   applyGuide(form);
 });
+
+// Countdowns (UC-8 tiles: the TrustEdge agent's next connect) – the server renders the target time, the browser ticks.
+// Also right after htmx swaps a polled tile in, so the fresh tile never shows its placeholder.
+function tickCountdowns() {
+  for (const el of document.querySelectorAll("[data-until]")) {
+    const left = Math.round((Date.parse(el.dataset.until) - Date.now()) / 1000);
+    el.textContent = left > 0 ? `next connect in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "connecting any moment";
+  }
+}
+setInterval(tickCountdowns, 1000);
+document.addEventListener("htmx:afterSwap", tickCountdowns);
+document.addEventListener("DOMContentLoaded", tickCountdowns);

@@ -45,11 +45,15 @@ async def start(store, fake: FakeDTM, run_id: str, tmp_path, **overrides) -> dic
     return store.get_run(run_id)
 
 
-async def renew(store, fake: FakeDTM, run_id: str, tmp_path) -> dict:
-    assert store.claim_status(run_id, "completed", "renewing")  # what POST /runs/{id}/renew does first
+async def renew(store, fake: FakeDTM, run_id: str, tmp_path, only: list[str] | None = None) -> dict:
+    """Every device (or only these) renews once, one after another – each as POST /runs/{id}/devices/{name}/renew
+    starts it: marked busy first, then the device's own task."""
     client = fake.client()
     try:
-        await devices.renew(store, client, run_id, tmp_path / "runs" / run_id)
+        for name in only or [d["name"] for d in store.get_run(run_id)["result"]["devices"]]:
+            devices.commit(store, run_id, lambda r, n=name: r.update(busy=[*(r.get("busy") or []), n]))
+            await devices.renew(store, client, run_id, tmp_path / "runs" / run_id, name)
+            assert name not in (store.get_run(run_id)["result"].get("busy") or [])  # never stays busy
     finally:
         await client.aclose()
     return store.get_run(run_id)
@@ -312,10 +316,12 @@ async def test_renewal_rounds_land_under_the_same_devices(store, enroll_net, cmp
     run = await renew(store, fake, "r1", tmp_path)
     assert run["status"] == "completed" and run["progress"] is None, events(store, "r1")
     r = run["result"]
-    assert len(r["renewals"]) == 2 and r["certificate_total"] == 6
-    assert "Renewal failed" not in events(store, "r1")
+    assert len(r["renewals"]) == 4 and r["certificate_total"] == 6 and not r.get("busy")
+    assert sorted(x["device"] for x in r["renewals"]) == sorted(names("r1", 2) * 2)
+    assert not [x for x in r["renewals"] if x.get("failed")] and "failed" not in events(store, "r1")
     for d in r["devices"]:
         assert d["id"] in before and d["issued"] == 3 and len(d["certificates"]) == 3
+        assert devices.renewals_of(r, d["name"]) == 2 and d["last"]["action"] == "Renewed"
         assert {c["common_name"] for c in d["certificates"]} == {d["identity"]}
         records = filed(fake, d["id"])
         assert {c["common_name"] for c in records} == {d["identity"]} and len(records) == 3
@@ -337,6 +343,7 @@ async def test_renewal_rounds_land_under_the_same_devices(store, enroll_net, cmp
 
 async def test_failed_renewal_keeps_what_dtm_issued_and_frees_the_run(store, fake, tmp_path):
     await start(store, fake, "r2", tmp_path, mode="batch", count=2)
+    first, second = names("r2", 2)
     seen = []
 
     def second_fails(request):
@@ -344,16 +351,18 @@ async def test_failed_renewal_keeps_what_dtm_issued_and_frees_the_run(store, fak
         return _error(500, "upstream trouble") if len(seen) == 2 else None
     fake.fail["renew"] = second_fails
     run = await renew(store, fake, "r2", tmp_path)
-    assert run["status"] == "completed" and run["progress"] is None
-    assert "Renewal failed" in events(store, "r2")
+    assert run["status"] == "completed" and run["progress"] is None and not run["result"].get("busy")
+    assert f"Renewal of {second} failed" in events(store, "r2") and f"Renewal of {first} failed" not in events(store, "r2")
     r = run["result"]
-    # the broken round counts against the limit; the first device's new certificate is recorded
-    assert [x.get("failed") for x in r["renewals"]] == [True] and r["renewals"][0]["devices"] == 1
+    # devices act independently: the first one's new certificate is recorded, the broken attempt counts
+    assert [(x["device"], x.get("failed")) for x in r["renewals"]] == [(first, None), (second, True)]
     assert r["certificate_total"] == 3
+    assert [d["issued"] for d in r["devices"]] == [2, 1] and "last" not in r["devices"][1]
     del fake.fail["renew"]
-    run = await renew(store, fake, "r2", tmp_path)
-    assert [x.get("failed") for x in run["result"]["renewals"]] == [True, None], events(store, "r2")
-    assert run["result"]["certificate_total"] == 5
+    run = await renew(store, fake, "r2", tmp_path, only=[second])
+    assert [x.get("failed") for x in run["result"]["renewals"]] == [None, True, None], events(store, "r2")
+    assert run["result"]["certificate_total"] == 4
+    assert devices.renewals_of(run["result"], second) == 2 and devices.renewals_of(run["result"], first) == 1
 
 
 async def test_renewal_after_a_timed_out_renewal_continues(store, fake, tmp_path):
@@ -370,7 +379,7 @@ async def test_renewal_after_a_timed_out_renewal_continues(store, fake, tmp_path
         raise httpx.ReadTimeout("fake timeout", request=request)
     fake.fail["renew"] = completed_server_side
     run = await renew(store, fake, "r3", tmp_path)
-    assert run["status"] == "completed" and "Renewal failed" in events(store, "r3")
+    assert run["status"] == "completed" and f"Renewal of {device['name']} failed" in events(store, "r3")
     del fake.fail["renew"]
     run = await renew(store, fake, "r3", tmp_path)
     assert [x.get("failed") for x in run["result"]["renewals"]] == [True, None], events(store, "r3")
@@ -392,6 +401,7 @@ async def test_renewal_without_group_any_more_is_reported(store, fake, tmp_path)
     run = await renew(store, fake, "r5", tmp_path)
     assert run["status"] == "completed" and "no certificate policy or device group" in events(store, "r5")
     assert "renew" not in fake.route_order()
+    assert run["result"]["renewals"] == [] and not run["result"].get("busy")  # no DTM request was made
 
 
 # --- rollback ----------------------------------------------------------------------------------------

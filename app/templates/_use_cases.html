@@ -1,6 +1,6 @@
 {% from "_icons.html" import icon %}
 {# Use-case tiles: GET form so the selected connection travels along with the chosen use case. #}
-{% set icons = {"evergreen": "infinity", "uc04": "refresh", "uc05": "shield", "uc06": "chip"} %}
+{% set icons = {"evergreen": "infinity", "uc04": "refresh", "uc05": "shield", "uc06": "chip", "uc07": "exchange", "uc08": "container"} %}
 <form method="get">
   {% if connections | length > 1 %}
   <label class="conn-select">Connection
@@ -10,13 +10,17 @@
   </label>
   {% elif selected %}<input type="hidden" name="connection" value="{{ selected }}">{% endif %}
   <div class="tiles">
+    {% set hosts = connections | map(attribute="host") | list %}
     {% for key, uc in catalog.items() %}
-    <article class="tile">
-      <div class="tile-top"><span class="tile-icon{% if uc.license == "advanced" %} advanced{% endif %}"{% if uc.license == "advanced" %} data-tip="Advanced license"{% endif %}>{{ icon(icons.get(key, "key")) }}</span>
+    {# A use case bound to a platform (or to the minion runtime) is shown, but greyed out, without it #}
+    {% set missing = ("Needs a connection to " ~ uc.platform) if uc.platform and uc.platform not in hosts
+                     else ("Needs the IoT minion runtime (Docker)" if key == "uc08" and not minions_ready else "") %}
+    <article class="tile{% if missing %} unavailable{% endif %}">
+      <div class="tile-top"><span class="tile-icon{% if uc.license == "advanced" %} advanced{% endif %}{% if key == "uc08" %} dark{% endif %}" data-tip="{{ uc.tip or ('Advanced license' if uc.license == 'advanced' else uc.title) }}">{{ icon(icons.get(key, "key")) }}</span>
         <h3>{{ uc.title }}</h3></div>
       <ul class="tags">{% for tag in uc.tags %}<li>{{ tag }}</li>{% endfor %}</ul>
-      <div class="tile-foot"><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"
-        aria-label="Start {{ uc.title }}">{{ icon("play") }}Start</button></div>
+      <div class="tile-foot"><span {% if missing %}data-tip="{{ missing }}"{% endif %}><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"
+        aria-label="Start {{ uc.title }}" {% if missing %}disabled{% endif %}>{{ icon("play") }}Start</button></span></div>
     </article>
     {% endfor %}
   </div>

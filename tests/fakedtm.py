@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import respx
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import pkcs7
@@ -58,6 +59,13 @@ REENROLL_PATH_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/simpler
 EST_GROUP_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/device-group/(?P<gid>[^/]+)/simpleenroll"
 REENROLL_GROUP_RE = r"/\.well-known/est/devicetrustmanager/(?P<oid>[^/]+)/device-group/(?P<gid>[^/]+)/simplereenroll"
 CMP_PATH_PREFIX = f"{DTM}/certificate-issuance-service/api/v1/cmp/DIOT_"
+# UC-7: a CA as trust anchor of an authentication policy (the portal's v2 endpoint)
+AUTH_CA_PATH = f"{DTM}/authentication-service/api/v2/authentication-ca"
+# UC-8 over-the-air updates
+UPLOAD_PATH = f"{DTM}/artifacts/api/v4/resumable-upload"
+ARTIFACT_PATH = f"{DTM}/artifacts/api/v4/artifact"
+RELEASE_PATH = f"{DTM}/release/api/v4/release"
+DEPLOYMENT_PATH = f"{DTM}/release/api/v4/deployment"
 
 ECDSA_CA_ID = "ca-ecdsa-ica"
 RSA_CA_ID = "ca-rsa-ica"
@@ -266,6 +274,13 @@ class FakeDTM:
         self.device_list_ignores_group = False  # the device list returns devices of every group
         self.policy_create_echo = True  # verified live: the answer carries certificate_policy.id
         self.before_device_list: list = []  # called before /device/certificates (fake openssl cmp sync)
+        # UC-7: authentication CAs (trust anchors) – records carry no account_id, deleted ones stay DELETED
+        self.auth_cas: dict[str, dict] = {}
+        # UC-8 OTA: tus uploads, artifacts and releases (never deleted), deployments (aborted, never deleted)
+        self.uploads: dict[str, dict] = {}
+        self.artifacts: dict[str, dict] = {}
+        self.releases: dict[str, dict] = {}
+        self.deployments: dict[str, dict] = {}
         self._register()
         self._register_enrollment()
 
@@ -338,6 +353,28 @@ class FakeDTM:
             ("result", "GET", rf"{JOBS_PATH}/(?P<oid>[^/]+)/download/result", self._result),
             ("job", "GET", rf"{JOBS_PATH}/(?P<oid>[^/]+)", self._job),
             ("jobs_list", "GET", rf"{JOBS_PATH}", self._list_jobs),
+            ("auth_ca_create", "POST", rf"{AUTH_CA_PATH}", self._create_auth_ca),
+            ("auth_ca_list", "GET", rf"{AUTH_CA_PATH}", self._list_auth_cas),
+            # the account is part of the delete path – another account's path is an unknown endpoint
+            ("auth_ca_delete", "PUT", rf"{DTM}/authentication-service/api/v2/account/{re.escape(self.account_id)}"
+                                      rf"/authentication-ca/(?P<oid>[^/]+)/delete", self._delete_auth_ca),
+            ("upload_create", "POST", rf"{UPLOAD_PATH}", self._upload_create),
+            ("upload_patch", "PATCH", rf"{UPLOAD_PATH}/(?P<oid>[^/]+)", self._upload_patch),
+            ("upload_finish", "POST", rf"{UPLOAD_PATH}/(?P<oid>[^/]+)", self._upload_finish),
+            ("artifact_create", "POST", rf"{ARTIFACT_PATH}", self._create_artifact),
+            ("artifact_list", "GET", rf"{ARTIFACT_PATH}", self._list_ota("artifacts")),
+            ("artifact_enable", "PATCH", rf"{ARTIFACT_PATH}/(?P<oid>[^/]+)/enable", self._ota_status("artifacts", "ENABLED")),
+            ("artifact_disable", "PATCH", rf"{ARTIFACT_PATH}/(?P<oid>[^/]+)/disable",
+             self._ota_status("artifacts", "DISABLED")),
+            ("release_create", "POST", rf"{RELEASE_PATH}", self._create_release),
+            ("release_list", "GET", rf"{RELEASE_PATH}", self._list_ota("releases")),
+            ("release_enable", "PATCH", rf"{RELEASE_PATH}/(?P<oid>[^/]+)/enable", self._ota_status("releases", "ENABLED")),
+            ("release_disable", "PATCH", rf"{RELEASE_PATH}/(?P<oid>[^/]+)/disable",
+             self._ota_status("releases", "DISABLED")),
+            ("deployment_create", "POST", rf"{DEPLOYMENT_PATH}", self._create_deployment),
+            ("deployment_list", "GET", rf"{DEPLOYMENT_PATH}", self._list_ota("deployments")),
+            ("deployment_abort", "PATCH", rf"{DEPLOYMENT_PATH}/(?P<oid>[^/]+)/abort", self._abort_deployment),
+            ("deployment_get", "GET", rf"{DEPLOYMENT_PATH}/(?P<oid>[^/]+)", self._get_deployment),
         ]
         for kind, collection in AUTH_COLLECTIONS.items():
             routes += [
@@ -441,7 +478,7 @@ class FakeDTM:
         if policy["ica_id"] not in {c["id"] for c in self.cas}:
             return _error(400, "ica not found")
         methods = policy.get("certificate_management_methods") or []
-        if not methods or not set(methods) <= {"SINGLE", "BATCH", "EST", "CMP_V2", "SCEP"}:
+        if not methods or not set(methods) <= {"SINGLE", "BATCH", "EST", "CMP_V2", "SCEP", "TRUST_EDGE"}:
             return _error(400, f"invalid certificate_management_methods {methods!r}")
         sections = {"SINGLE": "single_cert_request_parameters", "BATCH": "batch_request_parameters"}
         for method, section in sections.items():
@@ -661,6 +698,8 @@ class FakeDTM:
         if request.url.host == self.clientauth_host:
             if not self.tls_client_cert:
                 return _error(401, "client certificate required")
+            if self._anchored(self.tls_client_cert, auth_policy_id):
+                return None
             if not any(o["body"]["pem"].strip() == self.tls_client_cert.strip()
                        and o["body"]["authentication_policy_id"] == auth_policy_id
                        for o in self.active_auth("auth_certificate")):
@@ -1224,8 +1263,8 @@ class FakeDTM:
         keys = {m["key"] for a in group["policies"] for m in a.get("device_field_mappings") or []
                 if m.get("field") == "subject.common_name"}
         device = next((d for d in self.devices.values() if d["device_group_id"] == group_id
-                       and d["status"] == "ACTIVE" and any(a["key"] in keys and a["value"] == cn
-                                                          for a in d.get("attributes") or [])), None)
+                       and d["status"] == "ACTIVE" and (("device_name" in keys and d["name"] == cn) or any(
+                           a["key"] in keys and a["value"] == cn for a in d.get("attributes") or []))), None)
         if device is None:
             device_id = str(uuid.uuid4())
             device = self.devices[device_id] = {
@@ -1244,3 +1283,155 @@ class FakeDTM:
     # convenience for tests
     def issued(self) -> list[dict]:
         return [c for c in self.certificates.values() if c["status"] == "ISSUED"]
+
+    # UC-7 authentication CAs: a certificate issued by an active CA of the policy's authentication policy
+    # authenticates (mTLS on clientauth.<host>)
+    def _anchored(self, pem: str, auth_policy_id: str | None) -> bool:
+        leaf = x509.load_pem_x509_certificates(pem.encode())[0]
+        for anchor in self.auth_cas.values():
+            if anchor["status"] != "ACTIVE" or anchor["authentication_policy_id"] != auth_policy_id:
+                continue
+            ca = x509.load_pem_x509_certificate(anchor["pem"].encode())
+            try:
+                leaf.verify_directly_issued_by(ca)
+            except (ValueError, TypeError, InvalidSignature):
+                continue
+            return True
+        return False
+
+    def _create_auth_ca(self, request):
+        body = json.loads(request.content)
+        if body.get("account_id") != self.account_id:
+            return _error(400, "account_id in body does not match")
+        parent = self.auth_objects["auth_policy"].get(body.get("authentication_policy_id"))
+        if not parent or parent["status"] != "ACTIVE":
+            return _error(400, "authentication policy not found")
+        try:
+            ca = x509.load_pem_x509_certificate((body.get("ca_body_pem") or "").encode())
+        except ValueError:
+            return _error(400, "invalid CA certificate")
+        if not ca.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+            return _error(400, "not a CA certificate")
+        record = {"id": str(uuid.uuid4()), "status": "ACTIVE", "pem": body["ca_body_pem"],
+                  "name": ca.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value,  # named after its CN
+                  "authentication_policy_id": body["authentication_policy_id"]}
+        self.auth_cas[record["id"]] = record
+        return _json_response(201, {k: v for k, v in record.items() if k != "pem"})
+
+    def _list_auth_cas(self, request):  # verified live: records carry no account_id
+        return self._page(request, [{k: v for k, v in r.items() if k != "pem"} for r in self.auth_cas.values()])
+
+    def _delete_auth_ca(self, request, oid):
+        record = self.auth_cas.get(oid)
+        if not record or record["status"] == "DELETED":
+            return _error(404, "entity_not_found")
+        record["status"] = "DELETED"
+        return httpx.Response(200)
+
+    def active_auth_cas(self) -> list[dict]:
+        return [r for r in self.auth_cas.values() if r["status"] == "ACTIVE"]
+
+    # UC-8 over-the-air updates: tus upload (create, one PATCH, finishing POST), artifact, release, deployment
+    def _upload_create(self, request):
+        if request.headers.get("tus-resumable") != "1.0.0":
+            return _error(412, "Tus-Resumable 1.0.0 required")
+        try:
+            length = int(request.headers.get("upload-length", ""))
+        except ValueError:
+            return _error(400, "Upload-Length required")
+        meta = dict(item.split(" ", 1) for item in (request.headers.get("upload-metadata") or "").split(",") if " " in item)
+        meta = {k: base64.b64decode(v).decode() for k, v in meta.items()}
+        if not meta.get("filename"):
+            return _error(400, "filename metadata required")
+        upload_id = uuid.uuid4().hex
+        self.uploads[upload_id] = {"id": upload_id, "length": length, "meta": meta, "data": None}
+        return httpx.Response(201, headers={"Location": f"https://{self.host}{UPLOAD_PATH}/{upload_id}"})
+
+    def _upload_patch(self, request, oid):
+        upload = self.uploads.get(oid)
+        if not upload:
+            return _error(404, "upload not found")
+        if (request.headers.get("tus-resumable") != "1.0.0" or request.headers.get("upload-offset") != "0"
+                or request.headers.get("content-type") != "application/offset+octet-stream"):
+            return _error(400, "tus headers missing")
+        if len(request.content) != upload["length"]:
+            return _error(409, "length mismatch")
+        upload["data"] = request.content
+        return httpx.Response(204, headers={"Upload-Offset": str(len(request.content))})
+
+    def _upload_finish(self, request, oid):
+        upload = self.uploads.get(oid)
+        if not upload or upload["data"] is None:
+            return _json_response(200, {"completed": False})
+        try:
+            names = zipfile.ZipFile(io.BytesIO(upload["data"])).namelist()
+        except zipfile.BadZipFile:
+            return _json_response(200, {"completed": False})
+        upload["completed"] = True
+        return _json_response(200, {"completed": True, "files": names})
+
+    def _ota_create(self, collection: str, request, check):
+        body = json.loads(request.content)
+        if body.get("account_id") != self.account_id:
+            return _error(400, "account_id in body does not match")
+        if body.get("division_id") not in self.divisions:
+            return _error(400, "division not found")
+        if any(o["name"] == body.get("name") for o in getattr(self, collection).values()):
+            return _error(400, "name already exists")  # names stay reserved – DTM deletes none of them
+        if (problem := check(body)) is not None:
+            return _error(400, problem)
+        record = {"id": str(uuid.uuid4()), "name": body["name"], "status": "ENABLED", "body": body}
+        getattr(self, collection)[record["id"]] = record
+        return _json_response(200, {"id": record["id"], "name": record["name"]})
+
+    def _create_artifact(self, request):
+        return self._ota_create("artifacts", request, lambda b: None if all(
+            self.uploads.get(i, {}).get("completed") for i in b.get("payload_ids") or ["-"]) else "payload not uploaded")
+
+    def _create_release(self, request):
+        return self._ota_create("releases", request, lambda b: None if all(
+            self.artifacts.get(a.get("id"), {}).get("status") == "ENABLED" for a in b.get("artifact_ids") or [{}])
+            else "artifact not found or disabled")
+
+    def _create_deployment(self, request):
+        def check(body):
+            group = self.device_groups.get(body.get("device_group_id"))
+            if not group or group["status"] != "ACTIVE":
+                return "device group not found"
+            if self.releases.get(body.get("release_id"), {}).get("status") != "ENABLED":
+                return "release not found or disabled"
+            return None
+        response = self._ota_create("deployments", request, check)
+        if response.status_code == 200:
+            self.deployments[json.loads(response.content)["id"]]["status"] = "IN_PROGRESS"
+        return response
+
+    def _list_ota(self, collection: str):
+        def list_(request):
+            return self._page(request, [{k: v for k, v in o.items() if k != "body"}
+                                        for o in getattr(self, collection).values()])
+        return list_
+
+    def _ota_status(self, collection: str, status: str):
+        def change(request, oid):
+            record = getattr(self, collection).get(oid)
+            if not record:
+                return _error(404, "entity_not_found")
+            record["status"] = status
+            return _json_response(200, {"id": oid, "status": status})
+        return change
+
+    def _get_deployment(self, request, oid):
+        record = self.deployments.get(oid)
+        if not record:
+            return _error(404, "entity_not_found")
+        return _json_response(200, {"id": oid, "name": record["name"], "status": record["status"]})
+
+    def _abort_deployment(self, request, oid):
+        record = self.deployments.get(oid)
+        if not record:
+            return _error(404, "entity_not_found")
+        if record["status"] != "IN_PROGRESS":
+            return _error(400, "deployment cannot be aborted")
+        record["status"] = "ABORTED"
+        return _json_response(200, {"id": oid, "status": "ABORTED"})

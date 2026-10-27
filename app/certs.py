@@ -76,6 +76,63 @@ def factory_certificate(common_name: str) -> tuple[str, bytes]:
     return cert.public_bytes(serialization.Encoding.PEM).decode(), key_pem
 
 
+MANUFACTURER = "Fictitious Manufacturer"
+
+
+def _ca(subject: str, issuer: x509.Certificate | None, issuer_key, days: int, path_length: int | None):
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, MANUFACTURER),
+                      x509.NameAttribute(NameOID.COMMON_NAME, subject)])
+    now = datetime.now(timezone.utc)
+    signer = issuer_key or key
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(issuer.subject if issuer else name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=days))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
+            .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(signer.public_key()), critical=False)
+            .sign(signer, hashes.SHA256()))
+    return cert, key
+
+
+def _pem(cert: x509.Certificate) -> str:
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def _key_pem(key) -> bytes:
+    return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                             serialization.NoEncryption())
+
+
+def manufacturer_ca(base: str) -> dict:
+    """UC-7: the manufacturer's own PKI outside DTM – root → device-ID ICA, ECDSA P-256. Demo material of
+    one run: PEMs (ICA key included) for the run dir, removed by the rollback."""
+    root, root_key = _ca(f"{base}-manufacturer-root", None, None, 3 * 365, 1)
+    ica, ica_key = _ca(f"{base}-device-id-ica", root, root_key, 2 * 365, 0)
+    return {"root": _pem(root), "ica": _pem(ica), "ica_key": _key_pem(ica_key)}
+
+
+def device_id_certificate(serial: str, ica_pem: str, ica_key_pem: bytes) -> tuple[str, bytes]:
+    """UC-7: the unmanaged device-ID certificate the factory gives a device (CN = serial number, clientAuth),
+    issued by the manufacturer's ICA. Returns (certificate + ICA chain PEM, key PEM)."""
+    ica = x509.load_pem_x509_certificate(ica_pem.encode())
+    ica_key = serialization.load_pem_private_key(ica_key_pem, password=None)
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, MANUFACTURER),
+                                     x509.NameAttribute(NameOID.COMMON_NAME, serial)]))
+            .issuer_name(ica.subject).public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ica_key.public_key()), critical=False)
+            .sign(ica_key, hashes.SHA256()))
+    return _pem(cert) + ica_pem, _key_pem(key)
+
+
 def der_b64_to_pem(blob: str) -> str:
     """DTM returns CA certificates as base64 DER (policy ca_chain)."""
     return x509.load_der_x509_certificate(base64.b64decode(blob)).public_bytes(serialization.Encoding.PEM).decode()

@@ -78,6 +78,27 @@
       <div class="slot r2c2">{{ choice("identity", "Certificate identity",
                 [("serial", "Serial number", ""), ("mac", "MAC address", "")], "serial") }}</div>
       <input type="hidden" name="variant" value="api">
+      {% elif use_case_id == "uc08" %}
+      <div class="choice-with-count">
+        {{ choice("mode", "Devices", [("single", "Single", ""), ("batch", "Batch", "")], "single") }}
+        <input id="count" type="number" name="count" class="short" value="2" min="1" max="10"
+               aria-label="Number of devices" data-when="mode=batch">
+      </div>
+      <div class="switch-stack">
+        <label data-tip="The factory step ends there – each IoT minion starts from its tile, so DTM can be shown in between"><input type="checkbox" name="pause" value="true" role="switch" checked> Start each IoT minion per click</label>
+      </div>
+      <input type="hidden" name="variant" value="api">
+      {% elif use_case_id == "uc07" %}
+      <div class="choice-with-count">
+        {{ choice("mode", "Devices", [("single", "Single", ""), ("batch", "Batch", "")], "single") }}
+        <input id="count" type="number" name="count" class="short" value="2" min="1" max="{{ max_devices }}"
+               aria-label="Number of devices" data-when="mode=batch">
+      </div>
+      {{ choice("protocol", "Field enrollment", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
+      <div class="switch-stack">
+        <label data-tip="The factory step ends there – each device enrolls from its tile, so DTM can be shown in between"><input type="checkbox" name="pause" value="true" role="switch" checked> Enroll each device per click</label>
+      </div>
+      <input type="hidden" name="variant" value="api">
       {% else %}
       {{ choice("protocol", "Protocol", [("est", "EST", ""), ("cmpv2", "CMPv2", "")], "est") }}
       {{ choice("auth_method", "Authentication",
@@ -117,6 +138,9 @@
       {% elif use_case_id == "uc05" %}
       {{ profile_field("robot-evergreen-5y-profile", "5 years", "protocol=est") }}
       {{ profile_field("robot-evergreen-cmp-5y-profile", "5 years · bare key", "protocol=cmpv2") }}
+      {% elif use_case_id == "uc08" %}
+      {{ profile_field("robot-evergreen-5y-profile", "Bootstrap · 5 years") }}
+      {{ profile_field("robot-renewal-6m-profile", "Operational · 6 months") }}
       {% elif use_case_id == "uc06" %}
       {{ profile_field("robot-renewal-6m-profile", "6 months · renew any time", "protocol=rest field=est | protocol=rest field=rest | protocol=est field=est | protocol=est field=rest") }}
       {{ profile_field("robot-renewal-cmp-6m-profile", "6 months · renew any time · bare key", "protocol=cmpv2 | field=cmpv2") }}

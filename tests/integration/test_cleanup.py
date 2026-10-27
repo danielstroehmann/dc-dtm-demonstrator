@@ -487,7 +487,8 @@ async def test_heartbeat_names_the_slow_issued_listing(store, fake, tmp_path, mo
 
 SHORT_PHASES = {"Preparing", "Checking jobs", "Listing certs", "Revoking", "Confirming", "Waiting for DTM",
                 "Other policies", "Deleting policy", "Deleting profile", "Deleting passcode", "Deleting credential",
-                "Deleting auth", "Deleting division"}
+                "Deleting auth", "Deleting division", "Deleting trust anchor", "Removing minions",
+                "Aborting deployment"}
 
 
 async def test_heartbeat_mirrors_a_short_phase_name(store, fake, tmp_path, monkeypatch):
@@ -513,7 +514,8 @@ async def test_heartbeat_mirrors_a_short_phase_name(store, fake, tmp_path, monke
 
 def test_short_names_cover_every_credential_kind():
     from app.dtm import AUTH_KINDS
-    assert set(cleanup.AUTH_SHORT) == set(AUTH_KINDS) and set(cleanup.AUTH_SHORT.values()) <= SHORT_PHASES
+    assert set(cleanup.AUTH_SHORT) == set(AUTH_KINDS) | {"auth_ca"} and set(cleanup.AUTH_SHORT.values()) <= SHORT_PHASES
+    assert list(cleanup.AUTH_SHORT)[-1] == "auth_policy"  # trust anchor and credentials before their policy
 
 
 def test_heartbeat_keeps_the_last_short_name():

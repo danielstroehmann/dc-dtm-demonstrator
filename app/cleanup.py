@@ -8,8 +8,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import evergreen
-from .dtm import AUTH_KINDS, PLATFORMS, DTMClient, DTMError, run_device
+from . import evergreen, minions
+from .dtm import PLATFORMS, DTMClient, DTMError, run_device
 from .store import Store
 
 REVOKE_PARALLEL = 16
@@ -22,7 +22,8 @@ CLOCK_SKEW = timedelta(minutes=5)  # the host's clock vs. DTM's when telling thi
 HEARTBEAT_S = 1.5  # a cleanup must never look frozen during a demo
 TERMINAL_JOB_STATES = {"completed", "failed", "rejected"}
 # What the runs list shows in the rollback button's box while these are deleted (fits 7.5rem)
-AUTH_SHORT = {"passcode": "Deleting passcode", "auth_certificate": "Deleting credential", "auth_policy": "Deleting auth"}
+AUTH_SHORT = {"auth_ca": "Deleting trust anchor", "passcode": "Deleting passcode",
+              "auth_certificate": "Deleting credential", "auth_policy": "Deleting auth"}
 
 
 class Heartbeat:
@@ -215,25 +216,31 @@ async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
                ("policy", f"{base}-policy", client.policy_ids)]
     if PLATFORMS.get(client.config.host) == "per_run":  # never block a rollback on the host check
         lookups.append(("profile", f"{base}-profile", client.profile_ids))
-    credential = run["use_case"] in ("uc03", "uc04", "uc05") or (
+    credential = run["use_case"] in ("uc03", "uc04", "uc05", "uc07", "uc08") or (
         run["use_case"] == "uc06" and run["params"].get("auth") in ("passcode", "certificate"))
     if credential:  # the credential lives in its own authentication policy
-        if run["use_case"] == "uc05":  # one passcode per device (-passcode-0001 …) plus the check's
+        if run["use_case"] in ("uc05", "uc08"):  # one passcode per device (-passcode-0001 …) plus UC-5's check
             lookups.append(("passcode", f"{base}-passcode-",
                             lambda n: client.auth_objects_named("passcode", n, prefix=True)))
+            credentials = []
+        elif run["use_case"] == "uc07":  # the manufacturer's ICA as trust anchor, named after its common name
+            lookups.append(("auth_ca", f"{base}-device-id-ica", client.auth_cas_named))
             credentials = []
         else:
             credentials = [("auth_certificate", "factory") if run["params"].get("auth") == "certificate"
                            else ("passcode", "passcode")]
         lookups += [(kind, f"{base}-{suffix}", lambda n, k=kind: client.auth_object_ids(k, n))
                     for kind, suffix in (*credentials, ("auth_policy", "auth"))]
-    if run["use_case"] == "uc06":  # devices are found through the run's group
+    if run["use_case"] in ("uc06", "uc07", "uc08"):  # devices are found through the run's group
         groups = {o["dtm_id"] for o in store.objects(run_id, "device_group")}
         groups |= set(await client.device_group_ids(f"{base}-group"))
         lookups.append(("device_group", f"{base}-group", client.device_group_ids))
         for group_id in groups:
             # the run's devices in its group – also one a replayed step or DTM itself created
-            lookups.append(("device", f"{base}-minion-", lambda n, g=group_id: client.device_ids(g, n)))
+            devices = f"{base}-{ {'uc06': 'minion', 'uc08': 'iot-minion'}.get(run['use_case'], 'device')}-"
+            lookups.append(("device", devices, lambda n, g=group_id: client.device_ids(g, n)))
+    if run["use_case"] == "uc08":  # firmware deployments of the run (artifacts and releases are shared)
+        lookups.append(("deployment", f"{base}-firmware-", client.deployments_named))
     for kind, name, lookup in lookups:
         known = {o["dtm_id"] for o in store.objects(run_id, kind)}
         for found in await lookup(name):
@@ -250,6 +257,14 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
     store.update_run(run_id, cleanup_mode=mode, cleanup_status="running")
     try:
         with Heartbeat(store, run_id, log) as beat:
+            if store.get_run(run_id)["use_case"] == "uc08":  # the agents must stop before their certificates go
+                beat.set("Removing the run's minions", short="Removing minions")
+                try:
+                    removed = await minions.remove_run(run_id)
+                except minions.MinionError as exc:  # nothing in DTM is touched while agents may still run
+                    raise minions.MinionError(f"{exc} – the rollback stops before any DTM change; "
+                                              "start the demonstrator's launcher and Docker proxy and retry") from exc
+                log(f"Removed {removed} minion container(s)")
             await discover(store, client, run_id, log)
             for obj in store.objects(run_id):
                 # Ledger entries are ours by construction; the name check guards against corruption.
@@ -260,10 +275,13 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
             beat.set("Checking that no batch job is still issuing", short="Checking jobs")
             await wait_for_jobs(store, client, run_id, log)
             result = store.get_run(run_id).get("result") or {}
-            for policy in store.objects(run_id, "policy"):
+            policies = store.objects(run_id, "policy")
+            for policy in policies:
                 log(f"Revoking certificates of policy {policy['name']}")
-                await revoke_all(client, policy["dtm_id"], log, expected=result.get("certificate_total") or 0,
-                                 beat=beat)
+                # The run's total is known per run, not per policy – with several policies (UC-8: bootstrap and
+                # operational) only the empty issued list counts
+                expected = result.get("certificate_total") or 0 if len(policies) == 1 else 0
+                await revoke_all(client, policy["dtm_id"], log, expected=expected, beat=beat)
             run = store.get_run(run_id)
             own = {p["dtm_id"] for p in store.objects(run_id, "policy", include_removed=True)}
             # Ordered by hand in the portal – maybe under another policy. Only for a run that reached the
@@ -273,6 +291,11 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                 beat.set("Looking for the run's certificates under other policies", short="Other policies")
                 await revoke_portal_strays(client, run, own, log)
             if mode == "full":
+                for deployment in store.objects(run_id, "deployment"):  # DTM keeps it, aborted
+                    log(f"Aborting firmware deployment {deployment['name']} – DTM keeps it as aborted")
+                    beat.set(f"Aborting firmware deployment {deployment['name']}", short="Aborting deployment")
+                    await client.abort_deployment(deployment["dtm_id"])
+                    store.mark_removed(run_id, "deployment", deployment["dtm_id"])
                 for kind, label, delete in (("device", "device", client.delete_device),
                                             ("device_group", "device group", client.delete_device_group)):
                     objects = store.objects(run_id, kind)
@@ -292,12 +315,15 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                     beat.set(f"Deleting certificate profile {profile['name']} and verifying it is gone", short="Deleting profile")
                     await client.delete_profile(profile["dtm_id"])
                     store.mark_removed(run_id, "profile", profile["dtm_id"])
-                for kind in AUTH_KINDS:  # credentials first, their authentication policy last
+                for kind in AUTH_SHORT:  # trust anchor and credentials first, their authentication policy last
+                    label = "authentication CA" if kind == "auth_ca" else kind.replace("_", " ")
                     for obj in store.objects(run_id, kind):
-                        log(f"Deleting {kind.replace('_', ' ')} {obj['name']}")
-                        beat.set(f"Deleting {kind.replace('_', ' ')} {obj['name']} and verifying it is gone",
-                                 short=AUTH_SHORT[kind])
-                        await client.delete_auth_object(kind, obj["dtm_id"])
+                        log(f"Deleting {label} {obj['name']}")
+                        beat.set(f"Deleting {label} {obj['name']} and verifying it is gone", short=AUTH_SHORT[kind])
+                        if kind == "auth_ca":
+                            await client.delete_auth_ca(obj["dtm_id"])
+                        else:
+                            await client.delete_auth_object(kind, obj["dtm_id"])
                         store.mark_removed(run_id, kind, obj["dtm_id"])
                 for division in store.objects(run_id, "division"):
                     log(f"Deleting division {division['name']}")
@@ -307,9 +333,10 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                 shutil.rmtree(run_dir, ignore_errors=True)
             else:  # UC-4: the device's key belongs to a revoked certificate now – nothing to keep it for
                 shutil.rmtree(run_dir / "device", ignore_errors=True)
+                shutil.rmtree(run_dir / "devices", ignore_errors=True)
             store.update_run(run_id, cleanup_status="done")
             log("Cleanup done" + (" – account restored" if mode == "full" else " – configuration kept"), "success")
-    except DTMError as exc:
+    except (DTMError, minions.MinionError) as exc:
         log(f"Cleanup failed: {exc}", "error")
         store.update_run(run_id, cleanup_status="failed")
     except Exception as exc:

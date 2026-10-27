@@ -1,5 +1,5 @@
 {# Polled every second while the run or its cleanup is active; reloads the page once it ends. #}
-<div id="live" {% if active %}hx-get="/runs/{{ run.id }}/live" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+<div id="live" {% if active %}hx-get="/runs/{{ run.id }}/live?busy={{ ((run.result or {}).busy or []) | join(',') | urlencode }}" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
   {# The run status sits in the page header; only an unfinished cleanup is reported here. #}
   {% if run.cleanup_status and run.cleanup_status != "done" %}
   <p class="status-line">Cleanup: <span class="status {{ run.cleanup_status }}">{{ run.cleanup_status }}</span></p>

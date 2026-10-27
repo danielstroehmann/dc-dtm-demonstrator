@@ -31,17 +31,28 @@ def renewals(store, run_id="m1") -> int:
     return len(store.get_run(run_id)["result"].get("renewals") or [])
 
 
-def renewed(store, run_id="m1", rounds=1):
-    return wait_for(lambda: (r := store.get_run(run_id)) and r["status"] == "completed"
-                    and len(r["result"].get("renewals") or []) >= rounds and r, what=f"renewal of {run_id}")
+def renewed(store, run_id="m1", count=1):
+    """count renewal attempts recorded and no device acting any more."""
+    return wait_for(lambda: (r := store.get_run(run_id)) and r["status"] == "completed" and not r["result"].get("busy")
+                    and len(r["result"].get("renewals") or []) >= count and r, what=f"renewal of {run_id}")
+
+
+def device_names(store, run_id="m1") -> list[str]:
+    return [d["name"] for d in store.get_run(run_id)["result"]["devices"]]
+
+
+def tiles(html: str) -> list[str]:
+    return re.findall(r'<section class="device-tile[^"]*" id="tile-\d+".*?</section>', html, re.S)
+
+
+def metrics(html: str, box: str) -> list[str]:
+    """The four metrics of the overview's phase box whose title starts with box."""
+    section = re.search(rf"</span>{box}.*?</section>", html, re.S).group(0)
+    return re.findall(r'<p class="metric">(.*?)</p>', section)
 
 
 def radios(html: str, name: str) -> list[tuple[str, str]]:
     return re.findall(rf'<input type="radio" name="{name}" value="([^"]+)" ?(checked)?', html)
-
-
-def devices_table(html: str) -> str:
-    return re.search(r'<table class="data-table devices-table">.*?</table>', html, re.S).group(0)
 
 
 def test_uc06_form(configured_user):
@@ -88,19 +99,21 @@ def test_defaults_rest_with_api_key(configured_user, store, fake):
     html = configured_user.get("/runs/m1").text
     assert "Managed devices · REST API → REST API · API key · Serial number · 1 device ·" in html
     (device,) = run["result"]["devices"]
-    table = devices_table(html)
-    headers = re.findall(r"<th>(.*?)</th>", table)
-    assert headers == ["Device name", "Identity in certificate (CN)", "Certificate", "Status", "Valid until"]
-    assert table.count("<tr") == 2 and device["name"] in table
-    assert f'<td class="mono" data-tip="Serial number – DTM matched it to {device["name"]}">SN-M1-0001</td>' in table
-    assert device["certificates"][0]["serial"] in table
-    assert '<div class="box-head"><h3>Devices in DTM</h3></div>' in html  # no group name in the heading
-    assert "robot-m1-uc06-group" not in re.search(r"<h3>Devices in DTM.*?</h3>", html, re.S).group(0)
+    (tile,) = tiles(html)  # one tile per device
+    assert f'<h3 data-tip="{device["name"]}">{device["name"]}</h3>' in tile and '<span class="pill ok">active</span>' in tile
+    assert re.search(r'>Serial number</dt><dd class="mono">SN-M1-0001</dd>', tile)
+    assert f'action="/runs/m1/devices/{device["name"]}/renew"' in tile and ">Renew</button>" in tile
+    assert "<h2>Devices</h2>" in html and "robot-m1-uc06-group" not in re.search(r"<h2>Devices</h2>", html).group(0)
     titles = re.findall(r'<h3 class="phase-title">.*?</svg></span>(.*?)</h3>', html, re.S)
     assert titles[:2] == ["Device registration <small>REST API</small>", "Field renewal <small>REST API</small>"]
-    assert "<h2>Field renewal</h2>" in html and ">Renew now</button>" in html
+    # no run-wide renewal round any more – neither the button nor the route
+    assert 'action="/runs/m1/renew"' not in html and "Renew all devices" not in html and "Renew now" not in html
     assert "devices ≈" not in html  # one device – no extrapolation
     assert "PRIVATE KEY" not in html
+    # the PEM, per certificate – DTM's list and the saved certificate may spell the hex serial in another case
+    link = re.search(rf'href="(/runs/m1/certificates/{device["certificates"][0]["serial"]}\.pem)" download', tile, re.I)
+    assert link, "no PEM download on the device tile"
+    assert configured_user.get(link.group(1)).status_code == 200
 
 
 @pytest.mark.parametrize("protocol,auth_method,field,identity", [("est", "passcode", "est", "mac"),
@@ -119,7 +132,9 @@ def test_protocol_choices_through_the_web(configured_user, store, enroll_net, cm
     assert titles[:2] == [f"Device registration <small>{label[protocol]}</small>",
                           f"Field renewal <small>{label[field]}</small>"]
     ident = devices.identity("m1", 1, identity)
-    assert f">{ident}</td>" in devices_table(html)
+    label = devices.IDENTITIES[identity][0]
+    assert all(re.search(rf'>{label}</dt><dd class="mono">{ident if i == 0 else devices.identity("m1", 2, identity)}</dd>', t)
+               for i, t in enumerate(tiles(html)))
     assert "PRIVATE KEY" not in html + configured_user.get("/runs/m1/api?dialect=curl").text
 
 
@@ -152,25 +167,36 @@ def test_batch_of_two_through_the_web(configured_user, store, fake):
     assert run["status"] == "completed", run["error"]
     assert run["params"]["count"] == 2 and len(fake.devices) == 2
     html = configured_user.get("/runs/m1").text
-    table = re.search(r'<table class="data-table devices-table">.*?</table>', html, re.S).group(0)
-    for device in run["result"]["devices"]:
-        assert device["name"] in table
-    assert table.count('class="group-start"') == 1  # the second device starts a new group of rows
-    assert ">Renew all devices</button>" in html and "devices ≈" in html
+    found = tiles(html)
+    assert len(found) == 2
+    for tile, device in zip(found, run["result"]["devices"]):
+        assert device["name"] in tile and f'action="/runs/m1/devices/{device["name"]}/renew"' in tile
+        assert device["name"] not in "".join(t for t in found if t is not tile)  # each tile its own device
+    assert "Renew all devices" not in html and "devices ≈" in html
 
 
 def test_renew_through_the_web(configured_user, store, fake):
     configured_user.post("/runs", data=uc06_form(mode="batch", count="2"))
     finished(store, "m1")
-    response = configured_user.post("/runs/m1/renew", follow_redirects=False)
+    first, second = device_names(store)
+    response = configured_user.post(f"/runs/m1/devices/{first}/renew", follow_redirects=False)
     assert response.status_code == 303 and response.headers["location"] == "/runs/m1"
     run = renewed(store)
-    assert run["result"]["certificate_total"] == 4 and len(fake.issued()) == 4
+    # only that device renewed – devices act independently
+    assert [x["device"] for x in run["result"]["renewals"]] == [first]
+    assert run["result"]["certificate_total"] == 3 and len(fake.issued()) == 3
+    assert [d["issued"] for d in run["result"]["devices"]] == [2, 1]
     html = configured_user.get("/runs/m1").text
-    table = re.search(r'<table class="data-table devices-table">.*?</table>', html, re.S).group(0)
-    assert table.count("<tr") == 1 + 4 and table.count(" · renewal\">") == 2 and table.count(" · registration\">") == 2
-    assert table.count('<span class="pill ok">active</span>') == 2 and table.count(">renewed</span>") == 2
-    assert "<small>Rounds</small><p class=\"metric\">1</p>" in html
+    renewed_tile, other = tiles(html)
+    assert renewed_tile.count("<li>") == 2 and other.count("<li>") == 1
+    assert renewed_tile.count('<span class="cert-state ok" data-tip="active">active</span>') == 1
+    assert renewed_tile.count('data-tip="renewed">renewed</span>') == 1 and "· renewal\">" in renewed_tile
+    assert re.search(r'<span class="muted">Renewed in \d+\.\d\d s</span>', renewed_tile)
+    assert metrics(html, "Field renewal")[1:] == ["1", "1", "3"]  # devices renewed, renewals, certificates
+    configured_user.post(f"/runs/m1/devices/{second}/renew")
+    renewed(store, count=2)
+    html = configured_user.get("/runs/m1").text
+    assert metrics(html, "Field renewal")[1:] == ["2", "2", "4"]
     api = configured_user.get("/runs/m1/api?dialect=curl").text
     titles = [t for _, _, t in phase_titles(api)]
     assert titles[-2:] == ["Device registration", "Field renewal"]
@@ -184,79 +210,148 @@ def test_renew_through_the_web(configured_user, store, fake):
         assert not re.search(r"(?<![$\w:])\{(GROUP_ID|DEVICE_ID|CERT_ID)\}", code), dialect
 
 
-def test_renew_double_click_starts_one_round(configured_user, store, fake):
+def test_renew_double_click_starts_one_renewal(configured_user, store, fake):
     configured_user.post("/runs", data=uc06_form())
     finished(store, "m1")
+    (name,) = device_names(store)
     fake.renew_delay = 0.5
-    first = configured_user.post("/runs/m1/renew", follow_redirects=False)
-    second = configured_user.post("/runs/m1/renew", follow_redirects=False)  # idempotent while renewing
+    first = configured_user.post(f"/runs/m1/devices/{name}/renew", follow_redirects=False)
+    second = configured_user.post(f"/runs/m1/devices/{name}/renew", follow_redirects=False)  # idempotent while busy
     assert (first.status_code, second.status_code) == (303, 303)
-    assert re.search(r'class="btn-icon" disabled\s+aria-busy="true"', configured_user.get("/runs/m1").text)
+    run = store.get_run("m1")
+    assert run["status"] == "completed" and run["result"]["busy"] == [name]  # the run stays completed
+    (tile,) = tiles(configured_user.get("/runs/m1").text)
+    assert re.search(r'class="btn-sm btn-icon" disabled\s+aria-busy="true"', tile) and ">renewing</span>" in tile
+    assert f'hx-get="/runs/m1/devices/{name}/tile?i=1" hx-trigger="every 2s"' in tile  # the tile follows the device
     renewed(store)
     assert renewals(store) == 1 and fake.route_order().count("renew") == 1
+    assert store.get_run("m1")["result"]["busy"] == []
 
 
-def test_at_most_max_renewals(configured_user, store, fake):
-    configured_user.post("/runs", data=uc06_form())
+def test_at_most_max_renewals_per_device(configured_user, store, fake):
+    configured_user.post("/runs", data=uc06_form(mode="batch", count="2"))
     finished(store, "m1")
-    for round_ in range(1, devices.MAX_RENEWALS + 1):
-        assert configured_user.post("/runs/m1/renew", follow_redirects=False).status_code == 303
-        renewed(store, rounds=round_)
-    response = configured_user.post("/runs/m1/renew", follow_redirects=False)
-    assert response.status_code == 409 and f"At most {devices.MAX_RENEWALS} renewals per run" in response.text
+    first, second = device_names(store)
+    for count in range(1, devices.MAX_RENEWALS + 1):
+        assert configured_user.post(f"/runs/m1/devices/{first}/renew", follow_redirects=False).status_code == 303
+        renewed(store, count=count)
+    response = configured_user.post(f"/runs/m1/devices/{first}/renew", follow_redirects=False)
+    assert response.status_code == 409 and f"At most {devices.MAX_RENEWALS} renewals per device" in response.text
     assert renewals(store) == devices.MAX_RENEWALS and fake.route_order().count("renew") == devices.MAX_RENEWALS
-    html = configured_user.get("/runs/m1").text
-    assert re.search(rf'disabled\s+data-tip="At most {devices.MAX_RENEWALS} renewals per run"', html)
+    exhausted, other = tiles(configured_user.get("/runs/m1").text)
+    assert re.search(rf'disabled\s+data-tip="At most {devices.MAX_RENEWALS} renewals per device"', exhausted)
+    assert "disabled" not in other
+    # the limit is per device: the other one still renews
+    assert configured_user.post(f"/runs/m1/devices/{second}/renew", follow_redirects=False).status_code == 303
+    renewed(store, count=devices.MAX_RENEWALS + 1)
 
 
 def test_renew_guards(configured_user, store, fake):
     fake.fail["device_enroll"] = _error(403, "not licensed")
     configured_user.post("/runs", data=uc06_form(run_id="f1"))
     assert finished(store, "f1")["status"] == "failed"
-    assert configured_user.post("/runs/f1/renew", follow_redirects=False).status_code == 409
+    assert configured_user.post("/runs/f1/renew", follow_redirects=False).status_code == 409  # only UC-4 renews per run
+    # a failed run has no device to renew
+    name = "robot-f1-uc06-minion-0001"
+    assert configured_user.post(f"/runs/f1/devices/{name}/renew", follow_redirects=False).status_code == 404
     assert store.get_run("f1")["status"] == "failed" and "renew" not in fake.route_order()
 
 
-def test_renew_without_connection_does_not_stay_renewing(configured_user, store, fake):
+def test_run_wide_renew_is_gone_for_managed_devices(configured_user, store, fake):
     configured_user.post("/runs", data=uc06_form())
     finished(store, "m1")
+    response = configured_user.post("/runs/m1/renew", follow_redirects=False)
+    assert response.status_code == 409 and "renew" not in fake.route_order()
+    assert store.get_run("m1")["status"] == "completed" and renewals(store) == 0
+
+
+@pytest.mark.parametrize("path,status", [
+    ("devices/robot-m1-uc06-minion-0002/renew", 404),           # not a device of the run
+    ("devices/robot-m2-uc06-minion-0001/renew", 404),           # another run's device name
+    ("devices/%3Cscript%3Ealert(1)%3C%2Fscript%3E/renew", 404),  # free input never reaches anything
+    ("devices/..%2F..%2Fsettings/renew", 404),
+    ("devices/robot-m1-uc06-minion-0001/delete", 404),          # unknown action
+    ("devices/robot-m1-uc06-minion-0001/enroll", 409),          # UC-6 devices are enrolled in the factory
+])
+def test_device_route_refuses_what_is_not_the_runs(configured_user, store, fake, path, status):
+    configured_user.post("/runs", data=uc06_form())
+    finished(store, "m1")
+    before = list(fake.calls)
+    response = configured_user.post(f"/runs/m1/{path}", follow_redirects=False)
+    assert response.status_code == status and "<script>" not in response.text
+    assert fake.calls == before and not store.get_run("m1")["result"].get("busy")
+
+
+def test_device_tile_route(configured_user, store, fake):
+    configured_user.post("/runs", data=uc06_form())
+    finished(store, "m1")
+    (name,) = device_names(store)
+    response = configured_user.get(f"/runs/m1/devices/{name}/tile?i=3")
+    assert response.status_code == 200 and 'id="tile-3"' in response.text and name in response.text
+    assert "hx-get" not in response.text  # nothing acts – nothing to poll
+    assert configured_user.get("/runs/m1/devices/robot-m1-uc06-minion-0009/tile").status_code == 404
+    assert 'id="tile-1000"' in configured_user.get(f"/runs/m1/devices/{name}/tile?i=99999").text  # clamped
+    assert configured_user.get("/runs/nope/devices/x/tile").status_code == 404
+
+
+def test_live_view_reloads_when_a_device_finishes(configured_user, store, fake):
+    configured_user.post("/runs", data=uc06_form())
+    finished(store, "m1")
+    (name,) = device_names(store)
+    hx = {"HX-Request": "true"}
+    devices.commit(store, "m1", lambda r: r.update(busy=[name]))
+    acting = configured_user.get(f"/runs/m1/live?busy={name}", headers=hx)
+    assert acting.status_code == 200 and "HX-Refresh" not in acting.headers
+    devices.commit(store, "m1", lambda r: r.update(busy=[]))
+    done = configured_user.get(f"/runs/m1/live?busy={name}", headers=hx)
+    assert done.headers.get("HX-Refresh") == "true"
+
+
+def test_renew_without_connection_does_not_stay_busy(configured_user, store, fake):
+    configured_user.post("/runs", data=uc06_form())
+    finished(store, "m1")
+    (name,) = device_names(store)
     (conn,) = store.connections()
     store.delete_connection(conn["id"])
-    response = configured_user.post("/runs/m1/renew", follow_redirects=False)
+    response = configured_user.post(f"/runs/m1/devices/{name}/renew", follow_redirects=False)
     assert response.status_code == 409
-    assert store.get_run("m1")["status"] == "completed" and "renew" not in fake.route_order()
+    run = store.get_run("m1")
+    assert run["status"] == "completed" and run["result"]["busy"] == [] and "renew" not in fake.route_order()
 
 
 def test_no_renewal_after_rollback(configured_user, store, fake, data_dir):
     configured_user.post("/runs", data=uc06_form(mode="batch", count="2"))
     finished(store, "m1")
-    configured_user.post("/runs/m1/renew")
+    first, _second = device_names(store)
+    configured_user.post(f"/runs/m1/devices/{first}/renew")
     renewed(store)
     configured_user.post("/runs/m1/cleanup", data={"mode": "full"})
     assert cleaned(store, "m1")["cleanup_status"] == "done"
-    assert configured_user.post("/runs/m1/renew", follow_redirects=False).status_code == 409
+    assert configured_user.post(f"/runs/m1/devices/{first}/renew", follow_redirects=False).status_code == 409
     assert fake.issued() == [] and fake.active_devices() == []
     assert [g["status"] for g in fake.device_groups.values()] == ["DELETED"]
     html = configured_user.get("/runs/m1").text
-    assert ">Renew now</button>" not in html and "Renew all devices" not in html
+    assert ">Renew</button>" not in html and "/devices/" not in html.split("<h2>Devices</h2>", 1)[1].split("Timeline")[0]
     assert 'action="/runs/m1/renew"' not in html
 
 
-def test_failed_rounds_count_and_render(configured_user, store, fake):
+def test_failed_renewals_count_and_render(configured_user, store, fake):
     configured_user.post("/runs", data=uc06_form(field="rest"))
     finished(store, "m1")
+    (name,) = device_names(store)
     fake.fail["renew"] = _error(500, "upstream trouble")
-    for round_ in range(1, devices.MAX_RENEWALS + 1):
-        assert configured_user.post("/runs/m1/renew", follow_redirects=False).status_code == 303
-        wait_for(lambda: (r := store.get_run("m1"))["status"] == "completed" and renewals(store) >= round_,
-                 what="failed round")
+    for count in range(1, devices.MAX_RENEWALS + 1):
+        assert configured_user.post(f"/runs/m1/devices/{name}/renew", follow_redirects=False).status_code == 303
+        renewed(store, count=count)
     run = store.get_run("m1")
     assert [x.get("failed") for x in run["result"]["renewals"]] == [True] * devices.MAX_RENEWALS
-    response = configured_user.post("/runs/m1/renew", follow_redirects=False)  # a broken round counts, too
+    response = configured_user.post(f"/runs/m1/devices/{name}/renew", follow_redirects=False)  # a broken one counts
     assert response.status_code == 409
     page = configured_user.get("/runs/m1")
     assert page.status_code == 200
-    overview = page.text[page.text.index("<h2>Overview</h2>"):page.text.index("Devices in DTM")]
+    overview = page.text[page.text.index("<h2>Overview</h2>"):page.text.index("<h2>Devices</h2>")]
     assert ">None" not in overview and "Undefined" not in overview and '"metric"> s<' not in overview
-    renewal = re.findall(r'<p class="metric">(.*?)</p>', overview)[-4:]  # all devices, per device, rounds, certs
-    assert renewal == ["–", "–", str(devices.MAX_RENEWALS), "1"]  # no times from broken rounds
+    # no times from broken renewals: last renewal, devices renewed, renewals, certificates
+    assert metrics(page.text, "Field renewal") == ["–", "0", "0", "1"]
+    (tile,) = tiles(page.text)
+    assert "Renewed in" not in tile and tile.count("<li>") == 1

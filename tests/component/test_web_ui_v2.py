@@ -101,7 +101,7 @@ def test_failed_later_save_stays_on_settings(configured_user, store, fake):
 def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fake):
     html = configured_user.get("/").text
     assert re.search(r'<nav aria-label="breadcrumb" aria-hidden="true" class="crumb-spacer">.*?</nav>\s*<div class="page-head">\s*<div><h1>Use-Case Central</h1></div>', html, re.S) and "Start a demo" not in html
-    assert html.count('<article class="tile">') == len(evergreen.CATALOG) == 4
+    assert len(re.findall(r'<article class="tile[ "]', html)) == len(evergreen.CATALOG) == 6
     for key, use_case in evergreen.CATALOG.items():
         assert html.count(f'formaction="/runs/new/{key}"') == 1
         assert f'aria-label="Start {use_case.title}"' in html

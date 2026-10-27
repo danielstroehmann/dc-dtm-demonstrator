@@ -224,6 +224,9 @@ class Store:
         self._exec("UPDATE runs SET status = 'interrupted' WHERE status IN ('pending', 'running', 'paused')")
         # An interrupted renewal leaves the device with its previous, still valid certificate.
         self._exec("UPDATE runs SET status = 'completed' WHERE status = 'renewing'")
+        # Same for a device of an Advanced run that was enrolling or renewing
+        self._exec("UPDATE runs SET result = json_remove(result, '$.busy') "
+                   "WHERE result IS NOT NULL AND json_extract(result, '$.busy') IS NOT NULL")
         self._exec("UPDATE runs SET cleanup_status = 'interrupted' WHERE cleanup_status = 'running'")
         self._exec("UPDATE runs SET progress = NULL WHERE progress IS NOT NULL")  # nothing is in progress after a restart
 

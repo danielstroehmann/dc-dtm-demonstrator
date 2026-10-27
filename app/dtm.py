@@ -6,6 +6,7 @@ OpenAPI spec deviates in several places (verified live; the deviations are noted
 """
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -23,10 +24,17 @@ DIVISIONS = "/devicetrustmanager/api/v4/division"
 POLICIES = "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"
 PROFILES = "/devicetrustmanager/certificate-configuration-service/api/v1/certificate-profile"
 AUTH = "/devicetrustmanager/authentication-service/api/v1"
+# UC-7: a CA as trust anchor of an authentication policy – the portal's endpoint (not in the public spec)
+AUTH_CA = "/devicetrustmanager/authentication-service/api/v2/authentication-ca"
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # IDs from DTM that end up in URL paths
 DEVICES = "/devicetrustmanager/api/v4/device"
 DEVICE_GROUPS = "/devicetrustmanager/api/v4/device-group"
 CERTIFICATES = "/devicetrustmanager/certificate-issuance-service/api/v2/certificate"
+UPLOADS = "/devicetrustmanager/artifacts/api/v4/resumable-upload"  # tus 1.0.0, as the portal uploads payloads
+ARTIFACTS = "/devicetrustmanager/artifacts/api/v4/artifact"
+RELEASES = "/devicetrustmanager/release/api/v4/release"
+DEPLOYMENTS = "/devicetrustmanager/release/api/v4/deployment"
+TUS = {"Tus-Resumable": "1.0.0"}
 # Ledger kind → authentication-service collection (UC-3). Deleted objects stay as status DELETED.
 AUTH_KINDS = {"auth_certificate": "authentication-certificate", "passcode": "passcode",
               "auth_policy": "authentication-policy"}
@@ -123,15 +131,66 @@ def device_policy_body(*, name: str, division_id: str, profile_id: str, ica_id: 
     return body
 
 
-def device_group_body(name: str, division_id: str, account_id: str, policy_id: str, attribute: str) -> dict:
+def device_group_body(name: str, division_id: str, account_id: str, policy_id: str, attribute: str,
+                      also: tuple[str, ...] = ()) -> dict:
     """A static group with the policy assigned. The mapping makes DTM match a certificate's common name
-    to the device's inventory attribute (serial_number, mac_address) – not to its name. DTM refuses an
-    assignment without status."""
+    to the device's inventory attribute (serial_number, mac_address) – or, UC-7, to its name (device_name).
+    also: further attributes the group's devices carry. DTM refuses an assignment without status."""
     return {"name": name, "division_id": division_id, "account_id": account_id, "is_static": True,
-            "attributes": [attribute],
+            "attributes": [attribute, *also],
             "policies": [{"policy_id": policy_id, "assignment_name": f"{name}-policy", "type": "bootstrapCertificate",
                           "status": "ACTIVE",
                           "device_field_mappings": [{"key": attribute, "field": "subject.common_name"}]}]}
+
+
+def trustedge_policy_body(*, name: str, division_id: str, profile_id: str, ica_id: str, auth_policy_id: str) -> dict:
+    """UC-8: the operational policy the TrustEdge agent applies over MQTT – it creates key and CSR, DTM sets the CN
+    from the device name. Shaped like a working reference (verified on US 2026-10-27): TrustEdge + EST with an
+    authentication policy."""
+    body = enrollment_policy_body(name=name, division_id=division_id, profile_id=profile_id, ica_id=ica_id,
+                                  key_type="P_256", auth_policy_id=auth_policy_id, protocol="est")
+    policy = body["certificate_policy"]
+    policy.pop("require_device_group_for_enroll")
+    policy["certificate_management_methods"] = ["TRUST_EDGE", "EST"]
+    policy["trust_edge_parameters"] = {"request_format_type": "PKCS10", "key_algorithm": ["p_256"],
+                                       "cert_attributes_source": "SW", "secure_module_primary": False}
+    policy["evaluation_expression_mapping"] = {"evaluation_expressions": [
+        {"certificate_field": "subject.common_name", "values": [{"expression": "##device_name##"}]}]}
+    return body
+
+
+def trustedge_group_body(name: str, division_id: str, account_id: str, boot_policy_id: str, op_policy_id: str,
+                         auth_policy_id: str) -> dict:
+    """UC-8: bootstrap certificate (EST, CN = serial number) and operational certificate (TrustEdge, CN = device
+    name) in one group. Mapping field and auth_policy_id per assignment as in the working reference."""
+    def assignment(policy_id: str, kind: str, key: str) -> dict:
+        return {"policy_id": policy_id, "assignment_name": f"{name}-{kind[:-11]}", "type": kind, "status": "ACTIVE",
+                "auth_policy_id": auth_policy_id, "device_field_mappings": [{"key": key, "field": "subject_common_name"}]}
+    return {"name": name, "division_id": division_id, "account_id": account_id, "is_static": True,
+            "attributes": ["device_name", "serial_number"],
+            "policies": [assignment(boot_policy_id, "bootstrapCertificate", "serial_number"),
+                         assignment(op_policy_id, "operationalCertificate", "device_name")]}
+
+
+def artifact_body(name: str, division_id: str, account_id: str, version: str, description: str,
+                  payload_id: str) -> dict:
+    """An application update whose payload's install.sh the TrustEdge agent runs after unpacking it."""
+    return {"name": name, "description": description, "account_id": account_id, "division_id": division_id,
+            "version": version, "artifact_type": "applicationUpdate", "depends_on": [], "is_draft": False,
+            "target_device_attributes": [],
+            "actions": {"install": {"file": "install.sh", "file_type": "script", "file_sub_type": "bash"}},
+            "payload_ids": [payload_id]}
+
+
+def release_body(name: str, division_id: str, account_id: str, version: str, description: str,
+                 artifact_id: str) -> dict:
+    return {"name": name, "description": description, "version": version, "division_id": division_id,
+            "account_id": account_id, "artifact_ids": [{"id": artifact_id, "order": 0}], "notify_user_ids": []}
+
+
+def deployment_body(name: str, division_id: str, account_id: str, group_id: str, release_id: str) -> dict:
+    return {"name": name, "scheduler_mode": "deployNow", "division_id": division_id, "device_group_id": group_id,
+            "release_id": release_id, "account_id": account_id}
 
 
 def device_body(name: str, account_id: str, group_id: str, description: str, attribute: str, value: str) -> dict:
@@ -436,6 +495,29 @@ class DTMClient:
             raise DTMError(f"{kind} {object_id} still {_json(check).get('status')} after delete "
                            f"({response.status_code})")
 
+    # UC-7: the manufacturer's CA as trust anchor – every certificate it issued authenticates (verified live
+    # on NL 2026-10-27). DTM names the entry after the CA's common name; records carry no account_id, the
+    # list is scoped by the account parameter.
+    async def create_auth_ca(self, auth_policy_id: str, pem: str) -> dict:
+        data = _json(await self._request("POST", AUTH_CA, expect=(200, 201), json={
+            "authentication_policy_id": auth_policy_id, "ca_body_pem": pem, "account_id": self.config.account_id}))
+        _safe(data.get("id"))  # it goes into the delete path
+        return {"id": data["id"], "name": str(data.get("name", ""))}
+
+    async def auth_cas_named(self, name: str, prefix: bool = False) -> list[tuple[str, str]]:
+        return [(r["id"], r["name"]) for r in await self._list(AUTH_CA)
+                if (str(r.get("name", "")).startswith(name) if prefix else r.get("name") == name)
+                and str(r.get("status", "")).upper() != "DELETED" and SAFE_ID.fullmatch(str(r.get("id", "")))
+                and not self._foreign(r)]
+
+    async def delete_auth_ca(self, ca_id: str) -> None:
+        """No GET by ID exists – gone means: no longer listed."""
+        _safe(ca_id)
+        await self._request("PUT", f"{AUTH_CA.rsplit('/', 1)[0]}/account/{self.config.account_id}/authentication-ca/"
+                                   f"{ca_id}/delete", json={}, expect=(200, 204, 404))
+        if any(r.get("id") == ca_id and str(r.get("status", "")).upper() != "DELETED" for r in await self._list(AUTH_CA)):
+            raise DTMError(f"authentication CA {ca_id} still exists after delete")
+
     async def _profiles(self) -> list[dict]:
         return [r for r in await self._list(PROFILES) if isinstance(r, dict)]
 
@@ -559,17 +641,18 @@ class DTMClient:
         raise DTMError(f"could not create profile {spec.name}: {clash}")
 
     # devices (UC-6, Advanced license) – verified live on NL 2026-10-26
-    async def create_device_policy(self, **kwargs) -> str:
-        body = device_policy_body(**kwargs)
+    async def create_device_policy(self, body: dict | None = None, **kwargs) -> str:
+        body = body or device_policy_body(**kwargs)
         data = _json(await self._request("POST", POLICIES, expect=(200, 201), json=body))
         policy_id = (data.get("certificate_policy") or {}).get("id")
         _safe(policy_id)  # it goes into URL paths next
         return policy_id
 
-    async def create_device_group(self, name: str, division_id: str, policy_id: str, attribute: str) -> str:
+    async def create_device_group(self, name: str, division_id: str, policy_id: str, attribute: str,
+                                  also: tuple[str, ...] = (), body: dict | None = None) -> str:
         """DTM answers without the ID – it is looked up by the name right after (lists lag a moment)."""
-        await self._request("POST", DEVICE_GROUPS, expect=(200, 201),
-                            json=device_group_body(name, division_id, self.config.account_id, policy_id, attribute))
+        await self._request("POST", DEVICE_GROUPS, expect=(200, 201), json=body or device_group_body(
+            name, division_id, self.config.account_id, policy_id, attribute, also))
         for attempt in range(LOOKUP_RETRIES):
             found = await self.device_group_ids(name)
             if len(found) == 1:
@@ -707,6 +790,72 @@ class DTMClient:
             "GET", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate", quiet=True,
             params={"certificate_policy_id": policy_id, "status": status, "limit": 1}))
         return int(data.get("total", 0))
+
+    # over-the-air updates: payload → artifact → release → deployment to a device group. DTM deletes none of
+    # them – artifacts and releases can be disabled and enabled again, an aborted deployment stays as it is.
+
+    async def upload_payload(self, filename: str, data: bytes) -> str:
+        """tus upload in one chunk; the finishing POST makes DTM unpack and check the zip."""
+        meta = ",".join(f"{k} {base64.b64encode(v.encode()).decode()}" for k, v in (
+            ("name", filename), ("type", "application/zip"), ("filetype", "application/zip"), ("filename", filename)))
+        created = await self._request("POST", UPLOADS, expect=(201,), headers=TUS | {
+            "Upload-Length": str(len(data)), "Upload-Metadata": meta})
+        upload_id = created.headers.get("location", "").rstrip("/").rsplit("/", 1)[-1]
+        _safe(upload_id)
+        await self._request("PATCH", f"{UPLOADS}/{upload_id}", expect=(204,), content=data, headers=TUS | {
+            "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"})
+        done = _json(await self._request("POST", f"{UPLOADS}/{upload_id}", json={}))
+        if not done.get("completed"):
+            raise DTMError(f"payload {filename} was not accepted")
+        return upload_id
+
+    async def named_prefix(self, path: str, prefix: str) -> list[dict]:
+        """Artifacts or releases (path) whose name starts with prefix – also disabled ones."""
+        return [r for r in await self._list(path, {"optional_division_filter": "true"})
+                if str(r.get("name", "")).startswith(prefix) and SAFE_ID.fullmatch(str(r.get("id")))
+                and not self._foreign(r)]
+
+    async def create_artifact(self, body: dict) -> str:
+        data = _json(await self._request("POST", ARTIFACTS, json=body))
+        _safe(data.get("id"))
+        return data["id"]
+
+    async def create_release(self, body: dict) -> str:
+        data = _json(await self._request("POST", RELEASES, json=body))
+        _safe(data.get("id"))
+        return data["id"]
+
+    async def enable(self, path: str, object_id: str, enabled: bool = True) -> None:
+        """Enables or disables an artifact or release (path: ARTIFACTS or RELEASES) – reversible, unlike a delete."""
+        _safe(object_id)
+        await self._request("PATCH", f"{path}/{object_id}/{'enable' if enabled else 'disable'}", json={})
+
+    async def create_deployment(self, body: dict) -> str:
+        data = _json(await self._request("POST", DEPLOYMENTS, json=body))
+        _safe(data.get("id"))
+        return data["id"]
+
+    async def deployments_named(self, prefix: str) -> list[tuple[str, str]]:
+        return [(r["id"], r["name"]) for r in await self._list(DEPLOYMENTS)
+                if str(r.get("name", "")).startswith(prefix) and SAFE_ID.fullmatch(str(r.get("id")))
+                and not self._foreign(r)]
+
+    def _foreign(self, record: dict) -> bool:
+        """A record of another account – some list services leave the account out, a different one is never ours."""
+        account = record.get("account_id") or (record.get("account") or {}).get("id")
+        return bool(account) and account != self.config.account_id
+
+    async def abort_deployment(self, deployment_id: str) -> None:
+        """Ends the deployment for good – an aborted (or otherwise finished) one is left as it is."""
+        _safe(deployment_id)
+        try:
+            await self._request("PATCH", f"{DEPLOYMENTS}/{deployment_id}/abort", json={})
+        except DTMError as exc:
+            if exc.status in (401, 403):
+                raise
+            status = _json(await self._request("GET", f"{DEPLOYMENTS}/{deployment_id}", expect=(200, 404)))
+            if status.get("status") not in (None, "ABORTED", "COMPLETED", "FINISHED"):
+                raise
 
     async def revoke(self, certificate_id: str) -> str:
         """Returns 'revoked', 'already' or 'retry'. Under load (R-4) timeouts, gateway errors and

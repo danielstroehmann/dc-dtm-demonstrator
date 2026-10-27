@@ -8,7 +8,7 @@
 {# Phases: Run → Result → Clean up (started from the runs list). The page reloads at every phase change (HX-Refresh). #}
 {% if rolled_back %}{% set phase = 4 %}{% elif run.cleanup_status %}{% set phase = 3 %}
 {% elif run.status in ("pending", "running", "paused") %}{% set phase = 1 %}{% else %}{% set phase = 2 %}{% endif %}
-{% set sub %}{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {% if run.use_case == "uc06" %}{{ protocols[p.protocol] }} → {{ protocols[p.field] }} · {{ auths[p.auth] }} · {{ "MAC address" if p.identity == "mac" else "Serial number" }} · {{ p.count }} device{{ "s" if p.count != 1 }}{% elif p.protocol %}{{ protocols[p.protocol] }} · {{ auths[p.auth] }} · {{ p.count }} request{{ "s" if p.count != 1 }}{% else %}{{ p.mode | capitalize }} ({{ p.count }}) · {{ "via API" if p.variant == "api" else "in the DTM web UI" }}{% endif %}{% if p.connection_name %} · {{ p.connection_name }}{% endif %}{% endset %}
+{% set sub %}{{ use_cases[run.use_case].title if run.use_case in use_cases else run.use_case }} · {% if run.use_case == "uc08" %}Passcode → TrustEdge agent · {{ p.count }} IoT minion{{ "s" if p.count != 1 }}{% elif run.use_case == "uc07" %}Device-ID certificate → {{ protocols[p.protocol] }} · {{ p.count }} device{{ "s" if p.count != 1 }}{% elif run.use_case == "uc06" %}{{ protocols[p.protocol] }} → {{ protocols[p.field] }} · {{ auths[p.auth] }} · {{ "MAC address" if p.identity == "mac" else "Serial number" }} · {{ p.count }} device{{ "s" if p.count != 1 }}{% elif p.protocol %}{{ protocols[p.protocol] }} · {{ auths[p.auth] }} · {{ p.count }} request{{ "s" if p.count != 1 }}{% else %}{{ p.mode | capitalize }} ({{ p.count }}) · {{ "via API" if p.variant == "api" else "in the DTM web UI" }}{% endif %}{% if p.connection_name %} · {{ p.connection_name }}{% endif %}{% endset %}
 {{ page_head("Run " ~ run.id, [(run.id, none)], badge=pill(run.status), sub=sub) }}
 <ol class="stepper" aria-label="Run phases">
   {% for label in ("Run", "Result", "Clean up") %}
@@ -18,7 +18,8 @@
 {% include "_run_live.html" %}
 {% if run.use_case == "uc05" and run.status == "paused" and not run.cleanup_status %}{% include "_enroll.html" %}{% endif %}
 {% if finished %}{% include "_result_overview.html" %}{% endif %}
-{% if run.use_case in ("uc04", "uc06") and run.status in ("completed", "renewing") and not run.cleanup_status %}{% include "_renew.html" %}{% endif %}
+{% if run.use_case == "uc04" and run.status in ("completed", "renewing") and not run.cleanup_status %}{% include "_renew.html" %}{% endif %}
+{% if run.use_case in device_cases and (run.result or {}).devices %}{% include "_devices.html" %}{% endif %}
 {% include "_timeline.html" %}
 {% if finished %}{% include "_result.html" %}{% endif %}
 {% endblock %}

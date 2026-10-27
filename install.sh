@@ -14,7 +14,7 @@ IMAGE_REPO="ghcr.io/danielstroehmann/dc-dtm-demonstrator"
 INSTALL_DIR="/opt/dtm-demonstrator"
 APP_UID=10001
 
-version="" branch="" tls_mode="" tls_cert="" tls_key="" hosts="" port="" http_port="" local_image=""
+version="" branch="" tls_mode="" tls_cert="" tls_key="" hosts="" port="" http_port="" local_image="" local_files=""
 uninstall=false purge=false assume_yes=false reset_password=false
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -33,6 +33,7 @@ Options:
   --port N              HTTPS port (default 443)
   --http-port N         HTTP port that redirects to HTTPS (default 80)
   --local-image IMAGE   use an already loaded image instead of pulling (testing)
+  --local-files DIR     take deploy/ and minion/ from DIR instead of GitHub (testing)
   --yes                 no questions; with neither --version nor --branch the latest release is used
   --reset-password      remove the login password (the next visitor sets a new one) and end all sessions
   --uninstall           stop and remove the demonstrator (data is kept)
@@ -51,6 +52,7 @@ while [ $# -gt 0 ]; do
 		--port) port="${2:?}"; shift 2 ;;
 		--http-port) http_port="${2:?}"; shift 2 ;;
 		--local-image) local_image="${2:?}"; shift 2 ;;
+		--local-files) local_files="${2:?}"; shift 2 ;;
 		--yes) assume_yes=true; shift ;;
 		--reset-password) reset_password=true; shift ;;
 		--uninstall) uninstall=true; shift ;;
@@ -76,7 +78,7 @@ compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrato
 
 env_file="$INSTALL_DIR/.env"
 env_tmp=""
-trap 'rm -f "$env_tmp"' EXIT  # never leave a copy of the secrets behind
+trap 'rm -f "$env_tmp"; rm -rf "${minion_dir:-}"' EXIT  # never leave a copy of the secrets behind
 env_get() { sed -n "s/^$1=//p" "$env_file" | tail -1 | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/'; }
 env_rewrite() { # drop KEY, optionally append KEY='VALUE' – single quotes: compose takes the value literally
 	env_tmp=$(mktemp "$env_file.XXXXXX")
@@ -110,6 +112,13 @@ if $uninstall; then
 	if [ -f "$INSTALL_DIR/docker-compose.yml" ] && command -v docker >/dev/null; then
 		info "Stopping the demonstrator"
 		if $purge; then compose down --remove-orphans --rmi all || true; else compose down --remove-orphans || true; fi
+	fi
+	if command -v docker >/dev/null; then  # minions of runs that were not rolled back
+		docker ps -aq --filter label=dtm-demonstrator.run | xargs -r docker rm -f >/dev/null || true
+		docker network rm dtm-minions >/dev/null 2>&1 || true
+		if $purge; then
+			docker images -q dtm-minion | xargs -r docker rmi -f >/dev/null || true
+		fi
 	fi
 	if $purge; then
 		info "Deleting $INSTALL_DIR (data included)"
@@ -186,7 +195,12 @@ fi
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 
 # --- files ----------------------------------------------------------------------------------
-fetch() { curl -fsSL "https://raw.githubusercontent.com/$REPO/$ref/$1" -o "$2" || die "could not download $1 for $ref"; }
+fetch() {
+	if [ -n "${local_files:-}" ]; then cp "$local_files/$1" "$2" || die "$1 is missing in $local_files"; return; fi
+	curl -fsSL "https://raw.githubusercontent.com/$REPO/$ref/$1" -o "$2" || die "could not download $1 for $ref"
+}
+# A release before the minions has no minion/ – that is no error
+have() { if [ -n "${local_files:-}" ]; then [ -f "$local_files/$1" ]; else curl -fsSIL "https://raw.githubusercontent.com/$REPO/$ref/$1" >/dev/null 2>&1; fi; }
 
 if [ ! -s "$env_file" ]; then
 	cat >"$env_file" <<'EOF'
@@ -313,6 +327,32 @@ grep -q '^TLS_PKCS12_PASSWORD=' "$env_file" || env_set TLS_PKCS12_PASSWORD ""
 
 fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"
 fetch deploy/Caddyfile "$INSTALL_DIR/Caddyfile"
+
+# --- minions (TrustEdge use case): image built here from DigiCert's public TrustEdge release, pinned by
+# version and checksum in minion/Dockerfile – the demonstrator does not redistribute TrustEdge.
+minion_dir=$(mktemp -d)
+if have minion/Dockerfile; then
+	fetch minion/Dockerfile "$minion_dir/Dockerfile"
+	fetch minion/entrypoint.sh "$minion_dir/entrypoint.sh"
+	minion_version=$(sed -n 's/^ARG TRUSTEDGE=//p' "$minion_dir/Dockerfile")
+	[[ "$minion_version" =~ ^[0-9.-]+$ ]] || die "unexpected TrustEdge version in minion/Dockerfile"
+	# A changed entrypoint is a new image – the tag carries a hash of the minion sources
+	minion_version="$minion_version-$(cat "$minion_dir/Dockerfile" "$minion_dir/entrypoint.sh" | sha256sum | cut -c1-8)"
+	built=yes
+	if ! docker image inspect "dtm-minion:$minion_version" >/dev/null 2>&1; then
+		info "Building the minion image (DigiCert TrustEdge $minion_version)"
+		# Not fatal: without the image only the TrustEdge use case is unavailable (the app greys it out)
+		docker build -q -t "dtm-minion:$minion_version" "$minion_dir" >/dev/null \
+			|| { built=no; echo "WARNING: could not build the minion image – TrustEdge managed devices stay unavailable" >&2; }
+	fi
+	if [ "$built" = yes ]; then
+		env_set MINION_VERSION "$minion_version"
+		# Older minion images go – one still used by a minion stays (rmi refuses)
+		docker images dtm-minion --format '{{.Repository}}:{{.Tag}}' | grep -v ":$minion_version\$" \
+			| xargs -r docker rmi >/dev/null 2>&1 || true
+	fi
+	docker network inspect dtm-minions >/dev/null 2>&1 || docker network create dtm-minions >/dev/null
+fi
 
 # --- boot integration: apply .env changes on every start ------------------------------------
 # Containers keep the environment they were created with; `compose up -d` at boot recreates the

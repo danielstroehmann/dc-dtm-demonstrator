@@ -24,11 +24,11 @@ def dtm_writes(fake) -> list[str]:
 
 # --- tiles and redirects -----------------------------------------------------------------------
 
-def test_four_tiles_without_uc_ids(configured_user, fake):
+def test_one_tile_per_catalog_entry_without_uc_ids(configured_user, fake):
     html = configured_user.get("/").text
-    assert html.count('<article class="tile">') == 4 == len(evergreen.CATALOG)
-    assert (html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
-            < html.index('formaction="/runs/new/uc05"') < html.index('formaction="/runs/new/uc06"'))
+    assert len(re.findall(r'<article class="tile[ "]', html)) == 6 == len(evergreen.CATALOG)
+    order = [html.index(f'formaction="/runs/new/{k}"') for k in ("evergreen", "uc04", "uc05", "uc06", "uc07", "uc08")]
+    assert order == sorted(order)
     for key in ("uc01", "uc02", "uc03"):
         assert f'formaction="/runs/new/{key}"' not in html
     assert 'class="uc-id"' not in html and not re.search(r"UC-?\d", html)
@@ -57,7 +57,7 @@ def test_redirect_query_is_urlencoded(configured_user):
     assert location.startswith("/runs/new/evergreen?connection=") and '"' not in location and "&x=" not in location
 
 
-@pytest.mark.parametrize("path", ["/runs/new/uc07", "/runs/new/UC06", "/runs/new/UC05", "/runs/new/UC01", "/runs/new/Evergreen", "/runs/new/evergreen."])
+@pytest.mark.parametrize("path", ["/runs/new/uc09", "/runs/new/UC07", "/runs/new/UC06", "/runs/new/UC05", "/runs/new/UC01", "/runs/new/Evergreen", "/runs/new/evergreen."])
 def test_unknown_entries_are_404(configured_user, fake, path):
     assert configured_user.get(path).status_code == 404 and fake.requests == []
 

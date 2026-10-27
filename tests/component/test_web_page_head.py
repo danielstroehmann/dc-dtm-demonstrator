@@ -109,14 +109,14 @@ def test_favicon_is_linked_and_served(web, configured_store, user, anonymous):
 # --- Advanced license marker -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("path", ["/", "/runs/new"])
-def test_only_the_uc06_tile_is_marked_advanced(configured_user, path):
+def test_only_the_advanced_tiles_are_marked(configured_user, path):
     html = configured_user.get(path).text
-    tiles = dict(re.findall(r'<article class="tile">(.*?formaction="/runs/new/(\w+)".*?)</article>', html, re.S)[i][::-1]
-                 for i in range(len(evergreen.CATALOG)))
+    tiles = dict(m[::-1] for m in re.findall(r'<article class="tile[^"]*">(.*?formaction="/runs/new/(\w+)".*?)</article>',
+                                             html, re.S))
     assert set(tiles) == set(evergreen.CATALOG)
     for key, tile in tiles.items():
         advanced = evergreen.CATALOG[key].license == "advanced"
-        assert ('<span class="tile-icon advanced" data-tip="Advanced license">' in tile) is advanced, key
+        assert ('<span class="tile-icon advanced' in tile) is advanced, key
         assert ("Advanced license" in tile) is advanced, key
         if not advanced:
             assert '<span class="tile-icon">' in tile, key

@@ -24,7 +24,7 @@ from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import cleanup, devices, dtm, enrollment, evergreen, snippets
+from . import cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, trustedge
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, DATA_DIR
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -52,11 +52,13 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
 ClientFactory = Callable[[DTMConfig, Callable[[str], None]], DTMClient]
 # Catalog of use cases offered under "New run".
 USE_CASES = evergreen.USE_CASES
+DEVICE_CASES = ("uc06", "uc07", "uc08")  # Advanced: one tile per device, enrolled/renewed per click
+FIELD_START = ("uc07", "uc08")  # devices that go into the field per click from their tile
 
 
 def max_renewals(run: dict) -> int:
     """Renewal rounds per run – the route and the button use the same limit."""
-    return devices.MAX_RENEWALS if run["use_case"] == "uc06" else enrollment.MAX_RENEWALS
+    return devices.MAX_RENEWALS if run["use_case"] in DEVICE_CASES else enrollment.MAX_RENEWALS
 
 
 def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClient,
@@ -76,6 +78,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["protocols"] = enrollment.PROTOCOLS
     templates.env.globals["auths"] = enrollment.AUTHS | {"apikey": "API key"}
     templates.env.globals["max_renewals"] = max_renewals
+    templates.env.globals["renewals_of"] = devices.renewals_of
+    templates.env.globals["max_device_renewals"] = devices.MAX_RENEWALS
+    templates.env.globals["device_cases"] = DEVICE_CASES
+    templates.env.globals["firmware"] = firmware
+    templates.env.globals["max_minions"] = trustedge.MAX_DEVICES
+    templates.env.globals["store_catalog"] = store  # the firmware card reads the cached catalogue
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     limiter = Limiter(key_func=get_remote_address)
     app.state.limiter = limiter
@@ -258,7 +266,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         several = len(store.connections()) > 1
         connections = store.connections()
         return render(request, "index.html", nav="runs", runs=runs, configured=bool(connections), several=several,
-                      connections=[_public(c) for c in connections],
+                      connections=[_public(c) for c in connections], minions_ready=await minions.available(),
                       selected=store.connection(None)["id"] if connections else None)
 
     def settings_view(request: Request, status_code: int = 200, **form):
@@ -392,7 +400,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         connections = store.connections()
         selected = selected_connection(connection)["id"] if connections else None
         return render(request, "run_catalog.html", connections=[_public(c) for c in connections],
-                      selected=selected)
+                      selected=selected, minions_ready=await minions.available())
 
     @app.get("/runs/new/{use_case}")
     async def new_run(request: Request, use_case: str, connection: str | None = None):
@@ -402,6 +410,13 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if use_case not in evergreen.CATALOG:
             raise HTTPException(404, "Unknown use case")
         conn = selected_connection(connection)
+        if (platform := evergreen.CATALOG[use_case].platform) and conn["host"] != platform:
+            # e.g. UC-8: the default connection is NL – take the first one on the use case's platform
+            conn = next((c for c in store.connections() if c["host"] == platform), None)
+            if not conn:
+                return render(request, "error.html", 400, message=f"This use case needs a connection to {platform}.")
+        if use_case == "uc08" and not await minions.available():
+            return render(request, "error.html", 400, message="This use case needs the IoT minion runtime (Docker).")
         profile_mode = dtm.PLATFORMS.get(conn["host"])
         if not profile_mode:
             return render(request, "error.html", 400,
@@ -443,7 +458,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             if problem := devices.check_choice(protocol, auth_method, field, identity):
                 raise HTTPException(400, problem)
         enrolled = use_case in ("uc03", "uc04", "uc05")  # all run on the enrollment engine
-        if use_case in ("uc04", "uc05"):  # renewal per click (uc04) / one-time passcodes in the field (uc05)
+        if use_case in ("uc04", "uc05", "uc07"):  # field enrollment / renewal via EST or CMPv2
             protocol = protocol or "est"
             if protocol not in ("est", "cmpv2"):
                 raise HTTPException(400, "Field enrollment: EST or CMPv2.")
@@ -480,7 +495,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             error = "Invalid variant or mode."
         elif not 1 <= count <= evergreen.MAX_BATCH:
             error = f"Number of certificates: 1–{evergreen.MAX_BATCH}."
-        elif use_case == "uc06" and count > devices.MAX_DEVICES:
+        elif use_case in ("uc06", "uc07") and count > devices.MAX_DEVICES:
             error = f"Number of devices: 1–{devices.MAX_DEVICES}."
         elif use_case == "uc05" and count > enrollment.MAX_PASSCODE_BATCH:
             error = f"Number of devices: 1–{enrollment.MAX_PASSCODE_BATCH} (one passcode each)."
@@ -506,10 +521,20 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if use_case == "uc06":  # sequential requests per device – no portal, no approval
             params |= {"variant": "api", "approval": False, "protocol": protocol, "auth": auth_method,
                        "field": field, "identity": identity}
+        if use_case == "uc08":  # TrustEdge: EST bootstrap, the agent fetches the operational certificate
+            if (not trustedge.supported(conn["host"]) or count > trustedge.MAX_DEVICES
+                    or cas[ca_id]["key_type"] != "ecdsa" or not await minions.available()):
+                raise HTTPException(400, f"TrustEdge managed devices: a US connection, an ECDSA issuing CA, the IoT "
+                                         f"minion runtime and 1–{trustedge.MAX_DEVICES} devices.")
+            params |= {"variant": "api", "approval": False, "protocol": "trustedge", "auth": "passcode",
+                       "pause": pause}
+        if use_case == "uc07":  # the device-ID certificate authenticates; the field protocol also renews
+            params |= {"protocol": protocol, "auth": "certificate", "field": protocol, "pause": pause}
         # A reused run ID must not inherit files of a deleted run (e.g. an old batch.zip).
         shutil.rmtree(data_dir / "runs" / run_id, ignore_errors=True)
         store.create_run(run_id, use_case, params)
-        engine = enrollment.run if enrolled else devices.run if use_case == "uc06" else evergreen.run
+        engine = (enrollment.run if enrolled else devices.run if use_case == "uc06" else retrofit.run if use_case == "uc07"
+                  else trustedge.run if use_case == "uc08" else evergreen.run)
         spawn(lambda c: engine(store, c, run_id, data_dir / "runs" / run_id), run_id)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -525,10 +550,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return render(request, "run.html", nav="runs", **live_context(run), **certificate_page(run, 1), dialect="curl")
 
     @app.get("/runs/{run_id}/live")
-    async def run_live(request: Request, run_id: str):
+    async def run_live(request: Request, run_id: str, busy: str = ""):
         run = get_run_or_404(run_id)
-        if not _active(run) and request.headers.get("hx-request"):
-            # The page was polling and the run/cleanup just finished: reload once to show the result.
+        # busy: the devices acting when the page was rendered – one finishing reloads its tile's results
+        now_busy = ",".join((run.get("result") or {}).get("busy") or [])
+        if request.headers.get("hx-request") and (not _active(run) or busy != now_busy):
+            # The page was polling and the run/cleanup/a device just finished: reload once to show the result.
             return HTMLResponse("", headers={"HX-Refresh": "true"})
         return render(request, "_run_live.html", **live_context(run))
 
@@ -574,8 +601,9 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.post("/runs/{run_id}/renew")
     async def renew_run(run_id: str):
+        """UC-4: the run's one device renews. Device-level use cases renew per device (see below)."""
         run = get_run_or_404(run_id)
-        renewable = run["use_case"] in ("uc04", "uc06")
+        renewable = run["use_case"] == "uc04"
         if renewable and run["status"] == "renewing":  # double click: just show the run
             return RedirectResponse(f"/runs/{run_id}", status_code=303)
         if not renewable or run["status"] != "completed" or run.get("cleanup_status"):
@@ -585,14 +613,113 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(409, f"At most {limit} renewals per run")
         # Claim the run before the task starts – a concurrent request must not start a second renewal.
         if store.claim_status(run_id, "completed", "renewing"):
-            if run["use_case"] == "uc06":  # renewed through the management API
-                try:
-                    spawn(lambda c: devices.renew(store, c, run_id, data_dir / "runs" / run_id), run_id)
-                except Exception:  # no client (connection gone or changed) – the run must not stay "renewing"
-                    store.claim_status(run_id, "renewing", "completed")
-                    raise
-            else:
-                spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
+            spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    @app.get("/runs/{run_id}/devices/{name}/tile")
+    async def device_tile(request: Request, run_id: str, name: str, i: int = 1):
+        """One device's tile – polled while the device acts, so its stage shows live."""
+        run = get_run_or_404(run_id)
+        device = next((d for d in (run.get("result") or {}).get("devices") or [] if d.get("name") == name), None)
+        if run["use_case"] not in DEVICE_CASES or device is None:
+            raise HTTPException(404, "Device not found")
+        if device.get("container") and name not in (run["result"].get("busy") or []):
+            # A running minion lives on its own (agent connects, installs updates) – the tile reads what it reports
+            try:
+                seen = await minions.state(device["container"])
+            except minions.MinionError:
+                seen = None
+            if seen:
+                change = {"agent": seen["agent"], "agent_since": seen["since"], "next_connect": seen["next_connect"]} | (
+                    {"firmware": seen["firmware"]} if seen["firmware"] else {})
+                if any(device.get(k) != v for k, v in change.items()):
+                    run["result"] = devices.commit(store, run_id, lambda r: devices.device_of(r, name).update(change))
+                    device = devices.device_of(run["result"], name)
+        return render(request, "_device_tile.html", run=run, d=device, loop_index=max(1, min(i, 1000)))
+
+    @app.post("/runs/{run_id}/devices/add")
+    async def add_device(run_id: str):
+        """UC-8 per click: one more IoT minion from the factory."""
+        run = get_run_or_404(run_id)
+        result = run.get("result") or {}
+        if run["use_case"] != "uc08" or not result.get("devices"):
+            raise HTTPException(404, "No IoT minions in this run")
+        if trustedge.ADDING in (result.get("busy") or []):  # a double click
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        if run["status"] != "completed" or run.get("cleanup_status"):
+            raise HTTPException(409, "Only a completed run that is not cleaned up can add devices")
+        if len(result["devices"]) >= trustedge.MAX_DEVICES:
+            raise HTTPException(409, f"At most {trustedge.MAX_DEVICES} IoT minions per run")
+        devices.commit(store, run_id, lambda r: r.update(busy=[*(r.get("busy") or []), trustedge.ADDING]))
+        try:
+            spawn(lambda c: trustedge.add_device(store, c, run_id, data_dir / "runs" / run_id), run_id)
+        except Exception:
+            devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != trustedge.ADDING]))
+            raise
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    @app.post("/runs/{run_id}/firmware/{action}/{value}")
+    async def firmware_action(run_id: str, action: str, value: str):
+        """UC-8 per click: a new firmware version (new/<figure>) or a catalogue version to the devices (deploy/<name>)."""
+        run = get_run_or_404(run_id)
+        result = run.get("result") or {}
+        if run["use_case"] != "uc08" or not result.get("devices") or action not in ("new", "deploy"):
+            raise HTTPException(404, "No firmware for this run")
+        if firmware.BUSY in (result.get("busy") or []):  # a double click
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        if run["status"] != "completed" or run.get("cleanup_status"):
+            raise HTTPException(409, "Only a completed run that is not cleaned up can change firmware")
+        if action == "new" and value not in firmware.CHARACTERS:
+            raise HTTPException(404, "Unknown figure")
+        if firmware.legacy(result):
+            raise HTTPException(409, "This run was started before the firmware catalogue")
+        if action == "deploy":
+            if value not in {e["name"] for e in firmware.catalog(store, run["params"]["account_id"])}:
+                raise HTTPException(404, "Unknown firmware version")
+            if len(result.get("firmware") or []) >= firmware.MAX_DEPLOYMENTS:
+                raise HTTPException(409, f"At most {firmware.MAX_DEPLOYMENTS} firmware deployments per run")
+        devices.commit(store, run_id, lambda r: r.update(busy=[*(r.get("busy") or []), firmware.BUSY]))
+        engine = (lambda c: firmware.create(store, c, run_id, value)) if action == "new" else (
+            lambda c: firmware.deploy(store, c, run_id, value))
+        try:
+            spawn(engine, run_id)
+        except Exception:
+            devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != firmware.BUSY]))
+            raise
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    @app.post("/runs/{run_id}/devices/{name}/{action}")
+    async def device_action(run_id: str, name: str, action: str):
+        """Advanced use cases: one device, per click – UC-7 enrolls it in the field, UC-6/UC-7 renew it."""
+        run = get_run_or_404(run_id)
+        result = run.get("result") or {}
+        # The name must be one of the run's devices – nothing is built from free input.
+        device = next((d for d in result.get("devices") or [] if d.get("name") == name), None)
+        if run["use_case"] not in DEVICE_CASES or device is None or action not in ("enroll", "renew"):
+            raise HTTPException(404, "Device not found")
+        if name in (result.get("busy") or []):  # a double click: just show the run
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        if run["status"] != "completed" or run.get("cleanup_status"):
+            raise HTTPException(409, "Only a completed run that is not cleaned up can act on its devices")
+        if action == "enroll" and (run["use_case"] not in FIELD_START or device.get("issued") or device.get("container")):
+            raise HTTPException(409, "This device is enrolled already")
+        if action == "renew" and run["use_case"] == "uc08":
+            raise HTTPException(409, "The TrustEdge agent renews its certificate itself")
+        if action == "renew":
+            if not device.get("issued"):
+                raise HTTPException(409, "Enroll the device first")
+            if devices.renewals_of(result, name) >= devices.MAX_RENEWALS:
+                raise HTTPException(409, f"At most {devices.MAX_RENEWALS} renewals per device")
+        # Devices act independently – only this one is busy (marked before the task starts, so a second
+        # request for it is a double click); the run stays completed.
+        devices.commit(store, run_id, lambda r: r.update(busy=[*(r.get("busy") or []), name]))
+        engine = ({"uc07": retrofit.enroll, "uc08": trustedge.enroll}[run["use_case"]] if action == "enroll"
+                  else devices.renew)
+        try:
+            spawn(lambda c: engine(store, c, run_id, data_dir / "runs" / run_id, name), run_id)
+        except Exception:  # no client (connection gone or changed) – the device must not stay busy
+            devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != name]))
+            raise
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     @app.post("/runs/{run_id}/enroll")
@@ -705,7 +832,8 @@ def _rolled_back(run: dict) -> bool:
 
 
 def _active(run: dict) -> bool:
-    return run["status"] in ACTIVE or run.get("cleanup_status") == "running"
+    return (run["status"] in ACTIVE or run.get("cleanup_status") == "running"
+            or bool((run.get("result") or {}).get("busy")))  # a device of an Advanced run is enrolling/renewing
 
 
 def build() -> FastAPI:
