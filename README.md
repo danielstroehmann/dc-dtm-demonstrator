@@ -22,7 +22,7 @@ everything back afterwards with one click.
 | Ubuntu Server 26.04, arm64 | `install.sh` | Supported – multi-arch image; image and stack tested on arm64 (CI), full install not yet verified |
 | Windows Server 2025, x64 | `install.ps1` | Verified on a fresh machine, incl. restart without logon |
 | Windows Server 2022, x64 | `install.ps1` | Verified on a fresh machine, incl. restart without logon |
-| Windows 11, x64 | `install.ps1` | Not yet verified |
+| Windows 11 Pro, x64 | `install.ps1` | Verified on a fresh machine, incl. restart without logon |
 
 Windows: Desktop Experience (not Server Core). In a virtual machine the host must allow nested virtualisation
 (e.g. Proxmox/KVM: CPU type `host`).
