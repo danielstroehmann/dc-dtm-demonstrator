@@ -113,9 +113,9 @@ class Store:
                 self._db.execute("ROLLBACK")
                 raise
 
-    def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
+    def _exec(self, sql: str, args: tuple = ()) -> "_Result":
         with self._lock:
-            return self._db.execute(sql, args)
+            return _Result(self._db.execute(sql, args))
 
     # settings
     def get_setting(self, key: str) -> str | None:
@@ -250,6 +250,25 @@ class Store:
             dict(r)
             for r in self._exec("SELECT ts, level, message FROM run_events WHERE run_id = ? ORDER BY id", (run_id,))
         ]
+
+
+class _Result:
+    """A statement's rows, read while the lock is held: the connection is shared between threads (e.g.
+    the test client next to the app's loop), and a cursor fetched after the lock is released can return
+    another statement's row (seen in CI: a run without params)."""
+
+    def __init__(self, cursor: sqlite3.Cursor):
+        self.rows = cursor.fetchall() if cursor.description else []
+        self.rowcount = cursor.rowcount
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list:
+        return self.rows
+
+    def __iter__(self):
+        return iter(self.rows)
 
 
 def _run(row: sqlite3.Row) -> dict:

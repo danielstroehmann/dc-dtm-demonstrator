@@ -1,4 +1,6 @@
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -369,3 +371,44 @@ def test_restart_clears_every_progress(tmp_path):
     after.mark_interrupted()
     assert after.get_run("c1")["cleanup_status"] == "interrupted" and after.get_run("c1")["progress"] is None
     assert after.get_run("r1")["status"] == "interrupted" and after.get_run("r1")["progress"] is None
+
+
+def test_concurrent_reads_and_writes_never_mix_up_rows(tmp_path):
+    """The connection is shared between threads; rows must be read under the lock, otherwise a reader
+    gets another statement's row (seen in CI: a run whose params came back NULL)."""
+    store = Store(tmp_path / "demonstrator.db")
+    runs = [f"r{i}" for i in range(4)]
+    for run_id in runs:
+        store.create_run(run_id, "uc01", {"run": run_id})
+        store.add_event(run_id, "created")
+    errors: list[BaseException] = []
+    stop = time.monotonic() + 0.5
+
+    def reader():
+        try:
+            while time.monotonic() < stop and not errors:
+                for run_id in runs:
+                    run = store.get_run(run_id)
+                    assert run["id"] == run_id and run["params"] == {"run": run_id}, run
+                    assert all(e["message"] for e in store.events(run_id))
+                assert {r["id"]: r["params"] for r in store.list_runs()} == {r: {"run": r} for r in runs}
+        except BaseException as exc:  # noqa: BLE001 - collected and re-raised in the test thread
+            errors.append(exc)
+
+    def writer():
+        try:
+            n = 0
+            while time.monotonic() < stop and not errors:
+                run_id = runs[n % len(runs)]
+                store.update_run(run_id, progress={"n": n})
+                store.add_event(run_id, f"step {n}")
+                n += 1
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader) for _ in range(3)] + [threading.Thread(target=writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[0]
