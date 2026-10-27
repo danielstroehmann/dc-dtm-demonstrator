@@ -318,13 +318,27 @@ function Install-StartTask {
     Start-ScheduledTask -TaskName $TaskName
 }
 
+$WslVmCreatorId = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"  # WSL's id in the Hyper-V firewall
+
 function Install-Firewall {
-    # The port proxy runs in the IP Helper service; the rule admits the local subnet only.
+    # Defender Firewall is on in every profile of a fresh Windows: open the ports for the port proxy (IP
+    # Helper service). Domain and private networks: any client (routed subnets, VPN); a network Windows
+    # classified as public (common on a fresh workgroup machine): the local subnet only.
     Set-Service iphlpsvc -StartupType Automatic
     Start-Service iphlpsvc
     Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName "$FirewallGroup (HTTPS/HTTP)" -Group $FirewallGroup -Direction Inbound `
-        -Protocol TCP -LocalPort $Ports -RemoteAddress LocalSubnet -Action Allow -Profile Any | Out-Null
+        -Protocol TCP -LocalPort $Ports -Action Allow -Profile Domain, Private | Out-Null
+    New-NetFirewallRule -DisplayName "$FirewallGroup (HTTPS/HTTP, public network: local subnet)" -Group $FirewallGroup `
+        -Direction Inbound -Protocol TCP -LocalPort $Ports -RemoteAddress LocalSubnet -Action Allow -Profile Public | Out-Null
+    # Windows 11 22H2+ and Server 2025 also filter traffic into the WSL VM (Hyper-V firewall, WSL 2.0+).
+    if (Get-Command New-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
+        Get-NetFirewallHyperVRule -Name "DtmDemonstrator-*" -ErrorAction SilentlyContinue | Remove-NetFirewallHyperVRule
+        foreach ($port in $Ports) {
+            New-NetFirewallHyperVRule -Name "DtmDemonstrator-$port" -DisplayName "$FirewallGroup (TCP $port)" `
+                -Direction Inbound -VMCreatorId $WslVmCreatorId -Protocol TCP -LocalPorts $port -Action Allow | Out-Null
+        }
+    }
 }
 
 function Test-Running([string[]]$HostNames) {
@@ -347,6 +361,9 @@ function Uninstall-Demonstrator {
         & netsh interface portproxy delete v4tov4 "listenport=$($entry.Port)" "listenaddress=$($entry.Address)" | Out-Null
     }
     Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    if (Get-Command Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
+        Get-NetFirewallHyperVRule -Name "DtmDemonstrator-*" -ErrorAction SilentlyContinue | Remove-NetFirewallHyperVRule
+    }
     if (Test-Distro) {
         $answer = if ($Yes) { "y" } else { Read-Host "Delete the WSL distro $Distro with all demonstrator data? [y/N]" }
         if ($answer -match '^[yY]') {

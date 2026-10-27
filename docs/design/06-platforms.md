@@ -65,8 +65,11 @@ irm https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/down
 - "latest" is resolved to a tag once – install.sh, the saved copy and the continuation are the same release.
 - The distro gets no Windows drives and no interop (`/etc/wsl.conf`): the start task runs elevated.
 - The start task loops: keep-alive plus a port proxy refresh every 5 minutes (WSL updates, DHCP).
-- LAN addresses: adapters with a default gateway, without virtual switches; the firewall rule admits the
-  local subnet only; the IP Helper service (port proxy) is set to automatic.
+- LAN addresses: adapters with a default gateway, without virtual switches; the IP Helper service (port
+  proxy) is set to automatic.
+- Firewall (author, 2026-10-27: Defender is on on a fresh Windows): Defender Firewall rules for TCP 443/80 –
+  domain and private profile from any address, public profile from the local subnet only; plus Hyper-V
+  firewall rules for the WSL VM where it exists (Win 11 22H2+, Server 2025).
 - The installer ends with a check: `https://localhost/healthz` answers and the start task runs.
 
 ### Risks and open questions
