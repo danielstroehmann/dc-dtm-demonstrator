@@ -1,7 +1,7 @@
 """Stateful fake of the DTM REST API, built on respx routes.
 
 It models only what the demonstrator uses, with the behaviour verified against the live
-account (see docs/design/uc-01-evergreen.md): division create without ID in the response,
+account (verified live): division create without ID in the response,
 policy delete only via the `api-ui` path, batch result as a CMS envelope, upper-case
 certificate status, `400` on re-revoke, eventual consistency of the issued list.
 
@@ -254,7 +254,7 @@ class FakeDTM:
         self.reenroll_unauthorized = 0
         self.reenroll_presented: list[str] = []  # serials of the client certificates presented
         self.reenroll_delay = 0.0  # real seconds per simplereenroll (to overlap requests in tests)
-        # UC-6 managed devices (verified live on NL 2026-10-26, docs/design/uc-06-managed-devices.md).
+        # UC-6 managed devices (verified live on NL 2026-10-26).
         # The device endpoints ignore account_id: lists and GETs span every account the key sees,
         # the objects carry their account_id.
         self.device_groups: dict[str, dict] = {}

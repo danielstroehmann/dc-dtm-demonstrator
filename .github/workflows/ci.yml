@@ -40,7 +40,7 @@ jobs:
       - run: scripts/stack-smoke.sh demonstrator:ci
 
   # The Windows installer: lint and Pester tests of its logic. GitHub's runners have no nested
-  # virtualisation, so WSL 2 cannot run here – the real install is verified in VMs (06-platforms.md).
+  # virtualisation, so WSL 2 cannot run here – the real install is verified in VMs before a release.
   windows:
     strategy:
       fail-fast: false  # one runner's hiccup must not cancel the other

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.live
 
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 RUN_TIMEOUT_S = 300
-# Binding author rule (CLAUDE.md): live runs keep DTM load minimal – at most 2 certificates per run,
+# Binding author rule: live runs keep DTM load minimal – at most 2 certificates per run,
 # a batch of 2 counts as a full batch test. tests/live/conftest.py enforces the limit.
 LIVE_COUNT = 2
 CLEANUP_TIMEOUT_S = 600

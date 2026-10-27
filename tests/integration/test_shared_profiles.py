@@ -1,4 +1,4 @@
-"""Shared certificate profiles per account (docs/design/05-guide-and-shared-profiles.md) against the
+"""Shared certificate profiles per account against the
 stateful fake DTM: find, enable, create once, races, mismatches, template caps, foreign accounts,
 retire – and that runs use the right one and never put it into the cleanup ledger."""
 

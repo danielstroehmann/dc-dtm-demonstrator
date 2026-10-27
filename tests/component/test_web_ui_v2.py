@@ -1,4 +1,4 @@
-"""UI v2 (docs/design/04-ui-design.md): welcome page, use-case tiles, app shell, run stepper, CSS contract."""
+"""UI v2: welcome page, use-case tiles, app shell, run stepper, CSS contract."""
 
 import re
 from pathlib import Path

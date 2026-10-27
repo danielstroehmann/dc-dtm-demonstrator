@@ -20,6 +20,11 @@ secrets/
 data/
 *.log
 
+# Development only – kept on the author's machine, not part of the product
+CLAUDE.md
+docs/design/
+docs/research/
+
 # Local-only Claude Code files (not published)
 .claude/commons/
 .claude/settings.local.json

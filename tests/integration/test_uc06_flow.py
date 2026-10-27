@@ -2,7 +2,7 @@
 or MAC address) and gets its certificate – CN = identity, not the device name – filed under it through the
 group's attribute mapping. Factory via REST (API key, passcode, factory certificate), EST or CMPv2 on the
 device-group endpoints; renewal per click via REST or the factory's protocol. Against the stateful fake
-DTM (the facts verified live on NL, docs/design/uc-06-managed-devices.md), the fake openssl and the
+DTM (the facts verified live on NL), the fake openssl and the
 station's routed httpx client."""
 
 import json

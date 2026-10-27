@@ -2,7 +2,7 @@
 
 Every call is scoped to one configured account (`account_id`); the API key may see several.
 Request paths and payloads follow what was verified against a live account – the public
-OpenAPI spec deviates in several places (see docs/design/uc-01-evergreen.md).
+OpenAPI spec deviates in several places (verified live; the deviations are noted where they matter).
 """
 
 import asyncio

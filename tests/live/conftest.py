@@ -3,7 +3,7 @@ import zipfile
 
 import pytest
 
-# Binding author rule (CLAUDE.md): testing surfaced a DTM revocation-timeout bug that endangers DTM
+# Binding author rule: testing surfaced a DTM revocation-timeout bug that endangers DTM
 # SLAs, so live tests request at most this many certificates in one run.
 MAX_LIVE_CERTIFICATES = 2
 
@@ -33,7 +33,7 @@ def certificates_in_payload(payload: bytes) -> int:
 def check(count: int, what: str) -> None:
     if count > MAX_LIVE_CERTIFICATES:
         pytest.fail(f"live test requests {count} certificates in one {what} – the limit is "
-                    f"{MAX_LIVE_CERTIFICATES} (DTM load rule, see CLAUDE.md)", pytrace=False)
+                    f"{MAX_LIVE_CERTIFICATES} (DTM load rule)", pytrace=False)
 
 
 @pytest.fixture(autouse=True)

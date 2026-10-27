@@ -6,7 +6,7 @@ attribute mapping. In the field the devices renew per click – via the REST API
 with the factory's protocol, the device itself with its current certificate.
 
 Every request goes to the device-group variant of the endpoint – only that one files the certificate
-under the device. Verified live on NL 2026-10-26 (docs/design/uc-06-managed-devices.md)."""
+under the device. Verified live on NL 2026-10-26."""
 
 import asyncio
 import hashlib

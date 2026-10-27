@@ -3,7 +3,7 @@ station generates each key pair, authenticates with a passcode or its own client
 enrolls one device; the timing is extrapolated to a production run.
 
 Enrollment calls never carry the API key: DTM authenticates them through the run's
-authentication policy. Verified live 2026-10-24 (docs/design/uc-03-factory-protocols.md)."""
+authentication policy. Verified live 2026-10-24."""
 
 import asyncio
 import base64
@@ -33,7 +33,7 @@ PROTOCOLS = {"est": "EST", "cmpv2": "CMPv2", "scep": "SCEP", "rest": "REST API"}
 AUTHS = {"passcode": "Passcode", "certificate": "Factory certificate"}
 ESTIMATE_DEVICES = 1000
 # UC-5 batch: every device costs a passcode, an enrollment and – in the rollback – a revoke plus a
-# passcode delete, all one after another; kept small for DTM's sake (CLAUDE.md "minimise load").
+# passcode delete, all one after another; kept small for DTM's sake (minimal load on DTM).
 MAX_PASSCODE_BATCH = 100
 REQUEST_TIMEOUT = 30.0
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # DTM IDs that end up in openssl argv / URLs

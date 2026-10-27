@@ -1,4 +1,4 @@
-"""The guided entry (docs/design/05-guide-and-shared-profiles.md): tiles, redirects, the form's
+"""The guided entry: tiles, redirects, the form's
 data-when contract (driven by tests/guide_form.py, a stand-in for app.js), what each path through the
 guide submits and resolves to, server-side checks, profile hints and the Settings view of the
 shared profiles."""
