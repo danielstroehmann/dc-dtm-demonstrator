@@ -274,6 +274,8 @@ function Invoke-Distro([string]$Command) {
     # --exec: parsed once by bash -c. The console stays attached (install.sh asks for the password on
     # /dev/tty) - never capture this output. $Command must not contain double quotes.
     if ($Command.Contains('"')) { Stop-Install "internal: double quote in a distro command" }
+    # Progress (docker pull) goes to stderr; with redirected output, PowerShell 5.1 would stop on it.
+    $ErrorActionPreference = "Continue"
     & wsl.exe -d $Distro -u root --exec bash -c $Command
     if ($LASTEXITCODE -ne 0) { Stop-Install "command in $Distro failed ($LASTEXITCODE)" }
 }
