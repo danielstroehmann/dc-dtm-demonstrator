@@ -290,7 +290,7 @@ def test_device_tile_route(configured_user, store, fake):
     assert response.status_code == 200 and 'id="tile-3"' in response.text and name in response.text
     assert "hx-get" not in response.text  # nothing acts – nothing to poll
     assert configured_user.get("/runs/m1/devices/robot-m1-uc06-minion-0009/tile").status_code == 404
-    assert 'id="tile-1000"' in configured_user.get(f"/runs/m1/devices/{name}/tile?i=99999").text  # clamped
+    assert 'id="tile-2000"' in configured_user.get(f"/runs/m1/devices/{name}/tile?i=99999").text  # clamped to the wall
     assert configured_user.get("/runs/nope/devices/x/tile").status_code == 404
 
 

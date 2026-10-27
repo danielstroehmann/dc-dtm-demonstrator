@@ -5,6 +5,7 @@ import re
 import pytest
 
 from tests.component.test_web_runs import assert_phase_titles, cleaned, finished, form
+from tests.component.test_web_uc06 import tiles
 from tests.conftest import wait_for
 from tests.fakedtm import ECDSA_CA_ID
 
@@ -44,9 +45,10 @@ def test_uc04_forces_est_and_one_device(configured_user, store, enroll_net):
     assert (p["protocol"], p["count"], p["variant"], p["mode"], p["approval"], p["auth"]) == (
         "est", 1, "api", "single", False, "certificate")
     html = configured_user.get("/runs/d1").text
-    assert "<h2>Field renewal</h2>" in html and "Renew now" in html
+    (tile,) = tiles(html)  # the one device carries its Renew button – no separate renewal card
+    assert 'action="/runs/d1/renew"' in tile and ">Renew</button>" in tile and "<h2>Field renewal</h2>" not in html
+    assert "EST · renewal 0 of 5" in tile and tile.count("<li>") == 1  # nothing renewed yet
     assert "Renewable device certificates · EST · Factory certificate · 1 request" in html  # run-page title
-    assert "Current certificate:" not in html  # nothing renewed yet
     # the renewal block of the reproducible steps is there before the first renewal
     assert_phase_titles(configured_user.get("/runs/d1/api?dialect=curl").text,
                         [("Factory enrollment", "factory"), ("Field renewal", "refresh")])
@@ -95,7 +97,9 @@ def test_renew_through_the_web(configured_user, store, enroll_net):
     html = configured_user.get("/runs/d1").text
     serial = store.get_run("d1")["result"]["renewals"][0]["serial"]
     assert "<small>Renewals</small>" in html and "<small" in html and "Last renewal" in html
-    assert f'Current certificate: <span class="mono">{serial}</span>' in html
+    (tile,) = tiles(html)  # current and previous certificate, the new one first
+    assert tile.count("<li>") == 2 and "EST · renewal 1 of 5" in tile and re.search(r"Renewed in \d+\.\d\d s", tile)
+    assert tile.index(f'data-tip="Serial {serial} · valid until') < tile.index('data-tip="renewed">renewed</span>')
     assert "PRIVATE KEY" not in html
     api = configured_user.get("/runs/d1/api?dialect=curl").text
     assert_phase_titles(api, [("Factory enrollment", "factory"), ("Field renewal", "refresh")])
@@ -115,7 +119,8 @@ def test_renew_double_click_starts_one_renewal(configured_user, store, enroll_ne
     assert (first.status_code, second.status_code) == (303, 303)
     assert first.headers["location"] == second.headers["location"] == "/runs/d1"
     # button off while it runs
-    assert re.search(r'class="btn-icon" disabled\s+aria-busy="true"', configured_user.get("/runs/d1").text)
+    (tile,) = tiles(configured_user.get("/runs/d1").text)
+    assert re.search(r'class="btn-sm btn-icon" disabled\s+aria-busy="true"', tile) and ">renewing</span>" in tile
     renewed(store)
     assert renewals(store) == 1 and len([r for r in enroll_net.enroll_requests
                                          if r.url.path.endswith("/simplereenroll")]) == 1
@@ -150,7 +155,7 @@ def test_no_renewal_after_certificates_cleanup_or_rollback(configured_user, stor
     configured_user.post("/runs/d1/cleanup", data={"mode": "certificates"})
     assert cleaned(store, "d1")["cleanup_status"] == "done"
     assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 409
-    assert "Renew now" not in configured_user.get("/runs/d1").text
+    assert 'action="/runs/d1/renew"' not in configured_user.get("/runs/d1").text
     configured_user.post("/runs/d1/cleanup", data={"mode": "full"})
     assert cleaned(store, "d1")["cleanup_status"] == "done"
     assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 409
@@ -206,7 +211,13 @@ def test_at_most_five_renewals(configured_user, store, enroll_net):
         assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 303
         wait_for(lambda: renewals(store) == n and store.get_run("d1")["status"] == "completed", what=f"renewal {n}")
     html = configured_user.get("/runs/d1").text
-    assert re.search(r'<button type="submit" class="btn-icon" disabled\s+data-tip="At most 5 renewals per run">', html)
+    assert re.search(r'<button type="submit" class="btn-sm btn-icon" disabled\s+data-tip="At most 5 renewals per run">', html)
+    # six certificates: current and previous, the four before collapse into one muted row listing them
+    (tile,) = tiles(html)
+    assert tile.count("<li>") == 2 and "+ 4 earlier</span>" in tile
+    earlier = re.search(r'<li class="earlier"><span class="muted" data-tip="([^"]*)">', tile).group(1)
+    serials = [c["serial"] for c in store.get_run("d1")["result"]["certificates"]]
+    assert [s for s in serials if s in earlier] == serials[:4] and earlier.count(" | ") == 3
     assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 409
     assert renewals(store) == 5 and len(enroll_net.issued()) == 6
     assert len([r for r in enroll_net.enroll_requests if r.url.path.endswith("/simplereenroll")]) == 5

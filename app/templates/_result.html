@@ -1,15 +1,12 @@
 {% set r = run.result %}
-{# Device-level use cases show each certificate on its device's tile instead #}
-{% if (r.certificates and not r.devices) or (r.artifact and artifact_available) %}
+{# The certificates sit on their devices' tiles (or the minion wall) – only the batch artifact is left here #}
+{% if r.artifact and artifact_available %}
 <article class="card">
   <div class="card-head"><h2>Payload</h2></div>
-  {% if r.certificates %}{% include "_certificates.html" %}{% endif %}
-  {% if r.artifact and artifact_available %}
   <div class="download">
     {% if run.params.variant == "webui" %}<p class="box-hint">Upload in DTM web UI · policy <code>{{ r.policy }}</code></p>{% endif %}
     <a href="/runs/{{ run.id }}/artifact" role="button" class="secondary" download>Download {{ r.artifact }}</a>
   </div>
-  {% endif %}
 </article>
 {% endif %}
 

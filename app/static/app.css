@@ -668,3 +668,36 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .tstack { background: var(--dc-grey-bg); border: 1px solid var(--dc-border); border-radius: var(--pico-border-radius); overflow: hidden; }
 .tstack > .tbox { border: 0; border-radius: 0; background: transparent; }
 .tstack > .tbox + .tbox { border-top: 1px solid var(--dc-border); }
+/* Tiles of UC-1..5: the static v1 minion; certificates beyond current and previous collapse into one muted row */
+.still .dancer, .still .dancer * { animation: none; }
+.certs .earlier { display: contents; }
+.certs .earlier > span { grid-column: 1 / -1; font-size: 0.8rem; }
+
+/* Minion wall (from 11 devices): one <use> of a pixel head per device, coloured by state – classes only (CSP) */
+.wall-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.wall-bar .wall-chip { display: inline-flex; align-items: center; gap: 0.35rem; width: auto; margin: 0; padding: 0.1rem var(--s3);
+  font-size: 0.8rem; color: #333; background: #fff; border: 1px solid var(--dc-border); border-radius: 1rem; }
+.wall-chip::before { content: ""; width: 0.55rem; height: 0.55rem; border-radius: 50%; background: currentColor; }
+.wall-bar .wall-chip[aria-pressed="true"] { border-color: var(--dc-blue); background: var(--dc-blue-tint); }
+.wall-bar input.wall-search { width: 14rem; height: auto; margin: 0; padding: 0.15rem var(--s3) 0.15rem 2rem; font-size: 0.85rem; background-position: 0.6rem center; }
+.wall { display: block; max-width: 100%; height: auto; }
+.wall use { color: #b0b7bf; transform-box: fill-box; transform-origin: center; transition: opacity 0.15s ease; }
+.wall use[data-n] { cursor: pointer; }
+.wall .busy, .wall-chip.busy::before { color: var(--dc-blue); }
+.wall .busy { animation: pulse 1.2s ease-in-out infinite; }
+.wall .issued, .wall-chip.issued::before { color: #43a047; }
+.wall .renewed, .wall-chip.renewed::before { color: var(--dc-orange); }
+.wall .failed, .wall-chip.failed::before { color: #e53935; }
+.wall .revoked { opacity: 0.3; }
+.wall-chip.pending::before, .wall-chip.revoked::before { color: #b0b7bf; }
+.wall .pop { animation: wall-pop 0.35s ease-out; }
+.wall .selected { stroke: var(--dc-blue-dark); stroke-width: 1px; }
+@keyframes wall-pop { 50% { transform: scale(1.5); } }
+/* filter by a counter chip, highlight search hits */
+.wall[data-filter="pending"] use:not(.pending), .wall[data-filter="busy"] use:not(.busy), .wall[data-filter="issued"] use:not(.issued),
+.wall[data-filter="renewed"] use:not(.renewed), .wall[data-filter="failed"] use:not(.failed),
+.wall[data-filter="revoked"] use:not(.revoked), .wall.searching use:not(.hit) { opacity: 0.12; }
+@media (prefers-reduced-motion: reduce) { .wall use { animation: none !important; } }
+.side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 900; width: 34rem; padding: var(--s6) var(--s5) var(--s5);
+  overflow-y: auto; background: var(--dc-grey-bg); border-left: 1px solid var(--dc-border); box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12); }
+.panel-close { position: absolute; top: var(--s2); right: var(--s3); width: auto; margin: 0; padding: 0 var(--s2); line-height: 1.6; }

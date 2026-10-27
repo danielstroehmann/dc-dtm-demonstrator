@@ -150,8 +150,8 @@ def test_pem_download_happy_path(configured_user, store, data_dir):
         cert = x509.load_pem_x509_certificate(response.content)
         assert format(cert.serial_number, "X") == c["serial"]
         assert response.content == (data_dir / "runs" / "r1" / "certificates" / f"{c['serial']}.pem").read_bytes()
-    # the partial used for paging links the same way
-    assert pem_links(configured_user.get("/runs/r1/certificates").text) == links
+    # the polled devices card links the same way
+    assert pem_links(configured_user.get("/runs/r1/devices").text) == links
     assert "BEGIN CERTIFICATE" not in json.dumps(store.get_run("r1"))
 
 

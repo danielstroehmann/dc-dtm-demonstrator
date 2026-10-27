@@ -24,7 +24,7 @@ from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, trustedge
+from . import cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles, trustedge
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, DATA_DIR
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -45,7 +45,6 @@ NAME = re.compile(r"[A-Za-z0-9 ._-]{1,40}")
 HOST = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
 ACTIVE = {"pending", "running", "renewing"}
 SHOWN_EVENTS = 200
-CERTIFICATES_PER_PAGE = 10
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 
@@ -82,6 +81,9 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["max_device_renewals"] = devices.MAX_RENEWALS
     templates.env.globals["device_cases"] = DEVICE_CASES
     templates.env.globals["firmware"] = firmware
+    templates.env.globals["tiles"] = tiles
+    # Runs from before the PEM downloads – and fully rolled back ones – have no certificate files to link
+    templates.env.globals["pem_available"] = lambda run: (data_dir / "runs" / run["id"] / "certificates").is_dir()
     templates.env.globals["max_minions"] = trustedge.MAX_DEVICES
     templates.env.globals["store_catalog"] = store  # the firmware card reads the cached catalogue
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -547,7 +549,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     @app.get("/runs/{run_id}")
     async def run_page(request: Request, run_id: str):
         run = get_run_or_404(run_id)
-        return render(request, "run.html", nav="runs", **live_context(run), **certificate_page(run, 1), dialect="curl")
+        return render(request, "run.html", nav="runs", **live_context(run), dialect="curl")
 
     @app.get("/runs/{run_id}/live")
     async def run_live(request: Request, run_id: str, busy: str = ""):
@@ -585,19 +587,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                 "rolled_back": _rolled_back(run),
                 "artifact_available": _artifact_path(data_dir, run) is not None}
 
-    def certificate_page(run: dict, page: int) -> dict:
-        certificates = (run.get("result") or {}).get("certificates") or []
-        pages = max(1, -(-len(certificates) // CERTIFICATES_PER_PAGE))
-        page = min(max(page, 1), pages)
-        first = (page - 1) * CERTIFICATES_PER_PAGE
-        return {"cert_rows": certificates[first:first + CERTIFICATES_PER_PAGE], "cert_page": page,
-                "cert_pages": pages, "cert_first": first + 1,
-                "pem_available": (data_dir / "runs" / run["id"] / "certificates").is_dir()}
-
-    @app.get("/runs/{run_id}/certificates")
-    async def run_certificates(request: Request, run_id: str, page: int = 1):
-        run = get_run_or_404(run_id)
-        return render(request, "_certificates.html", run=run, **certificate_page(run, page))
+    @app.get("/runs/{run_id}/devices")
+    async def run_devices(request: Request, run_id: str):
+        """The devices card – polled while a batch issues, so the wall fills up live."""
+        return render(request, "_device_card.html", run=get_run_or_404(run_id))
 
     @app.post("/runs/{run_id}/renew")
     async def renew_run(run_id: str):
@@ -616,14 +609,19 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
+    def device_or_404(run: dict, name: str) -> dict:
+        # The name must be one of the run's devices – nothing is built from free input.
+        device = next((d for d in tiles.devices(run) if d["name"] is not None and d["name"] == name), None)
+        if device is None:
+            raise HTTPException(404, "Device not found")
+        return device
+
     @app.get("/runs/{run_id}/devices/{name}/tile")
     async def device_tile(request: Request, run_id: str, name: str, i: int = 1):
-        """One device's tile – polled while the device acts, so its stage shows live."""
+        """One device's tile – polled while the device acts, so its stage shows live; the wall's side panel shows it."""
         run = get_run_or_404(run_id)
-        device = next((d for d in (run.get("result") or {}).get("devices") or [] if d.get("name") == name), None)
-        if run["use_case"] not in DEVICE_CASES or device is None:
-            raise HTTPException(404, "Device not found")
-        if device.get("container") and name not in (run["result"].get("busy") or []):
+        device = device_or_404(run, name)
+        if device.get("container") and not device["busy"]:
             # A running minion lives on its own (agent connects, installs updates) – the tile reads what it reports
             try:
                 seen = await minions.state(device["container"])
@@ -634,8 +632,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                     {"firmware": seen["firmware"]} if seen["firmware"] else {})
                 if any(device.get(k) != v for k, v in change.items()):
                     run["result"] = devices.commit(store, run_id, lambda r: devices.device_of(r, name).update(change))
-                    device = devices.device_of(run["result"], name)
-        return render(request, "_device_tile.html", run=run, d=device, loop_index=max(1, min(i, 1000)))
+                    device = device_or_404(run, name)
+        return render(request, "_device_tile.html", run=run, d=device, loop_index=max(1, min(i, evergreen.MAX_BATCH)))
 
     @app.post("/runs/{run_id}/devices/add")
     async def add_device(run_id: str):
@@ -690,14 +688,21 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.post("/runs/{run_id}/devices/{name}/{action}")
     async def device_action(run_id: str, name: str, action: str):
-        """Advanced use cases: one device, per click – UC-7 enrolls it in the field, UC-6/UC-7 renew it."""
+        """One device, per click – UC-7 enrolls it in the field, UC-6/UC-7 renew it, UC-5 enrolls it with its passcode."""
         run = get_run_or_404(run_id)
         result = run.get("result") or {}
-        # The name must be one of the run's devices – nothing is built from free input.
-        device = next((d for d in result.get("devices") or [] if d.get("name") == name), None)
-        if run["use_case"] not in DEVICE_CASES or device is None or action not in ("enroll", "renew"):
+        if run["use_case"] not in (*DEVICE_CASES, "uc05") or action not in ("enroll", "renew"):
             raise HTTPException(404, "Device not found")
-        if name in (result.get("busy") or []):  # a double click: just show the run
+        device = device_or_404(run, name)
+        if device["busy"]:  # a double click: just show the run
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        if run["use_case"] == "uc05":
+            # The paused run's task holds the passcodes and enrolls the devices marked busy (enrollment._field_clicks)
+            if action != "enroll" or run["status"] != "paused" or run.get("cleanup_status"):
+                raise HTTPException(409, "Only a paused passcode-bound run enrolls its devices per click")
+            if device["issued"]:
+                raise HTTPException(409, "This device is enrolled already")
+            devices.commit(store, run_id, lambda r: r.update(busy=[*(r.get("busy") or []), name]))
             return RedirectResponse(f"/runs/{run_id}", status_code=303)
         if run["status"] != "completed" or run.get("cleanup_status"):
             raise HTTPException(409, "Only a completed run that is not cleaned up can act on its devices")

@@ -356,11 +356,12 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                 if protocol == "cmpv2":
                     variables["PASSCODE_REF"] = passcode_ref
                     _record_passcode_ref(api, "recurring")
-                if p.get("pause"):
-                    await _await_field(store, run_id, result, log)
             station = Station(p["dtm_host"], protocol, auth, policy_id, cmp_id, passcode, passcode_ref, factory,
                               Path(tmp), ca_chain_pem)
-            result |= await _enroll(station, api, store, run_id, p, log, credentials)
+            clicks = _field_clicks(store, run_id, run_dir, result, log) if field and p.get("pause") else None
+            result |= await _enroll(station, api, store, run_id, p, log, credentials, clicks)
+            if clicks:
+                store.claim_status(run_id, "paused", "running")
             if p["use_case"] == "uc04":  # the device in the field: its key and certificate
                 _save_device(run_dir, station.last_key, result["certificates"][-1]["pem"])
                 if protocol == "cmpv2":  # CMPv2 key update: same endpoint, answers signed by the issuing CA
@@ -375,7 +376,7 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                 wrong = [c["common_name"] for c in result["certificates"] if c["common_name"] not in credentials]
                 if wrong:
                     raise EnrollmentError(f"certificates carry other names than their passcodes: {wrong[:3]}")
-                bound_cn = next(iter(credentials))
+                bound_cn = result["certificates"][0]["common_name"]  # a used passcode – the first device enrolled
                 result["bound_cn"] = bound_cn
                 if p["count"] == 1:  # one device – nothing to extrapolate
                     for key in ("estimate_min", "estimate_devices"):
@@ -415,20 +416,48 @@ PAUSE_MAX_S = 3600
 PAUSE_POLL_S = 1.0
 
 
-async def _await_field(store: Store, run_id: str, result: dict, log) -> None:
-    """UC-5: the passcodes are in DTM – the run waits until the presenter starts the enrollment in the
-    field (POST /runs/{id}/enroll sets it running again), so the passcode configuration can be shown
-    in the DTM portal first. The passcodes stay in this task's memory; a rollback ends the wait."""
+def _field_clicks(store: Store, run_id: str, run_dir: Path, result: dict, log):
+    """UC-5: the passcodes are in DTM – the run waits, so the passcode configuration can be shown in the DTM portal
+    first. Each device then enrolls when the presenter clicks its tile (POST /runs/{id}/devices/{cn}/enroll marks it
+    busy); POST /runs/{id}/enroll sets the run running and the rest follows at once. The passcodes stay in this task's
+    memory; a rollback ends the wait, and so does an hour without a click (with no device enrolled: the run fails).
+    Returns the wait for _enroll: the next device to enroll, or None to end the field step."""
     store.update_run(run_id, status="paused", result=result, progress=None)
-    log("Passcodes are in DTM – show them in the portal, then start the field enrollment", "success")
-    deadline = time.monotonic() + PAUSE_MAX_S
-    while (run := store.get_run(run_id) or {"status": "paused", "cleanup_status": "gone"})["status"] == "paused":
-        if run.get("cleanup_status"):  # rolled back (or deleted) – the cleanup owns the run now
-            raise RolledBack("rolled back before the field enrollment")
-        if time.monotonic() > deadline:
-            raise EnrollmentError(f"the field enrollment was not started within {PAUSE_MAX_S // 60} minutes")
-        await asyncio.sleep(PAUSE_POLL_S)
-    log("Field enrollment started")
+    log("Passcodes are in DTM – show them in the portal, then enroll the devices in the field", "success")
+    started = False
+
+    async def next_device(pending: list[str], issued: list[dict]) -> str | None:
+        nonlocal started
+        deadline = time.monotonic() + PAUSE_MAX_S
+        done = {c["common_name"] for c in issued}
+        shown = None
+        while True:
+            run = store.get_run(run_id) or {"status": "paused", "cleanup_status": "gone"}
+            # The routes own the busy list – it is carried over, minus the devices enrolled meanwhile
+            busy = [n for n in (run.get("result") or {}).get("busy") or [] if n not in done]
+            if run.get("cleanup_status"):  # rolled back (or deleted) – the cleanup owns the run now
+                if run.get("result"):
+                    store.update_run(run_id, result=result | {"certificates": issued})
+                raise RolledBack("rolled back before the field enrollment")
+            if shown != (len(issued), busy):  # the tiles show every enrolled device at once, with its PEM
+                certs.save_certificates(run_dir, issued)
+                store.update_run(run_id, result=result | {"certificates": issued, "busy": busy})
+                shown = (len(issued), busy)
+            if run["status"] != "paused":  # the whole field step at once
+                if not started:
+                    log("Field enrollment started")
+                    started = True
+                return pending[0]
+            if wanted := [n for n in pending if n in busy]:
+                return wanted[0]
+            if time.monotonic() > deadline:
+                if not issued:
+                    raise EnrollmentError(f"the field enrollment was not started within {PAUSE_MAX_S // 60} minutes")
+                log(f"No click for {PAUSE_MAX_S // 60} minutes – the field enrollment ends with {len(issued)} of "
+                    f"{len(issued) + len(pending)} devices", "wait")
+                return None
+            await asyncio.sleep(PAUSE_POLL_S)
+    return next_device
 
 
 def _save_device(run_dir: Path, key_pem: bytes, cert_pem: str, device: Path | None = None) -> None:
@@ -715,10 +744,11 @@ async def _record(store: Store, run_id: str, kind: str, name: str, create) -> st
 
 
 async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p: dict, log,
-                  credentials: dict | None = None) -> dict:
+                  credentials: dict | None = None, clicks=None) -> dict:
     """The fake batch: one device after another, each with its own key pair. Only the protocol
     round trip is measured; key generation is reported separately.
-    credentials (UC-5): common name → (passcode, reference) – every device has its own passcode."""
+    credentials (UC-5): common name → (passcode, reference) – every device has its own passcode.
+    clicks (UC-5 paused): waits for the next device to enroll (see _field_clicks)."""
     names = common_names(run_id, p["protocol"], p["count"], p["use_case"])
     log(f"Enrolling {'the device' if len(names) == 1 else f'{len(names)} devices one after another'} via "
         f"{PROTOCOLS[p['protocol']]} ({AUTHS[p['auth']].lower()})")
@@ -726,7 +756,13 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
     started_wall = time.time()
     outcome = "error"
     try:
-        for done, cn in enumerate(names, 1):
+        pending = list(names)
+        while pending:
+            cn = await clicks(pending, issued) if clicks else pending[0]
+            if cn is None:
+                break
+            pending.remove(cn)
+            done = len(issued) + 1
             start = time.monotonic()
             key_pem, csr = await asyncio.to_thread(certs.device_request, cn, p["key_type"])
             station.last_key = key_pem  # UC-4: the device keeps it for the field renewal

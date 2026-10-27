@@ -1,16 +1,20 @@
 {% from "_icons.html" import icon, pill %}
-{# One device tile (see _devices.html) – also served alone while its device acts, so the tile follows the
-   device's stage live. Needs run, d and loop_index. #}
+{# One device tile (see _device_card.html) – also served alone while its device acts and in the wall's side panel, so
+   the tile follows the device live. Needs run, d (from tiles.devices) and loop_index. #}
 {% set r = run.result %}
-{% set retrofit = run.use_case == "uc07" %}
-{% set minion = run.use_case == "uc08" %}
+{% set p = run.params %}
+{% set uc = run.use_case %}
+{% set retrofit = uc == "uc07" %}
+{% set minion = uc == "uc08" %}
+{% set advanced = uc in device_cases %}
 {% set stages = {"factory": "passcode only", "starting": "starting", "bootstrap_enrolling": "enrolling bootstrap",
                  "bootstrap_enrolled": "bootstrap enrolled", "configured": "configured", "agent_starting": "agent running",
                  "operational": "operational"} %}
-{% set local = (r.certificates or []) | map(attribute="serial") | list %}
-{% set open = run.status == "completed" and not run.cleanup_status %}
+{# DTM lists hex serials in either case – the saved PEMs are named in upper case #}
+{% set local = (r.certificates or []) | map(attribute="serial") | map("upper") | list if pem_available(run) else [] %}
+{% set open = not run.cleanup_status and (run.status == "completed" or (uc == "uc04" and run.status == "renewing")) %}
     {% set current = (d.certificates or []) | selectattr("status", "equalto", "issued") | rejectattr("renewed") | list %}
-    {% set busy = d.name in (r.busy or []) %}
+    {% set busy = d.busy %}
     {% set installed = d.firmware or 1 %}
     {# A window into the minion: only what the device itself reports – a running one is watched for updates #}
     {% set watched = minion and d.container and not busy and open %}
@@ -19,7 +23,7 @@
       <div class="device-head">
         <span class="device-icon">{{ icon("chip") }}</span>
         <h3 data-tip="{{ d.name }}">{{ d.name }}</h3>
-        {% if busy %}{{ pill("renewing" if d.issued else "enrolling") }}{% elif minion and not current %}{{ pill(stages.get(d.stage, d.stage) if d.container else "not started") }}{% elif current %}{{ pill("active") }}{% else %}{{ pill("not enrolled") }}{% endif %}
+        {% if busy %}{{ pill("renewing" if d.issued else "enrolling") }}{% elif minion and not current %}{{ pill(stages.get(d.stage, d.stage) if d.container else "not started") }}{% elif current and run.cleanup_status == "done" %}{{ pill("revoked") }}{% elif current %}{{ pill("active") }}{% else %}{{ pill("not enrolled") }}{% endif %}
       </div>
       {# Box concept: every box shares the label column on the left and a right-aligned column – common alignment lines #}
       <div class="tstack">
@@ -29,8 +33,10 @@
         {% elif retrofit %}
         <dt data-tip="Unmanaged device-ID certificate from the manufacturer's ICA">Device ID</dt><dd class="mono">{{ d.serial }}</dd>
         <dt data-tip="The managed certificate carries the device name">Certificate CN</dt><dd class="mono" data-tip="{{ d.name }}">{{ d.name if d.issued else "–" }}</dd>
-        {% else %}
+        {% elif advanced %}
         <dt data-tip="DTM files the certificate under the device by this attribute">{{ r.identity or "Identity" }}</dt><dd class="mono">{{ d.identity }}</dd>
+        {% else %}
+        <dt>Issuing CA</dt><dd data-tip="{{ p.ca_name }}">{{ p.ca_name }}</dd>
         {% endif %}
       </dl>
       {% if minion %}
@@ -43,22 +49,54 @@
         <span class="muted countdown right" {% if d.next_connect %}data-until="{{ d.next_connect }}" data-tip="The agent fetches pending updates and policies when it connects"{% endif %}></span>
         {% else %}<span class="muted">{{ "not started" if not d.container else "" }}</span><span></span>{% endif %}
       </div>
+      {% elif not advanced %}
+      {# The static v1 minion – only UC-8 runs real firmware #}
+      <div class="tbox software still">
+        <span class="figure">{{ firmware.svg(firmware.FACTORY, "Device") | safe }}</span>
+        {% set key = {"P_256": "ECDSA P-256", "RSA_2048": "RSA 2048"}.get(p.key_type, p.key_type) %}
+        {% if uc == "uc04" %}
+        <strong>{{ key }} key</strong><span></span>
+        <span class="muted">{{ protocols[p.protocol] }} · renewal {{ (r.renewals or []) | length }} of {{ max_renewals(run) }}</span><span></span>
+        {% elif uc == "uc05" %}
+        <strong>Passcode bound to CN</strong><span></span>
+        <span class="cert-state{% if d.issued %} ok{% endif %}">{{ "used" if d.issued else "unused" }}</span><span></span>
+        {% else %}
+        <strong>{{ key }} key {{ "from DTM" if uc == "uc01" else "from the factory" }}</strong><span></span>
+        <span class="muted">{{ protocols[p.protocol] if p.protocol else "Batch job" if p.mode == "batch" else "REST API" }}{{ " · DTM web UI" if p.variant == "webui" }}</span><span></span>
+        {% endif %}
+      </div>
       {% endif %}
       {% if d.certificates %}
+      {# At most two rows – current and previous; older ones collapse into one muted row (UC-8: bootstrap, operational) #}
+      {% set listed = d.certificates | sort(attribute="role") | list if minion else d.certificates | reverse | list %}
+      {% set shown = listed if minion else listed[:2] %}
       <ul class="tbox certs">
-        {% for c in (d.certificates | sort(attribute="role") if minion else d.certificates | reverse) %}
+        {% for c in shown %}
         {% set state = "active" if c.status == "issued" and not c.renewed else c.status if c.status != "issued" else "renewed" %}
         {% set short = c.serial[:3] ~ "…" ~ c.serial[-3:] if c.serial and c.serial | length > 8 else c.serial %}
         <li><span class="cert-state {{ 'ok' if state == 'active' else '' }}" data-tip="{{ state }}">{{ c.role if c.role is defined else state }}</span>
           <span class="mono cn" data-tip="CN {{ c.common_name }}">{{ c.common_name or "–" }}</span>
-          <span class="mono muted right" data-tip="Serial {{ c.serial }} · valid until {{ c.valid_to }} · {{ 'renewal' if c.renewed_from else 'field enrollment' if retrofit else 'registration' }}">{% if c.serial in local %}<a href="/runs/{{ run.id }}/certificates/{{ c.serial }}.pem" download>{{ short }}</a>{% else %}{{ short }}{% endif %} · {{ c.valid_to }}</span></li>
+          <span class="mono muted right" data-tip="Serial {{ c.serial }} · valid until {{ c.valid_to }} · {{ 'renewal' if c.renewed_from else {'uc04': 'factory enrollment', 'uc05': 'field enrollment', 'uc06': 'registration', 'uc07': 'field enrollment'}.get(uc, 'issued') }}">{% if c.serial and c.serial | upper in local %}<a href="/runs/{{ run.id }}/certificates/{{ c.serial | upper }}.pem" download>{{ short }}</a>{% else %}{{ short }}{% endif %} · {{ c.valid_to }}</span></li>
         {% endfor %}
+        {% set earlier = listed[shown | length:] %}
+        {% if earlier %}<li class="earlier"><span class="muted" data-tip="{% for c in earlier %}{{ c.serial }} · {{ c.valid_to }}{{ ' · ' ~ c.status if c.status != 'issued' }}{% if not loop.last %} | {% endif %}{% endfor %}">+ {{ earlier | length }} earlier</span></li>{% endif %}
       </ul>
-      {% else %}<p class="tbox muted device-empty">{{ "Device-ID certificate only – no managed certificate yet" if retrofit else "One-time passcode only – no certificate yet" if minion else "DTM lists no certificate yet" }}</p>{% endif %}
+      {% else %}<p class="tbox muted device-empty">{{ "Device-ID certificate only – no managed certificate yet" if retrofit else "One-time passcode only – no certificate yet" if minion or uc == "uc05" else "DTM lists no certificate yet" }}</p>{% endif %}
       </div>
       <div class="device-foot">
         <span class="muted">{% if busy and minion %}{{ stages.get(d.stage, d.stage) | capitalize }} …{% elif d.last %}{{ d.last.action }} in {{ "%.2f" | format(d.last.seconds) }} s{% endif %}</span>
-        {% if open %}
+        {% if open and uc == "uc04" %}
+        {% set limit = max_renewals(run) %}
+        <form method="post" action="/runs/{{ run.id }}/renew" class="inline">
+          <button type="submit" class="btn-sm btn-icon" {% if busy or (r.renewals or []) | length >= limit %}disabled{% endif %}
+                  {% if busy %}aria-busy="true"{% endif %}
+                  {% if (r.renewals or []) | length >= limit %}data-tip="At most {{ limit }} renewals per run"{% endif %}>{{ icon("refresh") }}Renew</button>
+        </form>
+        {% elif uc == "uc05" and run.status == "paused" and not run.cleanup_status and not d.issued %}
+        <form method="post" action="/runs/{{ run.id }}/devices/{{ d.name }}/enroll" class="inline">
+          <button type="submit" class="btn-sm btn-icon field-action" {% if busy %}disabled aria-busy="true"{% endif %}>{{ icon("key") }}Enroll</button>
+        </form>
+        {% elif open and advanced %}
         {% set used = renewals_of(r, d.name) %}
         <form method="post" action="/runs/{{ run.id }}/devices/{{ d.name }}/{{ 'renew' if d.issued else 'enroll' }}" class="inline">
           {% if minion and not d.issued %}

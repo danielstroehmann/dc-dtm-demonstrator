@@ -16,10 +16,10 @@
   {% endfor %}
 </ol>
 {% include "_run_live.html" %}
-{% if run.use_case == "uc05" and run.status == "paused" and not run.cleanup_status %}{% include "_enroll.html" %}{% endif %}
 {% if finished %}{% include "_result_overview.html" %}{% endif %}
-{% if run.use_case == "uc04" and run.status in ("completed", "renewing") and not run.cleanup_status %}{% include "_renew.html" %}{% endif %}
-{% if run.use_case in device_cases and (run.result or {}).devices %}{% include "_devices.html" %}{% endif %}
+{% if run.use_case == "uc08" and (run.result or {}).devices %}{% include "_firmware.html" %}{% endif %}
+{% set found = tiles.devices(run) %}
+{% if found | length >= tiles.WALL_FROM or found | selectattr("name") | list %}{% include "_device_card.html" %}{% endif %}
 {% include "_timeline.html" %}
 {% if finished %}{% include "_result.html" %}{% endif %}
 {% endblock %}

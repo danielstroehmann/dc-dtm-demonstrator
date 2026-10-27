@@ -1,8 +1,5 @@
-{# Advanced use cases: one tile per virtual device – its identity, its certificates (PEM download) and its own
-   enroll / renew button. Devices act independently; the page reloads when one finishes (HX-Refresh). #}
-{% from "_icons.html" import icon %}
+{# UC-8: the firmware catalogue next to adding IoT minions – the minions themselves follow as tiles (_device_card.html) #}
 {% set r = run.result %}
-{% if run.use_case == "uc08" %}
 {% set deployed = (r.firmware or []) | selectattr("name", "defined") | map(attribute="name") | list %}
 {% set old = firmware.legacy(r) %}
 {% set acting = firmware.BUSY in (r.busy or []) %}
@@ -47,12 +44,3 @@
   </form>
 </article>
 </div>
-{% endif %}
-<article class="card">
-  <div class="card-head"><h2>Devices</h2></div>
-  <div class="device-tiles">
-    {% for d in r.devices %}
-    {% with loop_index = loop.index %}{% include "_device_tile.html" %}{% endwith %}
-    {% endfor %}
-  </div>
-</article>

@@ -214,7 +214,7 @@ def test_unconfigured_catalog_and_form(user):
 def test_every_table_is_a_data_table_or_compact(two, store):
     two.post("/runs", data=form(mode="batch", count="12", connection_id=str(two.ids["NL"])))
     finished(store, "r1")
-    pages = {path: two.get(path).text for path in ("/", "/settings", "/runs/r1", "/runs/r1/certificates?page=2")}
+    pages = {path: two.get(path).text for path in ("/", "/settings", "/runs/r1")}
     seen = 0
     for path, html in pages.items():
         for table in re.findall(r"<table[^>]*>.*?</table>", html, re.S):
@@ -222,7 +222,7 @@ def test_every_table_is_a_data_table_or_compact(two, store):
             classes = re.search(r'<table class="([^"]*)"', table).group(1).split()
             assert "data-table" in classes or "compact" in classes, (path, classes)
             assert "<code>" not in table, path  # no chips inside single-line cells
-    assert seen == 3  # home runs table + certificate tables; settings lists connections without a table
+    assert seen == 1  # home runs table; the certificates are on the minion wall, settings lists connections without a table
     settings = pages["/settings"]
     assert "<table" not in settings and settings.count('<ul class="conn-list">') == 1
     assert f'<span class="mono">{OTHER_ACCOUNT_ID}</span>' in settings

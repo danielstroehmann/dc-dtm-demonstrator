@@ -581,6 +581,42 @@ async def test_pause_ends_after_the_time_limit(store, enroll_net, tmp_path, monk
     assert all(o["status"] == "DELETED" for o in enroll_net.auth_objects["passcode"].values())
 
 
+async def test_per_click_enrollment_ends_with_the_enrolled_devices_after_the_time_limit(store, enroll_net, tmp_path,
+                                                                                         monkeypatch):
+    """Devices enroll one per click (the route marks them busy); an hour without a click ends the field step with the
+    devices enrolled so far – the run completes, the rest stay unenrolled."""
+    import asyncio
+    import time as real_time
+    clock = {"offset": 0.0}
+
+    class Time:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        @staticmethod
+        def monotonic():
+            return real_time.monotonic() + clock["offset"]
+
+    monkeypatch.setattr(enrollment, "time", Time())
+    task = run_in_background(store, enroll_net, "k5", tmp_path, pause=True, count=3, mode="batch")
+    await until(paused(store, "k5"), "the pause")
+    names = [f"robot-k5-uc05-est-{i:04d}" for i in (1, 2, 3)]
+    run = store.get_run("k5")
+    store.update_run("k5", result=run["result"] | {"busy": [names[1]]})  # what the route does on a click
+    run = await until(lambda: (r := store.get_run("k5"))["result"].get("certificates") and not r["result"]["busy"] and r,
+                      "the clicked device")
+    assert [c["common_name"] for c in run["result"]["certificates"]] == [names[1]] and run["status"] == "paused"
+    assert (tmp_path / "runs" / "k5" / "certificates" / f"{run['result']['certificates'][0]['serial']}.pem").is_file()
+    clock["offset"] = enrollment.PAUSE_MAX_S + 1
+    run = await asyncio.wait_for(task, 30)
+    assert run["status"] == "completed", run["error"]
+    assert [c["common_name"] for c in run["result"]["certificates"]] == [names[1]] and "busy" not in run["result"]
+    assert run["result"]["bound_cn"] == names[1] and len(enroll_net.issued()) == 1
+    assert any("the field enrollment ends with 1 of 3 devices" in e["message"] for e in store.events("k5"))
+    run = await do_cleanup(store, enroll_net, "k5", "full", tmp_path)
+    assert run["cleanup_status"] == "done" and enroll_net.violations == []
+
+
 def test_production_pause_limit_is_an_hour():
     assert enrollment.PAUSE_MAX_S == 3600 and enrollment.PAUSE_POLL_S > 0
 

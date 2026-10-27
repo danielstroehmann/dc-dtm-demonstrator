@@ -424,7 +424,6 @@ def test_dtm_values_are_escaped_on_run_page(evil_user, configured_store):
     html = evil_user.get("/runs/r1").text
     assert_escaped(html)
     assert "&lt;img src=x onerror=alert(1)&gt;" in html  # DTM response field
-    assert "ICA &lt;script&gt;" in html                  # issuer CN from the certificate
     assert "CA &lt;script&gt;" in html                   # CA name in params / log
     timeline = evil_user.get("/runs/r1/timeline").text   # polled timeline items
     assert_escaped(timeline)
@@ -610,74 +609,84 @@ def make_certificates(n):
              "issuer": "ICA", "key_type": "ECDSA secp256r1"} for i in range(1, n + 1)]
 
 
-@pytest.fixture
-def cert_run(configured_store, store):
-    store.create_run("c1", "uc01", BASE_PARAMS)
-    store.update_run("c1", status="completed", result={"division": "d", "policy": "p", "certificate_total": 23,
-                                                       "certificates": make_certificates(23)})
+def cert_run(store, n, run_id="c1", **fields):
+    store.create_run(run_id, "uc01", BASE_PARAMS | {"count": n})
+    store.update_run(run_id, **{"status": "completed", "result": {"division": "d", "policy": "p", "certificate_total": n,
+                                                                  "certificates": make_certificates(n)}} | fields)
     return store
 
 
-def rows(html):
-    return re.findall(r"<td[^>]*>(robot-c1-uc01-batch-\d{4})</td>", html)
+def cells(html):
+    return re.findall(r'<use href="#minion-head" [^>]*/>', html)
 
 
-def test_run_page_shows_first_certificate_page(user, cert_run):
+@pytest.mark.parametrize("n,wall", [(1, False), (10, False), (11, True), (23, True)])
+def test_up_to_ten_tiles_then_the_minion_wall(configured_store, user, store, n, wall):
+    cert_run(store, n)
     html = user.get("/runs/c1").text
-    assert rows(html) == [f"robot-c1-uc01-batch-{i:04d}" for i in range(1, 11)]
-    assert "Page 1 of 3" in html and "Issued certificates" not in html
-    assert 'hx-get="/runs/c1/certificates?page=2"' in html
-    assert re.search(r'<button class="outline btn-sm" disabled\s+hx-get="/runs/c1/certificates\?page=0"', html)
+    assert "<h2>Devices</h2>" in html and '<section id="certificates">' not in html and "<h2>Payload</h2>" not in html
+    tiles = re.findall(r'<section class="device-tile enrolled" id="tile-\d+"', html)
+    assert (len(cells(html)), len(tiles)) == ((n, 0) if wall else (0, n))
+    if not wall:
+        assert "ECDSA P-256 key from DTM" in html and "<dt>Issuing CA</dt>" in html and 'class="tbox software still"' in html
+        return
+    assert all('class="issued"' in c for c in cells(html)) and f">{n} issued</button>" in html
+    first = cells(html)[0]
+    assert 'data-n="robot-c1-uc01-batch-0001"' in first and 'data-i="1"' in first and 'data-s="1"' in first
+    assert 'data-tip="robot-c1-uc01-batch-0001 · 1 · until 2027-10-23"' in first
+    assert 'class="wall-search"' in html and 'id="side-panel" class="side-panel" hidden' in html
+    assert " style=" not in html[html.index('<svg class="wall'):]  # the CSP forbids inline styles
 
 
-@pytest.mark.parametrize("page,first,last,label", [
-    ("2", 11, 20, "Page 2 of 3"), ("3", 21, 23, "Page 3 of 3"), ("0", 1, 10, "Page 1 of 3"),
-    ("-4", 1, 10, "Page 1 of 3"), ("99", 21, 23, "Page 3 of 3"),
-])
-def test_certificate_pages(user, cert_run, page, first, last, label):
-    html = user.get(f"/runs/c1/certificates?page={page}", headers={"HX-Request": "true"}).text
-    assert html.lstrip().startswith('<section id="certificates">')
-    assert rows(html) == [f"robot-c1-uc01-batch-{i:04d}" for i in range(first, last + 1)]
-    assert label in html
+def test_wall_cells_step_down_above_1000(configured_store, user, store):
+    cert_run(store, 2000)
+    html = user.get("/runs/c1").text
+    found = cells(html)
+    assert len(found) == 2000 and '<svg class="wall small"' in html and ">2 000 issued</button>" in html
+    assert 'width="10" height="10"' in found[0] and 'x="1027" y="0"' in found[79] and 'x="0" y="13"' in found[80]
+    cert_run(store, 1000, run_id="c2")
+    html = user.get("/runs/c2").text
+    assert '<svg class="wall"' in html and 'width="14" height="14"' in cells(html)[0]
 
 
-def test_certificate_cells(user, cert_run):
-    html = user.get("/runs/c1/certificates?page=1").text
-    assert "<td>robot-c1-uc01-batch-0001</td>" in html
-    assert '<td data-tip="2027-10-23 10:00 UTC">2027-10-23</td>' in html  # date shown, full value as tooltip
-    assert "<td>1</td>" in html and "<code>" not in html and " title=" not in html
-    assert 'table class="striped compact"' in html and "<colgroup>" in html
+def test_wall_cell_opens_the_device_tile(configured_store, user, store):
+    cert_run(store, 23)
+    html = user.get("/runs/c1/devices/robot-c1-uc01-batch-0017/tile?i=17").text
+    assert 'id="tile-17"' in html and "robot-c1-uc01-batch-0017" in html and '<span class="pill ok">active</span>' in html
+    assert user.get("/runs/c1/devices/robot-c1-uc01-batch-0024/tile").status_code == 404
+    assert user.get("/runs/c1/devices/../tile").status_code == 404
 
 
-def test_last_page_disables_next(user, cert_run):
-    html = user.get("/runs/c1/certificates?page=3").text
-    assert re.search(r'<button class="outline btn-sm" disabled\s+hx-get="/runs/c1/certificates\?page=4"', html)
-    assert re.search(r'<button class="outline btn-sm" \s*hx-get="/runs/c1/certificates\?page=2"', html)
+def test_wall_states_and_counters(configured_store, user, store):
+    cert_run(store, 12, cleanup_status="done", cleanup_mode="full")
+    html = user.get("/runs/c1").text
+    assert all('class="revoked"' in c for c in cells(html)) and ">12 rolled back</button>" in html
 
 
-def test_single_page_has_no_pager(configured_store, user, store):
-    store.create_run("c2", "uc01", BASE_PARAMS)
-    store.update_run("c2", status="completed", result={"certificate_total": 4, "certificates": make_certificates(4)})
-    html = user.get("/runs/c2/certificates").text
-    assert "Page 1 of" not in html and len(re.findall("<td[^>]*>robot-", html)) == 4
+def test_running_batch_fills_the_wall(configured_store, user, store):
+    store.create_run("c1", "uc01", BASE_PARAMS | {"count": 30})
+    store.update_run("c1", status="running", progress={"label": "DTM is issuing 30 certificates", "started": 0,
+                                                       "total": 30, "done": 12})
+    html = user.get("/runs/c1/devices").text
+    assert 'hx-get="/runs/c1/devices" hx-trigger="every 2s"' in html  # polled while the batch issues
+    found = cells(html)
+    assert len(found) == 30 and sum('class="issued"' in c for c in found) == 12
+    assert not any("data-n=" in c for c in found)  # not known yet – nothing to open
+    store.update_run("c1", status="running", progress={"label": "x", "started": 0, "total": 5, "done": 1})
+    assert "<h2>Devices</h2>" not in user.get("/runs/c1").text  # a few devices: tiles once they are issued
 
 
-@pytest.mark.parametrize("path,status", [("/runs/c1/certificates?page=abc", 400), ("/runs/zz/certificates", 404),
-                                         ("/runs/BAD/certificates", 404)])
-def test_certificate_page_errors(user, cert_run, path, status):
-    assert user.get(path).status_code == status
-
-
-def test_certificate_page_requires_login(web, cert_run):
-    assert web.get("/runs/c1/certificates?page=2", follow_redirects=False).status_code == 303
-    htmx = web.get("/runs/c1/certificates?page=2", headers={"HX-Request": "true"}, follow_redirects=False)
+def test_devices_card_requires_login(web, configured_store, store):
+    cert_run(store, 11)
+    assert web.get("/runs/c1/devices", follow_redirects=False).status_code == 303
+    htmx = web.get("/runs/c1/devices/robot-c1-uc01-batch-0001/tile", headers={"HX-Request": "true"}, follow_redirects=False)
     assert htmx.status_code == 401 and htmx.headers["hx-redirect"] == "/login"
 
 
-def test_certificate_pages_escape_dtm_values(evil_user, configured_store):
+def test_device_tiles_escape_dtm_values(evil_user, configured_store):
     evil_user.post("/runs", data=form())
     assert finished(configured_store, "r1")["status"] == "completed"
-    assert_escaped(evil_user.get("/runs/r1/certificates?page=1").text)
+    assert_escaped(evil_user.get("/runs/r1").text)
 
 
 def test_api_calls_section_through_ui(configured_user, store, fake):
@@ -868,13 +877,12 @@ def test_run_page_order_and_removed_texts(configured_user, store):
     finished(store, "r1")
     html = configured_user.get("/runs/r1").text
     marks = ['<h1>Run r1 <span class="pill ok">completed</span></h1>', '<ol class="stepper" aria-label="Run phases">',
-             '<div id="live"', "<h2>Overview</h2>", "<h2>Timeline", "<h2>Payload</h2>",
+             '<div id="live"', "<h2>Overview</h2>", "<h2>Devices</h2>", "<h2>Timeline", "<h2>Payload</h2>",
              "<h2>Reproducible steps</h2>"]
     assert "<h2>Delete run</h2>" not in html and "<h2>Clean up</h2>" not in html
     positions = [html.index(m) for m in marks]
     assert positions == sorted(positions), dict(zip(marks, positions))
-    payload = html.index("<h2>Payload</h2>")
-    assert payload < html.index('<section id="certificates">') < html.index('href="/runs/r1/artifact"')
+    assert html.index("<h2>Payload</h2>") < html.index('href="/runs/r1/artifact"')
     assert "Upload in DTM web UI" not in html
     # removed texts (author request)
     assert "Division <code>" not in html  # the division/policy line is gone (names stay in the snippets)
@@ -893,7 +901,8 @@ def test_payload_for_webui_batch_has_upload_hint_and_single_api_has_certificate(
     configured_user.post("/runs", data=form(run_id="r2"))
     finished(store, "r2")
     html = configured_user.get("/runs/r2").text
-    assert "<h2>Payload</h2>" in html and 'href="/runs/r2/artifact"' not in html
+    assert "<h2>Payload</h2>" not in html and 'href="/runs/r2/artifact"' not in html  # the certificate is on its tile
+    assert re.search(r'<section class="device-tile enrolled" id="tile-1"', html) and ".pem\" download>" in html
 
 
 def test_webui_single_has_no_payload_section(configured_user, store):
@@ -1118,7 +1127,7 @@ def test_no_get_route_changes_state(configured_user, store, fake, data_dir):
                     response = configured_user.get(url + query, headers=headers, follow_redirects=False)
                     assert response.status_code < 500, (url, response.status_code)
                     hit.append(url)
-    assert {"/runs/r1/live", "/runs/r2/certificates", "/runs/r1/api", "/runs/r1/artifact", "/settings"} <= set(hit)
+    assert {"/runs/r1/live", "/runs/r2/devices", "/runs/r1/api", "/runs/r1/artifact", "/settings"} <= set(hit)
     assert snapshot(store, data_dir, fake) == before
 
 
@@ -1171,7 +1180,9 @@ def test_rolled_back_run_page_order(configured_user, store):
     configured_user.post("/runs/r1/cleanup", data={"mode": "full"})
     cleaned(store, "r1")
     html = configured_user.get("/runs/r1").text
-    marks = ["<h2>Overview</h2>", "<h2>Timeline", "<h2>Payload</h2>", "<h2>Reproducible steps</h2>"]
+    # the batch artifact went with the rollback – no Payload card; the devices stay, rolled back
+    marks = ["<h2>Overview</h2>", "<h2>Devices</h2>", "<h2>Timeline", "<h2>Reproducible steps</h2>"]
+    assert "<h2>Payload</h2>" not in html
     positions = [html.index(m) for m in marks]
     assert positions == sorted(positions), dict(zip(marks, positions))
     assert "<h2>Clean up</h2>" not in html and "<h2>Delete run</h2>" not in html  # both moved to the runs list
@@ -1278,12 +1289,12 @@ def test_no_native_title_tooltips(configured_user, store):
     configured_user.post("/runs", data=form(use_case="uc02", mode="batch", count="2"))
     finished(store, "r1")
     for path in ("/", "/runs/new", "/runs/new/uc01", "/settings", "/runs/r1", "/runs/r1/timeline",
-                 "/runs/r1/certificates", "/runs/r1/api?dialect=powershell", "/nope"):
+                 "/runs/r1/devices", "/runs/r1/api?dialect=powershell", "/nope"):
         html = configured_user.get(path).text
         assert not re.search(r"<[a-z][^>]*\stitle=", html), path  # only the <title> element remains
     page = configured_user.get("/runs/r1").text
     assert re.search(r'<time class="t" datetime="[^"]+" data-tip="[^"]+">', page)
-    assert re.search(r'<td data-tip="[^"]+ UTC">\d{4}-\d{2}-\d{2}</td>', page)
+    assert re.search(r'data-tip="Serial [0-9A-F]+ · valid until \d{4}-\d{2}-\d{2} · issued">', page)
     assert re.search(r'<small data-tip="[^"]+">Key generation</small>', page)
 
 

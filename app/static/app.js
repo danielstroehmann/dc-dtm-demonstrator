@@ -128,3 +128,72 @@ function tickCountdowns() {
 setInterval(tickCountdowns, 1000);
 document.addEventListener("htmx:afterSwap", tickCountdowns);
 document.addEventListener("DOMContentLoaded", tickCountdowns);
+
+// Minion wall (from 11 devices): counter chips filter, the search highlights by name / CN / serial, a click on a cell
+// opens that device's tile in the side panel (same actions as a tile). Cells stay plain <use> elements – classes only.
+function wallSearch(input) {
+  const wall = input.closest(".card").querySelector(".wall");
+  const query = input.value.trim().toLowerCase();
+  wall.classList.toggle("searching", query !== "");
+  for (const cell of wall.querySelectorAll("use[data-n]")) {
+    cell.classList.toggle("hit", query !== "" && `${cell.dataset.tip} ${cell.dataset.s}`.toLowerCase().includes(query));
+  }
+  return wall.querySelector("use.hit");
+}
+
+function openDevice(cell) {
+  const wall = cell.closest(".wall");
+  const panel = document.getElementById("side-panel");
+  wall.querySelector("use.selected")?.classList.remove("selected");
+  cell.classList.add("selected");
+  panel.hidden = false;
+  htmx.ajax("GET", `/runs/${wall.dataset.run}/devices/${encodeURIComponent(cell.dataset.n)}/tile?i=${cell.dataset.i}`,
+            { target: panel.querySelector(".panel-body") });  // htmx swaps the inner content by default
+}
+
+function closePanel() {
+  const panel = document.getElementById("side-panel");
+  if (!panel || panel.hidden) return;
+  panel.hidden = true;
+  panel.querySelector(".panel-body").replaceChildren();  // its tile must not keep polling
+  document.querySelector(".wall use.selected")?.classList.remove("selected");
+}
+
+document.addEventListener("click", (event) => {
+  const cell = event.target.closest(".wall use[data-n]");
+  if (cell) return openDevice(cell);
+  if (event.target.closest("[data-panel-close]")) return closePanel();
+  const chip = event.target.closest(".wall-chip");
+  if (!chip) return;
+  const wall = chip.closest(".card").querySelector(".wall");
+  const on = chip.getAttribute("aria-pressed") !== "true";
+  chip.parentElement.querySelectorAll(".wall-chip").forEach((c) => c.setAttribute("aria-pressed", "false"));
+  chip.setAttribute("aria-pressed", String(on));
+  if (on) wall.dataset.filter = chip.dataset.filter; else delete wall.dataset.filter;
+});
+document.addEventListener("input", (event) => {
+  if (event.target.matches(".wall-search")) wallSearch(event.target);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closePanel();
+  if (event.key === "Enter" && event.target.matches(".wall-search")) {
+    event.preventDefault();
+    const hit = wallSearch(event.target);
+    if (hit) openDevice(hit);
+  }
+});
+
+// While a batch issues, the polled wall pops the cells whose state changed.
+let wallBefore = null;
+document.addEventListener("htmx:beforeSwap", (event) => {
+  if (event.detail.target.id === "devices") {
+    wallBefore = [...event.detail.target.querySelectorAll(".wall use")].map((cell) => cell.getAttribute("class"));
+  }
+});
+document.addEventListener("htmx:afterSettle", () => {
+  if (!wallBefore) return;
+  document.querySelectorAll("#devices .wall use").forEach((cell, i) => {
+    if (wallBefore[i] !== undefined && wallBefore[i] !== cell.getAttribute("class")) cell.classList.add("pop");
+  });
+  wallBefore = null;
+});
