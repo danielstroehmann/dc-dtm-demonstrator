@@ -4,7 +4,7 @@ services:
     image: ${DEMONSTRATOR_IMAGE}
     restart: unless-stopped
     environment:
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}  # only an older .env's password, taken over once
       JWT_SECRET: ${JWT_SECRET}
     volumes:
       - ./data:/data

@@ -6,3 +6,4 @@ httpx
 cryptography
 pyjwt
 slowapi
+argon2-cffi  # login password hash (Argon2id)

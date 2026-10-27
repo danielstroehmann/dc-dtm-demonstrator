@@ -129,6 +129,17 @@ class Store:
             (key, value),
         )
 
+    def update_setting(self, key: str, value: str) -> bool:
+        """Changes an existing setting only – False if it does not exist (e.g. deleted meanwhile)."""
+        return self._exec("UPDATE settings SET value = ? WHERE key = ?", (value, key)).rowcount == 1
+
+    def delete_setting(self, key: str) -> bool:
+        return self._exec("DELETE FROM settings WHERE key = ?", (key,)).rowcount == 1
+
+    def set_setting_once(self, key: str, value: str) -> bool:
+        """Sets a setting only if it does not exist yet – False if another request was first."""
+        return self._exec("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)).rowcount == 1
+
     # DTM connections (several accounts/environments; one is the default)
     def connections(self) -> list[dict]:
         return [dict(r) for r in self._exec("SELECT * FROM connections ORDER BY name").fetchall()]

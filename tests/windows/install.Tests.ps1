@@ -96,6 +96,15 @@ Describe "script file" {
         }
     }
 
+    It "does not look up the latest release for -ResetPassword" {
+        # The isolating shadow of Invoke-RestMethod throws "no network" if the lookup ran; without it the run stops
+        # in Assert-Admin or Reset-Password (no distro on the test machine) - nothing is installed or reset.
+        $thrown = $null
+        try { & $script:Installer -ResetPassword } catch { $thrown = "$_" }
+        $thrown | Should -Not -BeLike "*look up the latest release*"
+        $thrown | Should -Not -BeLike "*test isolation: no network*"
+    }
+
     It "defines the functions without installing when dot-sourced" {
         # Had the guard failed, BeforeAll would have run Invoke-Main and thrown in Assert-Prerequisite.
         Get-Command Invoke-Main -CommandType Function | Should -Not -BeNullOrEmpty
@@ -856,9 +865,46 @@ Describe "Uninstall-Demonstrator" {
     }
 }
 
+Describe "Reset-Password" {
+    BeforeEach {
+        $Version = ""; $Branch = ""
+        Mock Test-Distro { $true }
+        Mock Invoke-Distro {}
+    }
+
+    It "runs install.sh --reset-password of the latest release in the distro" {
+        Reset-Password
+        Should -Invoke Invoke-Distro -Times 1 -Exactly -ParameterFilter {
+            $Command -eq ("set -o pipefail; curl -fsSL 'https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.sh' " +
+                "| bash -s -- --reset-password")
+        }
+    }
+
+    It "uses the chosen release or branch" {
+        $Branch = "dev"
+        Reset-Password
+        Should -Invoke Invoke-Distro -Times 1 -Exactly -ParameterFilter {
+            $Command -eq "set -o pipefail; curl -fsSL 'https://raw.githubusercontent.com/danielstroehmann/dc-dtm-demonstrator/dev/install.sh' | bash -s -- --reset-password"
+        }
+    }
+
+    It "refuses an invalid branch before running anything" {
+        $Branch = "dev;id"
+        { Reset-Password } | Should -Throw "*invalid branch*"
+        Should -Invoke Invoke-Distro -Times 0 -Exactly
+    }
+
+    It "refuses when the demonstrator is not installed" {
+        Mock Test-Distro { $false }
+        { Reset-Password } | Should -Throw "*not installed*"
+        Should -Invoke Invoke-Distro -Times 0 -Exactly
+    }
+}
+
 Describe "Invoke-Main" {
     BeforeEach {
-        $Version = ""; $Branch = ""; $Uninstall = [switch]$false
+        $Version = ""; $Branch = ""; $Uninstall = [switch]$false; $ResetPassword = [switch]$false
+        Mock Reset-Password {}
         $script:SavedComputerName = $env:COMPUTERNAME
         $env:COMPUTERNAME = "DEMO-PC"
         Mock Write-Host {}
@@ -912,6 +958,30 @@ Describe "Invoke-Main" {
         Should -Invoke Assert-Admin -Times 1 -Exactly
         Should -Invoke Uninstall-Demonstrator -Times 1 -Exactly
         Should -Invoke Install-Wsl -Times 0 -Exactly
+    }
+
+    It "only resets the password with -ResetPassword, needing admin rights but not the OS checks" {
+        $ResetPassword = [switch]$true
+        Mock Assert-Prerequisite { throw "ERROR: virtualisation is not available" }
+        Invoke-Main
+        Should -Invoke Assert-Admin -Times 1 -Exactly
+        Should -Invoke Reset-Password -Times 1 -Exactly
+        Should -Invoke Install-Wsl -Times 0 -Exactly
+        Should -Invoke Install-Demonstrator -Times 0 -Exactly
+        Should -Invoke Uninstall-Demonstrator -Times 0 -Exactly
+        Should -Invoke Remove-ItemProperty -Times 0 -Exactly
+    }
+
+    It "does not reset the password without admin rights" {
+        $ResetPassword = [switch]$true
+        Mock Assert-Admin { throw "ERROR: run this in an elevated PowerShell" }
+        { Invoke-Main } | Should -Throw "*elevated*"
+        Should -Invoke Reset-Password -Times 0 -Exactly
+    }
+
+    It "a normal install does not reset the password" {
+        Invoke-Main
+        Should -Invoke Reset-Password -Times 0 -Exactly
     }
 
     It "does not uninstall without admin rights" {

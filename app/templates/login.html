@@ -10,6 +10,20 @@
   </section>
   <main class="auth-form">
     <div>
+      {% if setup %}
+      <h2>Set the login password</h2>
+      <p class="muted">First start: the password you choose here protects this demonstrator.</p>
+      {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      <form method="post" action="/setup">
+        <label>Password <small class="muted">at least 12 characters</small>
+          <input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="256" required autofocus>
+        </label>
+        <label>Repeat
+          <input type="password" name="repeat" autocomplete="new-password" minlength="12" maxlength="256" required>
+        </label>
+        <div class="action-bar"><button type="submit">Set password</button></div>
+      </form>
+      {% else %}
       <h2>Log in</h2>
       {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
       <form method="post" action="/login">
@@ -18,6 +32,7 @@
         </label>
         <div class="action-bar"><button type="submit">Log in</button></div>
       </form>
+      {% endif %}
     </div>
   </main>
 </div>

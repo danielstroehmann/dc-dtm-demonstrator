@@ -78,6 +78,45 @@ def test_settings_roundtrip_and_overwrite(store):
     assert store.get_setting("k") == "v2"
 
 
+def test_set_setting_once_inserts_only_a_missing_key(store):
+    assert store.set_setting_once("k", "first") is True
+    assert store.set_setting_once("k", "second") is False
+    assert store.get_setting("k") == "first"
+    store.set_setting("other", "v")
+    assert store.set_setting_once("other", "w") is False and store.get_setting("other") == "v"
+
+
+def test_delete_setting(store):
+    assert store.delete_setting("missing") is False
+    store.set_setting("k", "v")
+    store.set_setting("keep", "v")
+    assert store.delete_setting("k") is True and store.get_setting("k") is None
+    assert store.delete_setting("k") is False and store.get_setting("keep") == "v"
+    assert store.set_setting_once("k", "new") is True  # can be set once again after a reset
+
+
+def test_update_setting_changes_only_an_existing_key(store):
+    assert store.update_setting("k", "v") is False and store.get_setting("k") is None  # never inserts
+    store.set_setting("k", "v1")
+    store.set_setting("other", "o")
+    assert store.update_setting("k", "v2") is True
+    assert store.get_setting("k") == "v2" and store.get_setting("other") == "o"
+
+
+def test_set_setting_once_persists_across_reopen(tmp_path):
+    Store(tmp_path / "db").set_setting_once("k", "v")
+    reopened = Store(tmp_path / "db")
+    assert reopened.get_setting("k") == "v" and reopened.set_setting_once("k", "x") is False
+
+
+def test_set_setting_once_between_two_connections(tmp_path):
+    """Two Store objects on one file (e.g. a second worker): the loser gets False, the winner's value stays."""
+    a, b = Store(tmp_path / "db"), Store(tmp_path / "db")
+    assert a.set_setting_once("k", "from-a") is True
+    assert b.set_setting_once("k", "from-b") is False
+    assert a.get_setting("k") == b.get_setting("k") == "from-a"
+
+
 def test_runs_crud(store):
     store.create_run("a1", "uc01", {"count": 3})
     assert store.run_exists("a1") and not store.run_exists("zz")

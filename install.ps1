@@ -10,12 +10,14 @@ Re-running it updates the installation in place (data and secrets stay in the di
   & ([scriptblock]::Create((irm <same URL>))) -Version v0.4.0     a specific release
   & ([scriptblock]::Create((irm <same URL>))) -Branch dev         the preview image of a branch
   & ([scriptblock]::Create((irm <same URL>))) -Uninstall          remove it (asks before deleting data)
+  & ([scriptblock]::Create((irm <same URL>))) -ResetPassword      the next visitor sets a new login password
 #>
 [CmdletBinding()]
 param(
     [string]$Version = "",
     [string]$Branch = "",
     [switch]$Uninstall,
+    [switch]$ResetPassword,
     [switch]$Yes
 )
 
@@ -240,7 +242,7 @@ function Register-Continuation {
     $continue = "-NoExit -ExecutionPolicy Bypass -File `"$self`""
     if ($Version) { $continue += " -Version $Version" }
     if ($Branch) { $continue += " -Branch $Branch" }
-    # The interactive questions (password) stay: the continuation opens a console window.
+    # The interactive questions (host names) stay: the continuation opens a console window.
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" -Name "DtmDemonstratorInstall" `
         -Value "powershell.exe $continue"
 }
@@ -271,7 +273,7 @@ function Install-Distro {
 }
 
 function Invoke-Distro([string]$Command) {
-    # --exec: parsed once by bash -c. The console stays attached (install.sh asks for the password on
+    # --exec: parsed once by bash -c. The console stays attached (install.sh asks its questions on
     # /dev/tty) - never capture this output. $Command must not contain double quotes.
     if ($Command.Contains('"')) { Stop-Install "internal: double quote in a distro command" }
     # Progress (docker pull) goes to stderr; with redirected output, PowerShell 5.1 would stop on it.
@@ -291,7 +293,7 @@ function Install-Demonstrator {
     $hostNames = @(Get-MachineName) + @(Get-LanAddress)
     $installerArgs = (Get-InstallerArgumentList $Version $Branch $hostNames $Yes.IsPresent | ForEach-Object { ConvertTo-BashWord $_ }) -join " "
     Write-Step "Running install.sh in $Distro"
-    # The script asks for the login password itself (the console is passed through).
+    # The login password is not asked here: the first visit of the web UI sets it.
     Invoke-Distro "set -o pipefail; curl -fsSL '$url' | bash -s -- $installerArgs"
 }
 
@@ -406,8 +408,16 @@ function Uninstall-Demonstrator {
     if ((Test-Path $DataRoot) -and -not (Get-ChildItem $DataRoot -Force)) { [IO.Directory]::Delete($DataRoot) }  # never recurse
 }
 
+function Reset-Password {
+    # install.sh --reset-password in the distro: the next visitor sets a new password, all sessions end.
+    if (-not (Test-Distro)) { Stop-Install "the demonstrator is not installed" }
+    $url = ConvertTo-BashWord (Get-InstallerUrl $Version $Branch)
+    Invoke-Distro "set -o pipefail; curl -fsSL '$url' | bash -s -- --reset-password"
+}
+
 function Invoke-Main {
     if ($Uninstall) { Assert-Admin; Uninstall-Demonstrator; return }
+    if ($ResetPassword) { Assert-Admin; Reset-Password; return }
     Assert-Prerequisite
     # A continuation that is still pending (restart declined, installer started again) must not run twice.
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" -Name "DtmDemonstratorInstall" -ErrorAction SilentlyContinue
@@ -427,7 +437,7 @@ function Invoke-Main {
 
 # Dot-sourced by the Pester tests and the start task: only the functions, no installation.
 if ($MyInvocation.InvocationName -ne ".") {
-    if (-not $Version -and -not $Branch -and -not $Uninstall) {
+    if (-not $Version -and -not $Branch -and -not $Uninstall -and -not $ResetPassword) {
         # "latest" once, so install.sh, the saved copy and the continuation are the same release.
         try { $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name }
         catch { throw "ERROR: could not look up the latest release on GitHub ($($_.Exception.Message)) - pass -Version vX.Y.Z" }

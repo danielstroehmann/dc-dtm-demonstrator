@@ -1094,7 +1094,7 @@ def test_only_get_and_post_routes():
                      "/runs/{run_id}/enroll", "/runs/{run_id}/renew",
                      "/settings/connections", "/settings/connections/{connection_id}/default",
                      "/settings/connections/{connection_id}/delete",
-                     "/settings/connections/{connection_id}/profiles/retire"]
+                     "/settings/connections/{connection_id}/profiles/retire", "/setup"]
 
 
 def test_no_get_route_changes_state(configured_user, store, fake, data_dir):

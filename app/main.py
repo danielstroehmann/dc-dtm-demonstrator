@@ -21,10 +21,11 @@ from fastapi.templating import Jinja2Templates
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import cleanup, devices, dtm, enrollment, evergreen, snippets
-from .auth import COOKIE, Auth
+from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, DATA_DIR
 from .dtm import DTMClient, DTMConfig, DTMError
 from .store import Store
@@ -155,7 +156,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if request.method == "POST" and not _same_origin(request):
             # SameSite treats other apps on this host (any port) as same-site; Origin does not.
             return HTMLResponse("Cross-origin request refused", status_code=403)
-        public = request.url.path in ("/login", "/healthz") or request.url.path.startswith("/static/")
+        public = request.url.path in ("/login", "/setup", "/healthz") or request.url.path.startswith("/static/")
         if not public and not auth.is_authenticated(request):
             if request.headers.get("hx-request"):
                 return HTMLResponse("", status_code=401, headers={"HX-Redirect": "/login"})
@@ -190,7 +191,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.exception_handler(RateLimitExceeded)
     async def rate_limited(request: Request, _exc):
-        return render(request, "login.html", 429, error="Too many attempts – wait a minute and try again.")
+        return render(request, "login.html", 429, setup=not auth.has_password(),
+                      error="Too many attempts – wait a minute and try again.")
 
     @app.get("/healthz")
     async def healthz():
@@ -198,12 +200,32 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.get("/login")
     async def login_page(request: Request):
-        return render(request, "login.html")
+        # No password yet: the first visitor sets it (no installer prompt, nothing in .env).
+        return render(request, "login.html", setup=not auth.has_password())
+
+    @app.post("/setup")
+    @limiter.limit("5/minute")
+    async def setup(request: Request, password: str = Form(...), repeat: str = Form(...)):
+        if auth.has_password():
+            return RedirectResponse("/login", status_code=303)
+        error = (f"At least {MIN_PASSWORD} characters." if len(password) < MIN_PASSWORD
+                 else f"At most {MAX_PASSWORD} characters." if len(password) > MAX_PASSWORD
+                 else "The passwords do not match." if password != repeat else None)
+        if error:
+            return render(request, "login.html", 400, setup=True, error=error)
+        if not await run_in_threadpool(auth.set_password, password):  # another request was first
+            return RedirectResponse("/login", status_code=303)
+        log.warning("login password set from %s", get_remote_address(request))
+        response = RedirectResponse("/", status_code=303)
+        auth.set_cookie(response, auth.issue())
+        return response
 
     @app.post("/login")
     @limiter.limit("5/minute")
     async def login(request: Request, password: str = Form(...)):
-        if not auth.check_password(password):
+        if not auth.has_password():
+            return RedirectResponse("/login", status_code=303)
+        if not await run_in_threadpool(auth.check_password, password):  # Argon2: ~50 ms, not on the loop
             log.warning("failed login from %s", get_remote_address(request))
             return render(request, "login.html", 401, error="Wrong password.")
         response = RedirectResponse("/", status_code=303)
@@ -690,4 +712,5 @@ def build() -> FastAPI:
     """Entry point for uvicorn (`app.main:build`, factory mode)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per DTM call is too much
-    return create_app(Store(DATA_DIR / "demonstrator.db"), Auth.from_env())
+    store = Store(DATA_DIR / "demonstrator.db")
+    return create_app(store, Auth.from_env(store))

@@ -6,6 +6,7 @@
 #   … | sudo bash -s -- --version v0.1.0      install a specific release
 #   … | sudo bash -s -- --branch dev          install the preview image of a branch
 #   … | sudo bash -s -- --uninstall [--purge] remove it (purge: also data and Docker if we installed it)
+#   … | sudo bash -s -- --reset-password      the next visitor sets a new login password
 set -euo pipefail
 
 REPO="danielstroehmann/dc-dtm-demonstrator"
@@ -14,7 +15,7 @@ INSTALL_DIR="/opt/dtm-demonstrator"
 APP_UID=10001
 
 version="" branch="" tls_mode="" tls_cert="" tls_key="" hosts="" port="" http_port="" local_image=""
-uninstall=false purge=false assume_yes=false
+uninstall=false purge=false assume_yes=false reset_password=false
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -33,6 +34,7 @@ Options:
   --http-port N         HTTP port that redirects to HTTPS (default 80)
   --local-image IMAGE   use an already loaded image instead of pulling (testing)
   --yes                 no questions; with neither --version nor --branch the latest release is used
+  --reset-password      remove the login password (the next visitor sets a new one) and end all sessions
   --uninstall           stop and remove the demonstrator (data is kept)
   --purge               with --uninstall: also delete all data and Docker if this script installed it
 EOF
@@ -50,6 +52,7 @@ while [ $# -gt 0 ]; do
 		--http-port) http_port="${2:?}"; shift 2 ;;
 		--local-image) local_image="${2:?}"; shift 2 ;;
 		--yes) assume_yes=true; shift ;;
+		--reset-password) reset_password=true; shift ;;
 		--uninstall) uninstall=true; shift ;;
 		--purge) purge=true; shift ;;
 		-h|--help) usage; exit 0 ;;
@@ -70,6 +73,32 @@ VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
 [ "$tls_mode" != custom ] || [ -n "$tls_cert$tls_key" ] || die "--tls custom needs --tls-cert and --tls-key"
 
 compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrator "$@"; }
+
+env_file="$INSTALL_DIR/.env"
+env_tmp=""
+trap 'rm -f "$env_tmp"' EXIT  # never leave a copy of the secrets behind
+env_get() { sed -n "s/^$1=//p" "$env_file" | tail -1 | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/'; }
+env_rewrite() { # drop KEY, optionally append KEY='VALUE' – single quotes: compose takes the value literally
+	env_tmp=$(mktemp "$env_file.XXXXXX")
+	{ grep -a -v "^$1=" "$env_file" || true; [ $# -lt 2 ] || printf "%s='%s'\n" "$1" "$2"; } >"$env_tmp"
+	chmod 600 "$env_tmp" && mv "$env_tmp" "$env_file"
+	env_tmp=""
+}
+env_set() { env_rewrite "$1" "$2"; }
+
+# --- reset the login password ------------------------------------------------------------------
+if $reset_password; then
+	[ -s "$env_file" ] || die "no installation in $INSTALL_DIR"
+	[ -n "$(compose ps -q app 2>/dev/null)" ] || die "the demonstrator is not running – install or start it first"
+	# The app is down while the hash is gone and the secret changes – nobody can set a password in between.
+	compose stop app >/dev/null
+	compose run --rm --no-deps -T app python -m app.reset_password || { compose start app >/dev/null; die "reset failed – nothing changed"; }
+	env_rewrite ADMIN_PASSWORD  # an old value would be taken over again at the next start
+	env_set JWT_SECRET "$(openssl rand -hex 32)"  # a new secret ends every session, also a stranger's
+	compose up -d app >/dev/null
+	info "Login password removed – open the demonstrator and set a new one (whoever opens it first sets it)"
+	exit 0
+fi
 
 # --- uninstall -------------------------------------------------------------------------------
 if $uninstall; then
@@ -159,7 +188,6 @@ docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 # --- files ----------------------------------------------------------------------------------
 fetch() { curl -fsSL "https://raw.githubusercontent.com/$REPO/$ref/$1" -o "$2" || die "could not download $1 for $ref"; }
 
-env_file="$INSTALL_DIR/.env"
 if [ ! -s "$env_file" ]; then
 	cat >"$env_file" <<'EOF'
 # Demonstrator · Device Trust Manager settings. Edit, then reboot or run: systemctl restart dtm-demonstrator
@@ -177,19 +205,9 @@ if ! grep -q '^# TLS:' "$env_file"; then
 EOF
 fi
 chmod 600 "$env_file"
-env_tmp=""
-trap 'rm -f "$env_tmp"' EXIT  # never leave a copy of the secrets behind
-env_get() { sed -n "s/^$1=//p" "$env_file" | tail -1 | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/'; }
-env_rewrite() { # drop KEY, optionally append KEY='VALUE' – single quotes: compose takes the value literally
-	env_tmp=$(mktemp "$env_file.XXXXXX")
-	{ grep -a -v "^$1=" "$env_file" || true; [ $# -lt 2 ] || printf "%s='%s'\n" "$1" "$2"; } >"$env_tmp"
-	chmod 600 "$env_tmp" && mv "$env_tmp" "$env_file"
-	env_tmp=""
-}
-env_set() { env_rewrite "$1" "$2"; }
 
-# Settings: kept from the previous run unless given again. The port checks run before a
-# password is generated – a generated password is only shown at the end and would be lost otherwise.
+
+# Settings: kept from the previous run unless given again.
 port="${port:-$(env_get HTTPS_PORT)}"; port="${port:-443}"
 previous_http_port=$(env_get HTTP_PORT)
 http_port="${http_port:-$previous_http_port}"; http_port="${http_port:-80}"
@@ -201,28 +219,9 @@ if ss -Hltn "sport = :$http_port" 2>/dev/null | grep -q . \
 	die "port $http_port is in use by another service – pass --http-port N"
 fi
 
-# Secrets: set once, never overwritten on later runs.
-new_password="" shown_password=""
-if [ -z "$(env_get ADMIN_PASSWORD)" ]; then
-	if ! $assume_yes && have_tty; then
-		while true; do
-			pw1="" pw2=""
-			IFS= read -r -s -p "Initial login password (min. 12 characters, empty = generate one): " pw1 </dev/tty || true; echo
-			[ -z "$pw1" ] && break
-			if [ "${#pw1}" -lt 12 ]; then echo "  Too short."; continue; fi
-			# ' and \ cannot be stored safely for docker compose
-			case "$pw1" in *"'"* | *\\*) echo "  The password must not contain ' or \\ – pick another."; continue ;; esac
-			IFS= read -r -s -p "Repeat the password: " pw2 </dev/tty || true; echo
-			[ "$pw1" = "$pw2" ] && { new_password="$pw1"; break; }
-			echo "  The passwords do not match."
-		done
-	fi
-	if [ -z "$new_password" ]; then
-		new_password=$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-24)
-		shown_password="$new_password"  # generated: show it once at the end
-	fi
-	env_set ADMIN_PASSWORD "$new_password"
-fi
+# Secrets: set once, never overwritten on later runs. The login password is not one of them: whoever
+# opens the app first sets it (stored hashed in ./data); an ADMIN_PASSWORD of an older .env is taken over
+# by the app once and removed below.
 [ -n "$(env_get JWT_SECRET)" ] || env_set JWT_SECRET "$(openssl rand -hex 32)"
 
 if [ -z "$hosts" ]; then hosts="$(env_get SITE_HOSTS)"; fi
@@ -380,8 +379,23 @@ done
 if [ "$(env_get TLS_CERT_FILE)" = ./tls/cert.pem ] && self_signed_by_us; then
 	echo "    (self-signed certificate – your browser will ask you to accept it; your own: TLS_* in $env_file)"
 fi
-if [ -n "$shown_password" ]; then
-	echo
-	echo "    Login password (shown only once, stored in $env_file):"
-	echo "      $shown_password"
+if [ -n "$(env_get ADMIN_PASSWORD)" ]; then
+	# The app (healthy, so it has started) took the old password over or ignored it – either way it does not
+	# belong in .env any more; recreate the container so it is gone from its environment, too.
+	app_log=$(compose logs app 2>/dev/null || true)  # captured: grep -q on a pipe could SIGPIPE the producer
+	if grep -q "ADMIN_PASSWORD ignored" <<<"$app_log"; then
+		echo "WARNING: ADMIN_PASSWORD in $env_file was ignored – a login password is already set." >&2
+		echo "         To set a new one: run this installer with --reset-password." >&2
+	else
+		echo "    Login password: unchanged (now stored hashed by the app)"
+	fi
+	env_rewrite ADMIN_PASSWORD
+	compose up -d app >/dev/null
+fi
+# Ask the app, not .env: the login page offers the setup form while no password is set.
+login_page=$(curl -fsk --resolve "$default_sni:$port:127.0.0.1" "https://$default_sni:$port/login" 2>/dev/null || true)
+if grep -q 'action="/setup"' <<<"$login_page"; then
+	echo "    Login password: not set yet – open the URL now (whoever opens it first sets it)"
+elif [ -z "$login_page" ]; then
+	echo "    Login password: if none is set yet, the first visit sets it"
 fi
