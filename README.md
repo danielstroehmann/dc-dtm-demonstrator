@@ -52,14 +52,11 @@ As a local administrator, in an elevated PowerShell:
 irm https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.ps1 | iex
 ```
 
-Until the first release with Windows support, use the development preview:
-`& ([scriptblock]::Create((irm https://raw.githubusercontent.com/danielstroehmann/dc-dtm-demonstrator/dev/install.ps1))) -Branch dev`.
-
 The script enables WSL 2 (a fresh machine restarts once; the installation continues at the next logon of an
 administrator, or run the command again), installs WSL from Microsoft's signed package, creates its own WSL
 distro `dtm-demonstrator` and runs the Linux installer there. Windows forwards ports 443 and 80 to it, opens them
 in the Defender firewall and starts it at boot – no logon needed. Options: `-Version vX.Y.Z`, `-Branch dev`,
-`-Yes`, `-Uninstall`.
+`-Yes`, `-Uninstall` – passed as `& ([scriptblock]::Create((irm <URL>))) -Version vX.Y.Z`.
 
 ## Configuration
 
