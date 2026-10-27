@@ -20,10 +20,11 @@
 {%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "paused": "", "renewing": "run", "enrolling": "run", "active": "ok", "passed": "ok"}.get(status, "") -%}
 <span class="pill {{ kind }}">{{ status }}</span>
 {%- endmacro %}
-{# The run's lifetime until the automatic rollback: a circle filling in quarters – green, orange in the last one #}
+{# The run's lifetime until the automatic rollback: a circle filling in quarters – green, orange in the last one;
+   an empty grey circle once the watchdog gave up (parked) #}
 {% macro lifetime_clock(lt) -%}
-{%- set tip = "Rolled back automatically at %s UTC" % lt.due -%}
-<span class="lifetime q{{ lt.quarter }}{{ ' late' if lt.quarter >= 3 }}" role="img" aria-label="{{ tip }}" data-tip="{{ tip }}" tabindex="0">
+{%- set q = lt.quarter -%}
+<span class="lifetime {{ 'stopped' if q is none else 'q%d' % q }}{{ ' late' if q is not none and q >= 3 }}" role="img" aria-label="{{ lt.tip }}" data-tip="{{ lt.tip }}" tabindex="0">
 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
-{%- if lt.quarter %}<path fill="currentColor" d="M12 12V3A9 9 0 {{ ['0 1 21 12', '0 1 12 21', '1 1 3 12'][lt.quarter - 1] }}z"/>{% endif %}</svg></span>
+{%- if q %}<path fill="currentColor" d="M12 12V3A9 9 0 {{ ['0 1 21 12', '0 1 12 21', '1 1 3 12'][q - 1] }}z"/>{% endif %}</svg></span>
 {%- endmacro %}

@@ -104,16 +104,21 @@ async def test_a_rolled_back_run_is_not_touched_again(dog, configured_store, fak
 
 
 async def test_a_run_of_another_account_is_never_rolled_back_via_the_configured_one(
-        dog, configured_store, fake, tmp_path, clock):
+        dog, configured_store, fake, tmp_path, clock, caplog):
     store = configured_store
     await run_aged(store, fake, "old", tmp_path, clock, 4 * HOUR)
     params = store.get_run("old")["params"] | {"account_id": "another-account", "connection_id": None}
     store.update_run("old", params=params)
     fake.calls.clear()
-    await dog.tick()
+    events = len(store.events("old"))
+    for _ in range(3):  # every tick checks again – locally, silently after the first log line
+        await dog.tick()
+        clock.now += watchdog.TICK_S
     assert fake.calls == []
-    assert store.get_run("old")["cleanup_status"] is None
-    assert any(m.startswith("Automatic rollback failed – next attempt at") for m in messages(store, "old"))
+    run = store.get_run("old")
+    assert run["cleanup_status"] is None and run["watchdog"] is None  # never counted as a failure, never parked
+    assert len(store.events("old")) == events  # no timeline noise
+    assert caplog.text.count("no automatic rollback – no DTM connection for its account") == 1
 
 
 # --- rule 2: 24 h without login -----------------------------------------------------------------
@@ -187,10 +192,67 @@ async def test_a_failed_rollback_backs_off_and_is_retried_later(dog, configured_
     assert "old" not in dog.retry
 
 
-def test_the_backoff_is_capped(dog, configured_store, clock):
+def test_the_backoff_is_capped(dog, configured_store, clock, monkeypatch):
+    monkeypatch.setattr(watchdog, "MAX_FAILURES", 100)
+    configured_store.create_run("r1", "uc01", {})
     for _ in range(12):
-        dog._failed("gone", "test")
-    assert dog.retry["gone"][1] == clock.now + watchdog.MAX_RETRY_S
+        dog._failed("r1")
+    assert dog.retry["r1"] == clock.now + watchdog.MAX_RETRY_S
+
+
+async def test_after_3_failures_the_run_is_parked_also_across_restarts(
+        dog, configured_store, auth, fake, data_dir, tmp_path, clock):
+    store = configured_store
+    await run_aged(store, fake, "old", tmp_path, clock, 4 * HOUR)
+    dog.client_for = dtm_down(dog)
+    attempts = lambda: sum(m.startswith("Automatic full rollback") for m in messages(store, "old"))  # noqa: E731
+    for _ in range(watchdog.MAX_FAILURES):
+        await dog.tick()
+        clock.now += watchdog.MAX_RETRY_S
+    assert attempts() == 3
+    assert store.get_run("old")["watchdog"] == {"failed": 3, "parked": True}
+    assert messages(store, "old").count("Automatic rollback stopped after 3 failures – roll back manually") == 1
+    await dog.tick()
+    restarted = create_app(store, auth, client_factory=fake.factory(), data_dir=data_dir).state.watchdog
+    restarted.clock = clock
+    await restarted.tick()
+    assert attempts() == 3  # parked: neither this watchdog nor a restarted one tries again
+
+
+async def test_at_most_one_rollback_per_tick(dog, configured_store, fake, tmp_path, clock, caplog):
+    store = configured_store
+    caplog.set_level("INFO", "demonstrator")
+    for run_id in ("a", "b", "c"):
+        await run_aged(store, fake, run_id, tmp_path, clock, 4 * HOUR)
+    store.update_run("a", created_at=_iso(clock.now - 5 * HOUR))  # the oldest goes first
+    await dog.tick()
+    assert [rolled_back(store.get_run(r)) for r in ("a", "b", "c")] == [True, False, False]
+    assert "watchdog: 3 runs due" in caplog.text
+    await dog.tick()
+    await dog.tick()
+    assert all(rolled_back(store.get_run(r)) for r in ("a", "b", "c"))
+
+
+async def test_an_unreachable_run_does_not_use_up_the_tick(dog, configured_store, fake, tmp_path, clock):
+    store = configured_store
+    await run_aged(store, fake, "orphan", tmp_path, clock, 5 * HOUR)
+    store.update_run("orphan", params=store.get_run("orphan")["params"] | {"account_id": "gone", "connection_id": None})
+    await run_aged(store, fake, "old", tmp_path, clock, 4 * HOUR)
+    await dog.tick()
+    assert rolled_back(store.get_run("old"))  # no DTM call for the orphan – the next due run still goes
+
+
+async def test_a_shutdown_during_an_automatic_rollback_is_logged(dog, configured_store, fake, tmp_path, clock,
+                                                                monkeypatch, caplog):
+    await run_aged(configured_store, fake, "old", tmp_path, clock, 4 * HOUR)
+
+    async def cancelled(*_args):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(watchdog.cleanup, "cleanup", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await dog.tick()
+    assert "run old: the shutdown interrupted its automatic rollback" in caplog.text
 
 
 async def test_the_loop_survives_a_failing_tick(dog):
@@ -244,6 +306,16 @@ async def test_dangling_minions_are_removed(dog, configured_store, fake, tmp_pat
     await dog.tick()
     assert set(docker.containers) == {keep["Id"], foreign["Id"]}
     assert fake.calls == []
+    assert "Removed 1 leftover minion container(s) automatically" in messages(store, "done")
+    assert not any("leftover" in m for m in messages(store, "live"))
+
+
+async def test_minions_of_another_install_on_the_same_docker_stay(dog, monkeypatch):
+    docker = FakeDocker().install(monkeypatch)
+    other = docker.add("robot-gone-minion-0001", "gone", instance="other-demonstrator")
+    legacy = docker.add("robot-old-minion-0001", "old", instance="")  # an older launcher's: no instance label
+    await dog.tick()
+    assert set(docker.containers) == {other["Id"], legacy["Id"]}
 
 
 async def test_minions_of_a_run_that_is_rolling_back_stay(dog, configured_store, fake, tmp_path, clock, monkeypatch):
@@ -296,7 +368,14 @@ def test_the_clock_fills_in_quarters_of_45_minutes(minutes, quarter):
     started = datetime(2026, 10, 27, 11, 32, tzinfo=timezone.utc)
     run = {"created_at": started.isoformat(), "cleanup_mode": None, "cleanup_status": None}
     at = (started + timedelta(minutes=minutes)).timestamp()
-    assert watchdog.lifetime(run, at) == {"quarter": quarter, "due": "14:32"}
+    tip = "Rolled back automatically at 14:32 UTC" if minutes < 180 else "Automatic rollback pending"
+    assert watchdog.lifetime(run, at) == {"quarter": quarter, "tip": tip}
+
+
+def test_a_parked_run_shows_a_stopped_clock():
+    run = {"created_at": "2026-10-27T11:32:00+00:00", "cleanup_mode": "full", "cleanup_status": "failed",
+           "watchdog": {"failed": 3, "parked": True}}
+    assert watchdog.lifetime(run, 0) == {"quarter": None, "tip": "Automatic rollback stopped"}
 
 
 def test_the_clock_is_gone_once_rolled_back():
@@ -316,5 +395,11 @@ def test_the_runs_list_shows_the_clock_until_the_rollback(configured_user, store
     store.update_run("r1", created_at=_iso(datetime.now(timezone.utc).timestamp() - 140 * 60))
     html = configured_user.get("/").text
     assert 'class="lifetime q3 late"' in html and 'd="M12 12V3A9 9 0 1 1 3 12z"' in html
+    store.update_run("r1", created_at=_iso(datetime.now(timezone.utc).timestamp() - 200 * 60))
+    assert 'data-tip="Automatic rollback pending"' in configured_user.get("/").text
+    store.update_run("r1", watchdog={"failed": 3, "parked": True})
+    html = configured_user.get("/").text
+    assert 'class="lifetime stopped"' in html and 'data-tip="Automatic rollback stopped"' in html
+    assert "<path" not in re.search(r'<span class="lifetime stopped".*?</span>', html, re.S).group(0)
     store.update_run("r1", cleanup_mode="full", cleanup_status="done")
     assert 'class="lifetime' not in configured_user.get("/").text

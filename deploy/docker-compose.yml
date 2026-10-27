@@ -82,6 +82,7 @@ services:
       MINION_DOCKER: http://docker:2375
       MINION_IMAGE: dtm-minion:${MINION_VERSION:-26.6.3-567}
       MINION_NETWORK: dtm-minions  # created by install.sh: out to DTM, away from the app
+      MINION_INSTANCE: ${MINION_INSTANCE:-default}  # labels this install's minions (install.sh writes it to .env)
     networks: [launcher, docker-api]
     read_only: true
     tmpfs: [/tmp]

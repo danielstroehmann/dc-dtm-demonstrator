@@ -240,3 +240,27 @@ def test_reset_is_documented_in_help():
 def test_reset_mode_exits_before_any_install_step():
     reset_at, uninstall_at = SOURCE.index("if $reset_password; then"), SOURCE.index("if $uninstall; then")
     assert reset_at < uninstall_at and "exit 0" in RESET
+
+
+# --- the minion instance name (several demonstrators on one Docker daemon) ---------------------------------
+
+INSTANCE = _extract(r"^\[ -n \"\$\(env_get MINION_INSTANCE\)\" \] \|\| env_set MINION_INSTANCE .*?$")
+
+
+def test_a_fresh_install_names_its_minions_once(sh):
+    result, _ = sh(INSTANCE, env_lines="JWT_SECRET='kept'\n")
+    assert result.returncode == 0, result.stderr
+    name = env_values(sh.env_file)["MINION_INSTANCE"]
+    assert re.fullmatch(r"[a-z0-9_-]{1,40}", name) and name.startswith("dtm-")  # what the launcher accepts
+
+
+def test_an_update_keeps_the_instance_name(sh):
+    result, _ = sh(INSTANCE, env_lines="JWT_SECRET='kept'\nMINION_INSTANCE='dtm-1a2b3c4d'\n")
+    assert result.returncode == 0
+    assert env_values(sh.env_file) == {"JWT_SECRET": "kept", "MINION_INSTANCE": "dtm-1a2b3c4d"}
+
+
+def test_the_compose_file_hands_the_instance_name_to_the_launcher():
+    import yaml
+    compose = yaml.safe_load((INSTALLER.parent / "deploy" / "docker-compose.yml").read_text())
+    assert compose["services"]["launcher"]["environment"]["MINION_INSTANCE"] == "${MINION_INSTANCE:-default}"

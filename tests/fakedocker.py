@@ -50,9 +50,14 @@ class FakeDocker:
         monkeypatch.setattr(minions, "httpx", Routed(lambda: httpx.ASGITransport(app=launcher.api)))
         return self
 
-    def add(self, name: str, run_id: str | None, status: str = "running", logs: list[tuple[str, str]] = ()) -> dict:
-        """run_id None: a container the launcher did not create (no label)."""
-        labels = {launcher.LABEL: run_id} if run_id is not None else {}
+    def add(self, name: str, run_id: str | None, status: str = "running", logs: list[tuple[str, str]] = (),
+            instance: str | None = None) -> dict:
+        """run_id None: a container the launcher did not create (no label). instance: another install's name, or ""
+        for no instance label (an older launcher); default: this launcher's."""
+        labels = {launcher.LABEL: run_id, launcher.INSTANCE_LABEL: instance or launcher.INSTANCE} \
+            if run_id is not None else {}
+        if instance == "":  # a minion of a launcher before v1.1.0
+            labels.pop(launcher.INSTANCE_LABEL, None)
         container = {"Id": uuid.uuid4().hex, "name": name, "labels": labels, "status": status,
                      "logs": list(logs), "body": {}}
         self.containers[container["Id"]] = container
@@ -78,14 +83,19 @@ class FakeDocker:
                 return httpx.Response(409, json={"message": "Conflict. The container name is already in use"})
             body = json.loads(request.content)
             container = self.add(name, body.get("Labels", {}).get(launcher.LABEL), status="created")
+            container["labels"] = dict(body.get("Labels") or {})  # exactly what the launcher set
             container["body"] = body
             self.calls.append(("create", name))
             return httpx.Response(201, json={"Id": container["Id"], "Warnings": []})
         if method == "GET" and path == "/containers/json":
-            label = json.loads(request.url.params.get("filters") or "{}").get("label", [""])[0]
+            wanted = json.loads(request.url.params.get("filters") or "{}").get("label", [])
+
+            def matches(labels: dict, f: str) -> bool:  # Docker: "key" = present, "key=value"; all must match
+                key, _, value = f.partition("=")
+                return key in labels and (not _ or labels[key] == value)
+
             listed = [c for c in self.containers.values()
-                      if self.filter_ignored or f"{launcher.LABEL}={c['labels'].get(launcher.LABEL)}" == label
-                      or (label == launcher.LABEL and launcher.LABEL in c["labels"])]  # label present, any value
+                      if self.filter_ignored or all(matches(c["labels"], f) for f in wanted)]
             return httpx.Response(200, json=[{"Id": c["Id"], "Names": [f"/{c['name']}"], "Labels": c["labels"]}
                                              for c in listed])
         m = re.fullmatch(r"/containers/([0-9a-f]+)(/[a-z]+)?", path)

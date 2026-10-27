@@ -18,6 +18,13 @@ IMAGE = os.environ.get("MINION_IMAGE", "dtm-minion:latest")
 NETWORK = os.environ.get("MINION_NETWORK", "dtm-minions")
 API_VERSION = "/v1.44"  # Docker Engine 25+; Engine 29 refuses older versions by default
 LABEL = "dtm-demonstrator.run"
+# Several demonstrators may share one Docker daemon: each launcher labels its minions with its install's name and
+# touches no other install's. Minions of a launcher before v1.1.0 carry no instance label – the run's own rollback
+# and the minion's page still reach them (the run ID is random), the watchdog's listing does not.
+INSTANCE_LABEL = "dtm-demonstrator.instance"
+INSTANCE = os.environ.get("MINION_INSTANCE", "default")
+if not re.fullmatch(r"[a-z0-9_-]{1,40}", INSTANCE):
+    raise RuntimeError("MINION_INSTANCE must match ^[a-z0-9_-]{1,40}$")
 RUN = re.compile(r"^[a-z0-9]{1,16}$")
 NAME = re.compile(r"^robot-[a-z0-9]{1,16}-[a-z0-9-]{1,40}$")
 CONTAINER = re.compile(r"^[0-9a-f]{12,64}$")
@@ -53,12 +60,17 @@ async def _call(method: str, path: str, expect: tuple[int, ...] = (200,), **kwar
     return response
 
 
+def _owned(labels: dict | None) -> bool:
+    labels = labels or {}
+    return labels.get(LABEL) is not None and labels.get(INSTANCE_LABEL) in (INSTANCE, None)
+
+
 async def _ours(container: str) -> dict:
     """The container's inspect data – only for a container this launcher created."""
     if not CONTAINER.fullmatch(container):
         raise HTTPException(404, "unknown container")
     info = (await _call("GET", f"/containers/{container}/json", (200, 404))).json()
-    if "State" in info and (info.get("Config", {}).get("Labels") or {}).get(LABEL) is None:
+    if "State" in info and not _owned(info.get("Config", {}).get("Labels")):
         raise HTTPException(404, "unknown container")
     return info
 
@@ -87,9 +99,9 @@ async def start(minion: Minion) -> dict:
         raise HTTPException(422, "unexpected minion environment")
     running = await _call("GET", "/containers/json",
                           params={"all": 1, "filters": json.dumps({"label": [LABEL]})})
-    if len(running.json()) >= MAX_MINIONS:
+    if sum(_owned(c.get("Labels")) for c in running.json()) >= MAX_MINIONS:
         raise HTTPException(429, f"at most {MAX_MINIONS} minions on this host")
-    body = {"Image": IMAGE, "Env": [f"{k}={v}" for k, v in minion.env.items()], "Labels": {LABEL: minion.run_id},
+    body = {"Image": IMAGE, "Env": [f"{k}={v}" for k, v in minion.env.items()], "Labels": {LABEL: minion.run_id, INSTANCE_LABEL: INSTANCE},
             "HostConfig": {"NetworkMode": NETWORK, "Memory": 96 * 1024 * 1024, "NanoCpus": 500_000_000, "PidsLimit": 64,
                            "SecurityOpt": ["no-new-privileges:true"], "RestartPolicy": {"Name": "no"},
                            "LogConfig": {"Type": "json-file", "Config": {"max-size": "1m"}}}}
@@ -116,9 +128,12 @@ async def state(container: str) -> dict:
 
 @api.get("/runs")
 async def runs() -> dict:
-    """The run IDs that labelled containers belong to – read-only, for the app's watchdog (dangling minions)."""
-    listed = await _call("GET", "/containers/json", params={"all": 1, "filters": json.dumps({"label": [LABEL]})})
-    labels = {(c.get("Labels") or {}).get(LABEL) for c in listed.json()}  # re-checked: never trust the filter alone
+    """The run IDs that this install's minions belong to – read-only, for the app's watchdog (dangling minions).
+    Strictly this instance: an unlabelled older minion may belong to another install."""
+    mine = f"{INSTANCE_LABEL}={INSTANCE}"
+    listed = await _call("GET", "/containers/json", params={"all": 1, "filters": json.dumps({"label": [LABEL, mine]})})
+    labels = {(c.get("Labels") or {}).get(LABEL) for c in listed.json()  # re-checked: never trust the filter alone
+              if (c.get("Labels") or {}).get(INSTANCE_LABEL) == INSTANCE}
     return {"runs": sorted(run for run in labels if run and RUN.fullmatch(run))}
 
 
@@ -129,7 +144,7 @@ async def remove_run(run_id: str) -> dict:
         raise HTTPException(422, "unexpected run")
     listed = await _call("GET", "/containers/json",
                          params={"all": 1, "filters": json.dumps({"label": [f"{LABEL}={run_id}"]})})
-    containers = [c for c in listed.json() if (c.get("Labels") or {}).get(LABEL) == run_id]
+    containers = [c for c in listed.json() if (c.get("Labels") or {}).get(LABEL) == run_id and _owned(c.get("Labels"))]
     for c in containers:
         await _call("DELETE", f"/containers/{c['Id']}", (204, 404), params={"force": 1})
     return {"removed": len(containers)}

@@ -152,6 +152,7 @@ table.runs-table .c-actions { width: 10rem; } table.runs-table td.actions-cell {
 /* Left of the row action: the run's lifetime until the automatic rollback (watchdog), filling in quarters */
 .actions-cell > .lifetime { align-items: center; margin-right: var(--s2); color: var(--ok); }
 .actions-cell > .lifetime.late { color: var(--dc-orange); }
+.actions-cell > .lifetime.stopped { color: var(--dc-grey); }
 .lifetime svg { width: 1rem; height: 1rem; }
 
 /* The row's action slot: Full rollback, Delete and the running rollback share one box to the pixel */

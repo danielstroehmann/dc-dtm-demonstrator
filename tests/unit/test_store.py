@@ -451,3 +451,25 @@ def test_concurrent_reads_and_writes_never_mix_up_rows(tmp_path):
     for t in threads:
         t.join()
     assert not errors, errors[0]
+
+
+# --- v4: the watchdog's state of a run ---------------------------------------------------------------
+
+def test_v4_upgrade_from_a_v1_0_0_volume_keeps_runs_and_adds_the_watchdog_state(tmp_path):
+    path = tmp_path / "v3.db"
+    with sqlite3.connect(path) as db:  # a data volume of v1.0.0 (schema v3)
+        db.executescript(store_module.MIGRATIONS[0])
+        db.execute(store_module.MIGRATIONS[1])
+        db.executescript(store_module.MIGRATIONS[2])
+        db.execute("INSERT INTO runs (id, use_case, params, status, created_at, result) VALUES "
+                   "('old', 'uc01', '{\"mode\": \"single\"}', 'completed', '2026-10-23T10:00:00+00:00', "
+                   "'{\"certificate_total\": 1}')")
+        db.execute("PRAGMA user_version = 3")
+    store = Store(path)
+    assert user_version(path) == SCHEMA_VERSION == 4
+    run = store.get_run("old")
+    assert run["watchdog"] is None and run["result"] == {"certificate_total": 1} and run["params"] == {"mode": "single"}
+    store.update_run("old", watchdog={"failed": 3, "parked": True})
+    assert store.list_runs()[0]["watchdog"] == {"failed": 3, "parked": True}  # the runs list sees it
+    Store(path)  # re-open: the ALTER must not run twice
+    assert Store(path).get_run("old")["watchdog"] == {"failed": 3, "parked": True}

@@ -237,6 +237,8 @@ fi
 # opens the app first sets it (stored hashed in ./data); an ADMIN_PASSWORD of an older .env is taken over
 # by the app once and removed below.
 [ -n "$(env_get JWT_SECRET)" ] || env_set JWT_SECRET "$(openssl rand -hex 32)"
+# Names this install's minions (Docker label): another demonstrator on the same Docker daemon keeps its own
+[ -n "$(env_get MINION_INSTANCE)" ] || env_set MINION_INSTANCE "dtm-$(openssl rand -hex 4)"
 
 if [ -z "$hosts" ]; then hosts="$(env_get SITE_HOSTS)"; fi
 if [ -z "$hosts" ]; then
