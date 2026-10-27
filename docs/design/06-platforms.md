@@ -91,3 +91,21 @@ irm https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/down
 
 Sources: Microsoft, [Install WSL on Windows Server](https://learn.microsoft.com/windows/wsl/install-on-server);
 [WSL issue 12569](https://github.com/microsoft/WSL/issues/12569) (mirrored mode on Server).
+
+## Verified on Windows Server 2025 (2026-10-27)
+
+Fresh Windows Server 2025 Standard (build 26100.33650, Desktop Experience) as a KVM VM (CPU type `host`,
+nested virtualisation), workgroup, network profile *Public*; driven over SSH with `-Branch dev -Yes`:
+
+- Run 1 enabled the WSL features and restarted. Run 2 (the continuation) installed WSL 3.0.3 from Microsoft's
+  MSI (the inbox `wsl.exe` only answers "not installed", even to `--update` and `--install`), the distro
+  (Ubuntu 26.04), Docker and the stack, then the firewall, port proxy and start task; health check passed.
+- From another machine on the LAN: `/healthz` and the login 200, HTTP → HTTPS 302, certificate for the IP and
+  the DNS host name.
+- **Restart without any logon:** the UI answered from the LAN 42 s after the restart (uptime 45 s, no
+  interactive session, start task running) – launching WSL from session 0 works here.
+- Update (installer again): secrets and data unchanged, healthy.
+- Learned: with the CPU type *QEMU Virtual CPU* (no VMX/SVM) WSL fails with `HCS_E_HYPERV_NOT_INSTALLED` –
+  the installer's hint names the fix.
+
+Still open: uninstall on Server 2025; Windows Server 2022 and Windows 11.
