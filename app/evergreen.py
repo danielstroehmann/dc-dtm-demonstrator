@@ -50,7 +50,7 @@ USE_CASES = {
         "Factory enrollment of one device via EST or CMPv2, field renewal per click – authenticated by the "
         "certificate the device already holds. No device group, so the Essentials license is enough.",
         "client_side", ("EST · CMPv2", "Single device", "Renewal per click"),
-        tip="A device gets a six-month certificate in the factory and renews it itself in the field. The certificate "
+        tip="A device gets a six-month certificate in the factory and renews it itself (field renewal). The certificate "
             "it already holds authenticates the renewal – no passcode."),
     "uc05": UseCase(
         "Passcode-bound device certificates",
@@ -75,11 +75,11 @@ USE_CASES = {
         "Needs the Advanced license.",
         "client_side", ("Advanced license", "EST · CMPv2", "Device-ID certificate"), license="advanced",
         tip="Devices already carry a device-ID certificate from the manufacturer's own CA. DTM trusts that CA and "
-            "gives each device a managed, renewable certificate with its name in the field. Advanced license."),
+            "gives each device a managed, renewable certificate with its name by field enrollment. Advanced license."),
     "uc08": UseCase(
         "TrustEdge managed devices",
         "IoT minions – real Docker containers – run DigiCert TrustEdge. The factory registers each device and gives it only a "
-        "one-time passcode; in the field the agent enrolls its bootstrap certificate (serial number) and then "
+        "one-time passcode; at field enrollment the agent enrolls its bootstrap certificate (serial number) and then "
         "fetches its operational certificate (device name) over MQTT. Needs the Advanced license.",
         "client_side", ("Advanced license", "TrustEdge agent", "IoT minions"), license="advanced",
         tip="IoT minions – containers – run the real TrustEdge agent. With only a one-time passcode from the factory, each "

@@ -107,7 +107,7 @@ def test_configured_home_shows_one_tile_per_use_case(configured_user, store, fak
         assert f'aria-label="Start {use_case.title}"' in html
     assert (html.index('formaction="/runs/new/evergreen"') < html.index('formaction="/runs/new/uc04"')
             < html.index('formaction="/runs/new/uc05"') < html.index('formaction="/runs/new/uc06"'))
-    assert "Server-side or factory keys" in html and "Renewal per click" in html and "One-time passcode" in html
+    assert "REST · EST · CMPv2 · SCEP" in html and "Renewal per click" in html and "One-time passcode" in html
     (conn,) = store.connections()
     assert f'<input type="hidden" name="connection" value="{conn["id"]}">' in html
     assert '<select name="connection"' not in html

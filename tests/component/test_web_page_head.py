@@ -119,8 +119,8 @@ def test_only_the_advanced_tiles_are_marked(configured_user, path):
         assert ('<span class="tile-icon advanced' in tile) is advanced, key
         assert ("Advanced license" in tile) is advanced, key
         if not advanced:
-            assert '<span class="tile-icon">' in tile, key
-    assert [k for k, uc in evergreen.CATALOG.items() if uc.license == "advanced"] == ["uc06"]
+            assert '<span class="tile-icon" data-tip="' in tile, key
+    assert [k for k, uc in evergreen.CATALOG.items() if uc.license == "advanced"] == ["uc06", "uc07", "uc08"]
     assert {uc.license for uc in evergreen.USE_CASES.values()} == {"essentials", "advanced"}
 
 

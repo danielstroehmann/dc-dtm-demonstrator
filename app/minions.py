@@ -115,8 +115,13 @@ def _next_connect(connects: list[datetime], ends: list[datetime]) -> str | None:
     online and 10 s offline, whatever the configuration says). The latest observed durations count."""
     if not connects:
         return None
-    online = next(((e - c).total_seconds() for c, e in zip(reversed(connects), reversed(ends)) if e > c), ONLINE_S)
-    offline = next(((c - e).total_seconds() for e, c in zip(reversed(ends), reversed(connects)) if c > e), OFFLINE_S)
+    online, offline = ONLINE_S, OFFLINE_S
+    events = sorted([(t, "connect") for t in connects] + [(t, "end") for t in ends])
+    for (t1, k1), (t2, k2) in zip(events, events[1:]):  # in order: the latest pair of each kind wins
+        if (k1, k2) == ("connect", "end"):
+            online = (t2 - t1).total_seconds()
+        elif (k1, k2) == ("end", "connect"):
+            offline = (t2 - t1).total_seconds()
     last_connect, last_end = connects[-1], ends[-1] if ends else None
     start = last_end if last_end and last_end > last_connect else last_connect + timedelta(seconds=online)
     return (start + timedelta(seconds=offline)).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -337,7 +337,8 @@ async def test_a_launcher_failure_frees_the_device_and_keeps_the_container(store
     real = docker.handle
 
     def handle(request):
-        if request.method == "GET" and request.url.path.endswith("/json") and "/containers/" in request.url.path:
+        path = request.url.path  # inspecting the started container fails – listing (the launcher's cap) still works
+        if request.method == "GET" and path.endswith("/json") and "/containers/" in path and not path.endswith("/containers/json"):
             return httpx.Response(500, json={"message": "proxy down"})
         return real(request)
     docker.handle = handle

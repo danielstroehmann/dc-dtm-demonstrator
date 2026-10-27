@@ -7,7 +7,7 @@
 {% set stages = {"factory": "passcode only", "starting": "starting", "bootstrap_enrolling": "enrolling bootstrap",
                  "bootstrap_enrolled": "bootstrap enrolled", "configured": "configured", "agent_starting": "agent running",
                  "operational": "operational"} %}
-{% set local = (r.certificates or []) | map(attribute="serial") | list %}
+{% set local = (r.certificates or []) | map(attribute="serial") | map("upper") | list %}
 {% set open = run.status == "completed" and not run.cleanup_status %}
     {% set current = (d.certificates or []) | selectattr("status", "equalto", "issued") | rejectattr("renewed") | list %}
     {% set busy = d.name in (r.busy or []) %}
@@ -51,7 +51,7 @@
         {% set short = c.serial[:3] ~ "…" ~ c.serial[-3:] if c.serial and c.serial | length > 8 else c.serial %}
         <li><span class="cert-state {{ 'ok' if state == 'active' else '' }}" data-tip="{{ state }}">{{ c.role if c.role is defined else state }}</span>
           <span class="mono cn" data-tip="CN {{ c.common_name }}">{{ c.common_name or "–" }}</span>
-          <span class="mono muted right" data-tip="Serial {{ c.serial }} · valid until {{ c.valid_to }} · {{ 'renewal' if c.renewed_from else 'field enrollment' if retrofit else 'registration' }}">{% if c.serial in local %}<a href="/runs/{{ run.id }}/certificates/{{ c.serial }}.pem" download>{{ short }}</a>{% else %}{{ short }}{% endif %} · {{ c.valid_to }}</span></li>
+          <span class="mono muted right" data-tip="Serial {{ c.serial }} · valid until {{ c.valid_to }} · {{ 'renewal' if c.renewed_from else 'field enrollment' if retrofit else 'registration' }}">{% if c.serial and c.serial | upper in local %}<a href="/runs/{{ run.id }}/certificates/{{ c.serial | upper }}.pem" download>{{ short }}</a>{% else %}{{ short }}{% endif %} · {{ c.valid_to }}</span></li>
         {% endfor %}
       </ul>
       {% else %}<p class="tbox muted device-empty">{{ "Device-ID certificate only – no managed certificate yet" if retrofit else "One-time passcode only – no certificate yet" if minion else "DTM lists no certificate yet" }}</p>{% endif %}

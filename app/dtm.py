@@ -842,7 +842,8 @@ class DTMClient:
 
     def _foreign(self, record: dict) -> bool:
         """A record of another account – some list services leave the account out, a different one is never ours."""
-        account = record.get("account_id") or (record.get("account") or {}).get("id")
+        nested = record.get("account")
+        account = record.get("account_id") or (nested.get("id") if isinstance(nested, dict) else None)
         return bool(account) and account != self.config.account_id
 
     async def abort_deployment(self, deployment_id: str) -> None:
