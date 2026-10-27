@@ -8,7 +8,7 @@ use certificates, live observation – and rolls everything back afterwards with
 
 ## Install
 
-On a fresh Ubuntu Server 26.04 (minimal installation), one command prepares the machine (Docker),
+On a fresh Ubuntu Server 26.04 (minimal installation, amd64 or arm64), one command prepares the machine (Docker),
 asks for the initial login password and the host names for the HTTPS certificate, and starts the
 demonstrator:
 
@@ -36,6 +36,19 @@ Let's Encrypt. Alternatively clear both and set `TLS_PKCS12_FILE` and `TLS_PKCS1
 set). The files are checked and loaded at every `systemctl restart dtm-demonstrator`; if something is wrong,
 `docker compose -p dtm-demonstrator logs tls` says what. Re-running
 the one-liner updates the installation and keeps data, password and settings.
+
+### Windows 11, Windows Server 2022 and 2025
+
+On x64 with Desktop Experience, as a local administrator, in an elevated PowerShell:
+
+```powershell
+irm https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/latest/download/install.ps1 | iex
+```
+
+The script enables WSL 2 (a fresh machine restarts once, and the installation continues after the next logon),
+creates its own WSL distro `dtm-demonstrator` and runs the Linux installer there. Windows forwards ports 443 and 80
+to it and opens them in the firewall, and a scheduled task starts it at boot. In a VM, the host must allow nested
+virtualisation. Options: `& ([scriptblock]::Create((irm <URL>))) -Version vX.Y.Z` (or `-Branch dev`, `-Uninstall`).
 
 ## Documentation
 

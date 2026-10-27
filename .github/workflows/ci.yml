@@ -30,14 +30,35 @@ jobs:
   # The real compose stack (app, tls, proxy) from this commit's image – catches what unit tests cannot,
   # e.g. bind mounts (v0.3.0: an unset TLS path mounted as /dev/null stopped the proxy).
   stack:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]  # amd64 and arm64 – both are release targets
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t demonstrator:ci .
       - run: scripts/stack-smoke.sh demonstrator:ci
 
+  # The Windows installer: lint and Pester tests of its logic. GitHub's runners have no nested
+  # virtualisation, so WSL 2 cannot run here – the real install is verified in VMs (06-platforms.md).
+  windows:
+    strategy:
+      matrix:
+        runner: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer, Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          $issues = Invoke-ScriptAnalyzer -Path install.ps1 -Settings ./PSScriptAnalyzerSettings.psd1
+          $issues | Format-Table -AutoSize
+          if ($issues) { throw "PSScriptAnalyzer: $($issues.Count) issue(s)" }
+          $result = Invoke-Pester -Path tests/windows -PassThru -Output Detailed
+          if ($result.FailedCount -gt 0 -or $result.TotalCount -eq 0) { throw "Pester failed" }
+
   image:
-    needs: [test, stack]
+    needs: [test, stack, windows]
     if: github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -55,6 +76,7 @@ jobs:
             echo "tags=$image:branch-$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "version=$GITHUB_REF_NAME-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
+      - uses: docker/setup-qemu-action@v3  # the arm64 half of the multi-arch image
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -64,7 +86,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           build-args: APP_VERSION=${{ steps.tags.outputs.version }}
@@ -79,6 +101,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - run: gh release create "$GITHUB_REF_NAME" install.sh --title "$GITHUB_REF_NAME" --notes-file "docs/releases/${GITHUB_REF_NAME}.md" --verify-tag
+      - run: gh release create "$GITHUB_REF_NAME" install.sh install.ps1 --title "$GITHUB_REF_NAME" --notes-file "docs/releases/${GITHUB_REF_NAME}.md" --verify-tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

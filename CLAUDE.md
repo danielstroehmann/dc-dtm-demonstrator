@@ -33,10 +33,13 @@ and run 'commons-sync'. Project-specific rules go BELOW the END marker.
 
 ### Deployment (overrides commons deployment / security)
 
-- Target is a fresh **Ubuntu Server 26.04 minimal**, amd64, local network only – not the
+- Target is a fresh **Ubuntu Server 26.04 minimal**, amd64 or arm64 (multi-arch image), local network only – not the
   home-lab. No Authentik, no `shared-net`, no external reverse proxy: the demonstrator
   brings its own reverse proxy (self-signed TLS) and built-in login.
 - Setup and update via one-line installer – see `docs/design/02-nfr.md` (NFR-1).
+- **Windows 11 / Server 2022 / Server 2025** (x64, Desktop Experience; author, 2026-10-27): `install.ps1` sets up WSL 2 with
+  its own distro `dtm-demonstrator` and runs `install.sh` there; port proxy, firewall and a start task are the Windows glue.
+  CI only lints/unit-tests it (no nested virtualisation) – the real install is verified in VMs. See `docs/design/06-platforms.md`.
 - Secrets (`ADMIN_PASSWORD`, `JWT_SECRET`) live in `.env` next to the compose file, not in
   `docker-compose.yml` (commons prefers compose): the installer replaces the compose file on
   every update, `.env` is kept and never overwritten (0600).
