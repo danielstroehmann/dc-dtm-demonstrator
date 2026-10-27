@@ -108,4 +108,12 @@ nested virtualisation), workgroup, network profile *Public*; driven over SSH wit
 - Learned: with the CPU type *QEMU Virtual CPU* (no VMX/SVM) WSL fails with `HCS_E_HYPERV_NOT_INSTALLED` –
   the installer's hint names the fix.
 
-Still open: uninstall on Server 2025; Windows Server 2022 and Windows 11.
+## Verified on Windows Server 2022 (2026-10-27)
+
+Fresh Windows Server 2022 Standard (build 20348.5761) as a KVM VM (CPU type `host`), workgroup, profile
+*Private*; same flow: features + restart, then WSL 3.0.3 from the MSI, Ubuntu 26.04, Docker, stack, health
+check passed. LAN: `/healthz` 200, HTTP → HTTPS 302. **Restart without logon:** UI answered after 42 s
+(uptime 41 s, no session, task running). Server 2022 has no Hyper-V firewall cmdlets – the installer skips
+those rules, as intended.
+
+Still open: uninstall; Windows 11.
