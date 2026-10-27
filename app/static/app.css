@@ -707,3 +707,8 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 900; width: 34rem; padding: var(--s6) var(--s5) var(--s5);
   overflow-y: auto; background: var(--dc-grey-bg); border-left: 1px solid var(--dc-border); box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12); }
 .panel-close { position: absolute; top: var(--s2); right: var(--s3); width: auto; margin: 0; padding: 0 var(--s2); line-height: 1.6; }
+
+/* Timeline: milestones only and half the height – Debug shows every event at full height */
+.timeline-card:not(.debug) .timeline li.api, .timeline-card:not(.debug) .timeline li.wait { display: none; }
+.timeline-card:not(.debug) .timeline-scroll { max-height: 8.5rem; }
+.timeline-card [data-debug-toggle][aria-pressed="true"] { background: var(--dc-blue); border-color: var(--dc-blue); color: #fff; }

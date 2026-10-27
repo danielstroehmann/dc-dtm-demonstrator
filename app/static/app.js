@@ -197,3 +197,23 @@ document.addEventListener("htmx:afterSettle", () => {
   });
   wallBefore = null;
 });
+
+// Timeline Debug toggle: every API call and heartbeat, full height – remembered in this browser only
+function applyDebug(on) {
+  for (const card of document.querySelectorAll(".timeline-card")) {
+    card.classList.toggle("debug", on);
+    card.querySelector("[data-debug-toggle]")?.setAttribute("aria-pressed", String(on));
+  }
+}
+function storedDebug() {
+  try { return localStorage.getItem("timelineDebug") === "1"; } catch { return false; }
+}
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-debug-toggle]");
+  if (!button) return;
+  const on = !button.closest(".timeline-card").classList.contains("debug");
+  try { localStorage.setItem("timelineDebug", on ? "1" : "0"); } catch { /* private window: this page only */ }
+  applyDebug(on);
+});
+document.addEventListener("DOMContentLoaded", () => applyDebug(storedDebug()));
+document.addEventListener("htmx:afterSwap", () => applyDebug(storedDebug()));
