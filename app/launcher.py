@@ -16,11 +16,12 @@ from pydantic import BaseModel
 DOCKER = os.environ.get("MINION_DOCKER", "")  # the socket proxy, e.g. http://docker:2375
 IMAGE = os.environ.get("MINION_IMAGE", "dtm-minion:latest")
 NETWORK = os.environ.get("MINION_NETWORK", "dtm-minions")
-API_VERSION = "/v1.43"
+API_VERSION = "/v1.44"  # Docker Engine 25+; Engine 29 refuses older versions by default
 LABEL = "dtm-demonstrator.run"
 RUN = re.compile(r"^[a-z0-9]{1,16}$")
 NAME = re.compile(r"^robot-[a-z0-9]{1,16}-[a-z0-9-]{1,40}$")
 CONTAINER = re.compile(r"^[0-9a-f]{12,64}$")
+MAX_MINIONS = 50  # on this host, all runs together – the app allows 10 per run
 ENV = {  # the only variables a minion gets, each with its shape
     "DTM_HOST": re.compile(r"^one(\.nl)?\.digicert\.com$"),
     "SERIAL": re.compile(r"^SN-[A-Z0-9]{1,16}-[0-9]{4}$"),
@@ -84,8 +85,12 @@ async def start(minion: Minion) -> dict:
         raise HTTPException(422, "unexpected run or minion name")
     if set(minion.env) - set(ENV) or not all(ENV[k].fullmatch(v) for k, v in minion.env.items()):
         raise HTTPException(422, "unexpected minion environment")
+    running = await _call("GET", "/containers/json",
+                          params={"all": 1, "filters": json.dumps({"label": [LABEL]})})
+    if len(running.json()) >= MAX_MINIONS:
+        raise HTTPException(429, f"at most {MAX_MINIONS} minions on this host")
     body = {"Image": IMAGE, "Env": [f"{k}={v}" for k, v in minion.env.items()], "Labels": {LABEL: minion.run_id},
-            "HostConfig": {"NetworkMode": NETWORK, "Memory": 96 * 1024 * 1024, "PidsLimit": 64,
+            "HostConfig": {"NetworkMode": NETWORK, "Memory": 96 * 1024 * 1024, "NanoCpus": 500_000_000, "PidsLimit": 64,
                            "SecurityOpt": ["no-new-privileges:true"], "RestartPolicy": {"Name": "no"},
                            "LogConfig": {"Type": "json-file", "Config": {"max-size": "1m"}}}}
     created = await _call("POST", "/containers/create", (201,), params={"name": minion.name}, json=body)
