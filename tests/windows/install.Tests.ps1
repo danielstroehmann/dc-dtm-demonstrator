@@ -1,7 +1,10 @@
 # Pester 5+ unit tests for install.ps1 (the Windows installer). Dot-sourcing the script defines its functions
 # only; every system command a tested function touches is mocked. On Linux pwsh the Windows-only cmdlets do
-# not exist, so they get stubs first (Mock needs a command to replace). wsl.exe, netsh, curl.exe and
-# Restart-Computer are always shadowed by functions, so no test can reach the real ones on a CI runner.
+# not exist, so they get stubs first (Mock needs a command to replace). wsl.exe, netsh, curl.exe, msiexec.exe,
+# Restart-Computer and the network/process cmdlets (Invoke-RestMethod, Invoke-WebRequest, Start-Process,
+# Get-AuthenticodeSignature) are always shadowed by global functions - a global function wins over a cmdlet or
+# an executable - so no test can reach the network or the real commands on a CI runner. The cmdlet shadows
+# throw unless a test mocks them.
 
 BeforeAll {
     if (-not $env:ProgramFiles) { $env:ProgramFiles = [IO.Path]::GetTempPath() }  # Linux pwsh
@@ -11,6 +14,14 @@ BeforeAll {
     function global:netsh { $global:LASTEXITCODE = 0 }
     function global:curl.exe { $global:LASTEXITCODE = 0 }
     function global:Restart-Computer { param([switch]$Force) }
+    function global:msiexec.exe { throw "test isolation: msiexec.exe must not run" }
+    $script:Shadows = @{
+        "Invoke-RestMethod"         = { param($Uri, $OutFile) throw "test isolation: no network ($Uri)" }
+        "Invoke-WebRequest"         = { param($Uri, $OutFile, [switch]$UseBasicParsing) throw "test isolation: no network ($Uri)" }
+        "Start-Process"             = { param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru) throw "test isolation: no process ($FilePath)" }
+        "Get-AuthenticodeSignature" = { param($FilePath) throw "test isolation: no signature check ($FilePath)" }
+    }
+    foreach ($name in $script:Shadows.Keys) { Set-Item "function:global:$name" $script:Shadows[$name] }
     $stubs = @{
         "Get-CimInstance"               = { param($ClassName) }
         "Get-NetIPAddress"              = { param($AddressFamily, $AddressState) }
@@ -54,7 +65,7 @@ Address         Port        Address         Port
 }
 
 AfterAll {
-    foreach ($name in @("wsl.exe", "netsh", "curl.exe", "Restart-Computer") + $script:CreatedStubs) {
+    foreach ($name in @("wsl.exe", "netsh", "curl.exe", "msiexec.exe", "Restart-Computer") + $script:Shadows.Keys + $script:CreatedStubs) {
         Remove-Item "function:global:$name" -ErrorAction SilentlyContinue
     }
 }
@@ -81,7 +92,7 @@ Describe "script file" {
         try {
             { & $script:Installer } | Should -Throw "ERROR: could not look up the latest release on GitHub (rate limit exceeded) - pass -Version vX.Y.Z"
         } finally {
-            Remove-Item function:global:Invoke-RestMethod
+            Set-Item function:global:Invoke-RestMethod $script:Shadows["Invoke-RestMethod"]  # back to the isolating shadow
         }
     }
 
@@ -129,6 +140,8 @@ Describe "Test-WslVersion" {
         @{ Name = "WSL 1.x"; Text = "WSL version: 1.2.5.0" }
         @{ Name = "the inbox wsl.exe usage text"; Text = "Invalid command line option: --version`nUsage: wsl.exe [Argument]" }
         @{ Name = "empty output"; Text = "" }
+        # The inbox stub of a fresh Server answers in UTF-16 (ignoring WSL_UTF8); Invoke-Native strips the NULs.
+        @{ Name = "the inbox stub's 'not installed' text"; Text = (("Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.`nFor more information please visit https://aka.ms/wslinstall".ToCharArray() | ForEach-Object { "$_`0" }) -join "") -replace "`0", "" }
     ) {
         Test-WslVersion $Text | Should -BeFalse
     }
@@ -410,30 +423,146 @@ Describe "Install-Wsl" {
         Should -Invoke Register-Continuation -Times 1 -Exactly
     }
 
-    It "updates WSL from the web when the features are enabled" {
+    It "keeps a current WSL and sets version 2 as default when the features are enabled" {
         Mock Get-WindowsOptionalFeature { [pscustomobject]@{ State = "Enabled" } }
+        Mock Install-WslPackage {}
 
         Install-Wsl | Should -BeTrue
 
         Should -Invoke Enable-WindowsOptionalFeature -Times 0 -Exactly
         Should -Invoke Register-Continuation -Times 0 -Exactly
-        Should -Invoke wsl.exe -Times 1 -Exactly -ParameterFilter { ($args -join " ") -eq "--update --web-download" }
+        Should -Invoke Install-WslPackage -Times 0 -Exactly
+        Should -Invoke wsl.exe -Times 0 -Exactly -ParameterFilter { $args -contains "--update" -or $args -contains "--install" }
         Should -Invoke wsl.exe -Times 1 -Exactly -ParameterFilter { ($args -join " ") -eq "--set-default-version 2" }
     }
 
-    It "fails when the update fails" {
+    It "installs the WSL package when <Name>" -ForEach @(
+        @{ Name = "only the inbox stub exists"; Text = "W`0i`0n`0d`0o`0w`0s`0 `0S`0u`0b`0s`0y`0s`0t`0e`0m`0 `0f`0o`0r`0 `0L`0i`0n`0u`0x`0 `0i`0s`0 `0n`0o`0t`0 `0i`0n`0s`0t`0a`0l`0l`0e`0d`0.`0" }
+        @{ Name = "WSL is too old for --name"; Text = "WSL version: 2.4.3.0" }
+    ) {
         Mock Get-WindowsOptionalFeature { [pscustomobject]@{ State = "Enabled" } }
-        Mock wsl.exe { "no network"; $global:LASTEXITCODE = 1 } -ParameterFilter { $args -contains "--update" }
+        Mock wsl.exe { $Text; $global:LASTEXITCODE = 1 } -ParameterFilter { $args -contains "--version" }
+        Mock Install-WslPackage {}
 
-        { Install-Wsl } | Should -Throw "*wsl --update failed: no network*"
+        Install-Wsl | Should -BeTrue
+
+        Should -Invoke Install-WslPackage -Times 1 -Exactly
+        Should -Invoke wsl.exe -Times 0 -Exactly -ParameterFilter { $args -contains "--update" -or $args -contains "--install" }
+        Should -Invoke wsl.exe -Times 1 -Exactly -ParameterFilter { ($args -join " ") -eq "--set-default-version 2" }
     }
 
-    It "fails on a WSL that is too old for --name" {
+    It "stops before setting the default version when the package install fails" {
         Mock Get-WindowsOptionalFeature { [pscustomobject]@{ State = "Enabled" } }
         Mock wsl.exe { "Invalid command line option: --version"; $global:LASTEXITCODE = 1 } -ParameterFilter { $args -contains "--version" }
+        Mock Install-WslPackage { throw "ERROR: WSL 2.4.4 or newer is needed" }
 
         { Install-Wsl } | Should -Throw "*WSL 2.4.4 or newer is needed*"
         Should -Invoke wsl.exe -Times 0 -Exactly -ParameterFilter { $args -contains "--set-default-version" }
+    }
+
+    It "does not install the package while a restart is pending" {
+        Mock Get-WindowsOptionalFeature { [pscustomobject]@{ State = "Disabled" } }
+        Mock Read-Host { "n" }
+        Mock Install-WslPackage {}
+
+        Install-Wsl | Should -BeFalse
+        Should -Invoke Install-WslPackage -Times 0 -Exactly
+    }
+}
+
+Describe "Install-WslPackage" {
+    BeforeEach {
+        $script:SavedTemp = $env:TEMP
+        $env:TEMP = Join-Path ([IO.Path]::GetTempPath()) "wsl pkg test"  # with a space: the msiexec argument must quote it
+        $script:Msi = Join-Path $env:TEMP "wsl.2.6.1.0.x64.msi"
+        $script:Version = "WSL version: 2.6.1.0"
+        $script:Release = [pscustomobject]@{
+            tag_name = "2.6.1"
+            assets   = @(
+                [pscustomobject]@{ name = "wsl.2.6.1.0.arm64.msi"; browser_download_url = "https://github.com/microsoft/WSL/releases/download/2.6.1/wsl.2.6.1.0.arm64.msi" }
+                [pscustomobject]@{ name = "wsl.2.6.1.0.x64.msi"; browser_download_url = "https://github.com/microsoft/WSL/releases/download/2.6.1/wsl.2.6.1.0.x64.msi" }
+                [pscustomobject]@{ name = "Microsoft.WSL_2.6.1.0_x64_ARM64.msixbundle"; browser_download_url = "https://github.com/microsoft/WSL/releases/download/2.6.1/bundle" }
+            )
+        }
+        $script:Signature = [pscustomobject]@{
+            Status            = "Valid"
+            SignerCertificate = [pscustomobject]@{ Subject = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" }
+        }
+        $script:MsiExit = 0
+        Mock Write-Host {}
+        Mock Invoke-RestMethod { $script:Release }
+        Mock Invoke-WebRequest {}
+        Mock Get-AuthenticodeSignature { $script:Signature }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = $script:MsiExit } }
+        Mock Remove-Item {}
+        Mock wsl.exe { $script:Version; $global:LASTEXITCODE = 0 } -ParameterFilter { $args -contains "--version" }
+    }
+    AfterEach { $env:TEMP = $script:SavedTemp }
+
+    It "downloads the x64 MSI of the latest release, checks its signature, installs it quietly and removes it" {
+        Install-WslPackage
+
+        Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq "https://api.github.com/repos/microsoft/WSL/releases/latest" }
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter {
+            $Uri -eq "https://github.com/microsoft/WSL/releases/download/2.6.1/wsl.2.6.1.0.x64.msi" -and $OutFile -eq $script:Msi
+        }
+        Should -Invoke Get-AuthenticodeSignature -Times 1 -Exactly -ParameterFilter { $FilePath -eq $script:Msi }
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "msiexec.exe" -and $ArgumentList -eq "/i `"$($script:Msi)`" /qn /norestart" -and $Wait -and $PassThru
+        }
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $script:Msi }
+        Should -Invoke wsl.exe -Times 1 -Exactly -ParameterFilter { ($args -join " ") -eq "--version" }
+    }
+
+    It "accepts msiexec exit code 3010 (success, restart required)" {
+        $script:MsiExit = 3010
+        { Install-WslPackage } | Should -Not -Throw
+        Should -Invoke Remove-Item -Times 1 -Exactly
+    }
+
+    It "fails without an x64 MSI in the release, before downloading anything" {
+        $script:Release.assets = @($script:Release.assets | Where-Object { $_.name -notmatch 'x64\.msi$' })
+        { Install-WslPackage } | Should -Throw "*no x64 MSI in the WSL release 2.6.1*"
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Start-Process -Times 0 -Exactly
+    }
+
+    It "deletes the download and refuses to install with the signature status <Status>" -ForEach @(
+        @{ Status = "NotSigned" }, @{ Status = "HashMismatch" }, @{ Status = "UnknownError" }, @{ Status = "NotTrusted" }
+    ) {
+        $script:Signature.Status = $Status
+        if ($Status -eq "NotSigned") { $script:Signature.SignerCertificate = $null }
+        { Install-WslPackage } | Should -Throw "*not signed by Microsoft ($Status)*"
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $script:Msi }
+        Should -Invoke Start-Process -Times 0 -Exactly
+    }
+
+    It "deletes the download and refuses a valid signature by <Name>" -ForEach @(
+        @{ Name = "another company"; Subject = "CN=Contoso Ltd, O=Contoso Ltd, C=US" }
+        @{ Name = "a look-alike CN"; Subject = "CN=Microsoft Corporation Evil, O=Evil, C=US" }
+        @{ Name = "Microsoft only in the O field"; Subject = "CN=Evil, O=Microsoft Corporation, C=US" }
+    ) {
+        $script:Signature.SignerCertificate.Subject = $Subject
+        { Install-WslPackage } | Should -Throw "*not signed by Microsoft (Valid)*"
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $script:Msi }
+        Should -Invoke Start-Process -Times 0 -Exactly
+    }
+
+    It "fails when msiexec fails, still removing the download" {
+        $script:MsiExit = 1603
+        { Install-WslPackage } | Should -Throw "*did not install (msiexec 1603)*"
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $script:Msi }
+        Should -Invoke wsl.exe -Times 0 -Exactly
+    }
+
+    It "fails when WSL is still too old afterwards" {
+        $script:Version = "WSL version: 2.4.3.0"
+        { Install-WslPackage } | Should -Throw "*WSL 2.4.4 or newer is needed (wsl --version: WSL version: 2.4.3.0)*"
+    }
+
+    It "fails when wsl.exe still is only the inbox stub afterwards" {
+        $script:Version = "W`0S`0L`0 `0i`0s`0 `0n`0o`0t`0 `0i`0n`0s`0t`0a`0l`0l`0e`0d`0"
+        { Install-WslPackage } | Should -Throw "*WSL 2.4.4 or newer is needed (wsl --version: WSL is not installed)*"
     }
 }
 

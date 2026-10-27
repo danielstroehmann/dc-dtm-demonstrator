@@ -20,6 +20,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"  # Windows PowerShell 5.1's progress bar slows downloads to a crawl
 Set-StrictMode -Version 3.0
 
 $Repo = "danielstroehmann/dc-dtm-demonstrator"
@@ -169,7 +170,8 @@ function Assert-Prerequisite {
 
 $NestedHint = ("WSL could not start its VM. In a virtual machine, enable nested virtualisation on the host " +
     "(Hyper-V: Set-VMProcessor -VMName <vm> -ExposeVirtualizationExtensions `$true; VMware: 'Expose hardware " +
-    "assisted virtualization'), then run the installer again.")
+    "assisted virtualization'; KVM/Proxmox: CPU type 'host' and nested enabled in kvm_intel/kvm_amd), " +
+    "then run the installer again.")
 
 function Invoke-Native([string]$File, [string[]]$Arguments) {
     # Output and exit code of a native command. PowerShell 5.1 with ErrorActionPreference Stop turns stderr
@@ -191,15 +193,34 @@ function Install-Wsl {
         if ($Yes -or (Read-Host "Restart now? [Y/n]") -notmatch '^[nN]') { Restart-Computer -Force }
         return $false  # not `exit`: under `irm | iex` it would close the admin's PowerShell
     }
-    Write-Step "Updating WSL"
-    $update = Invoke-Native "wsl.exe" @("--update", "--web-download")
-    if ($update.Code -ne 0) { Stop-Install "wsl --update failed: $($update.Text)" }
+    if (-not (Test-WslVersion (Invoke-Native "wsl.exe" @("--version")).Text)) { Install-WslPackage }
+    $null = Invoke-Native "wsl.exe" @("--set-default-version", "2")
+    return $true
+}
+
+function Install-WslPackage {
+    # The inbox wsl.exe of a fresh Server only says "not installed" - even to `wsl --install` and `--update`
+    # (verified on Server 2025, 2026-10-27). Microsoft's MSI from the WSL GitHub release installs it without the Store.
+    Write-Step "Installing WSL (Microsoft's MSI package)"
+    $release = Invoke-RestMethod "https://api.github.com/repos/microsoft/WSL/releases/latest"
+    $asset = $release.assets | Where-Object { $_.name -match '\.x64\.msi$' } | Select-Object -First 1
+    if (-not $asset) { Stop-Install "no x64 MSI in the WSL release $($release.tag_name)" }
+    $msi = Join-Path $env:TEMP $asset.name
+    try {
+        Invoke-WebRequest $asset.browser_download_url -OutFile $msi -UseBasicParsing
+        $signature = Get-AuthenticodeSignature $msi
+        if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') {
+            Stop-Install "the WSL package is not signed by Microsoft ($($signature.Status)) - not installed"
+        }
+        $process = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
+        if ($process.ExitCode -notin 0, 3010) { Stop-Install "the WSL package did not install (msiexec $($process.ExitCode))" }
+    } finally {
+        Remove-Item $msi -Force -ErrorAction SilentlyContinue  # also after a failed or cut-off download
+    }
     $wslVersion = Invoke-Native "wsl.exe" @("--version")
     if (-not (Test-WslVersion $wslVersion.Text)) {
         Stop-Install "WSL $MinWslVersion or newer is needed (wsl --version: $($wslVersion.Text))"
     }
-    $null = Invoke-Native "wsl.exe" @("--set-default-version", "2")
-    return $true
 }
 
 function Save-Self {
