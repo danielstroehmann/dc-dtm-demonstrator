@@ -110,9 +110,12 @@ def test_defaults_rest_with_api_key(configured_user, store, fake):
     assert 'action="/runs/m1/renew"' not in html and "Renew all devices" not in html and "Renew now" not in html
     assert "devices ≈" not in html  # one device – no extrapolation
     assert "PRIVATE KEY" not in html
-    # the PEM, per certificate – DTM's list and the saved certificate may spell the hex serial in another case
-    link = re.search(rf'href="(/runs/m1/certificates/{device["certificates"][0]["serial"]}\.pem)" download', tile, re.I)
-    assert link, "no PEM download on the device tile"
+    # the PEM, per certificate in the detail view – DTM's list and the saved certificate may spell the hex serial in
+    # another case
+    assert f'data-certs="/runs/m1/devices/{device["name"]}/certificates"' in tile and "download" not in tile
+    detail = configured_user.get(f'/runs/m1/devices/{device["name"]}/certificates').text
+    link = re.search(rf'href="(/runs/m1/certificates/{device["certificates"][0]["serial"]}\.pem)" download', detail, re.I)
+    assert link, "no PEM download in the certificate detail"
     assert configured_user.get(link.group(1)).status_code == 200
 
 
@@ -189,8 +192,9 @@ def test_renew_through_the_web(configured_user, store, fake):
     html = configured_user.get("/runs/m1").text
     renewed_tile, other = tiles(html)
     assert renewed_tile.count("<li>") == 2 and other.count("<li>") == 1
-    assert renewed_tile.count('<span class="cert-state ok" data-tip="active">active</span>') == 1
-    assert renewed_tile.count('data-tip="renewed">renewed</span>') == 1 and "· renewal\">" in renewed_tile
+    assert renewed_tile.count('<span class="cert-state ok">active</span>') == 1
+    assert renewed_tile.count('<span class="cert-state">renewed</span>') == 1
+    assert renewed_tile.index("active</span>") < renewed_tile.index("renewed</span>")  # the new one first
     assert re.search(r'<span class="muted">Renewed in \d+\.\d\d s</span>', renewed_tile)
     assert metrics(html, "Field renewal")[1:] == ["1", "1", "3"]  # devices renewed, renewals, certificates
     configured_user.post(f"/runs/m1/devices/{second}/renew")
@@ -331,7 +335,8 @@ def test_no_renewal_after_rollback(configured_user, store, fake, data_dir):
     assert fake.issued() == [] and fake.active_devices() == []
     assert [g["status"] for g in fake.device_groups.values()] == ["DELETED"]
     html = configured_user.get("/runs/m1").text
-    assert ">Renew</button>" not in html and "/devices/" not in html.split("<h2>Devices</h2>", 1)[1].split("Timeline")[0]
+    devices_card = html.split("<h2>Devices</h2>", 1)[1].split("Timeline")[0]
+    assert ">Renew</button>" not in html and 'action="/runs/m1/devices/' not in devices_card
     assert 'action="/runs/m1/renew"' not in html
 
 

@@ -134,12 +134,19 @@ def pem_links(html: str) -> list[str]:
     return re.findall(r'href="(/runs/[a-z0-9]+/certificates/[0-9A-F]+\.pem)" download', html)
 
 
+def detail_links(user, run: dict) -> list[str]:
+    """The PEM links of the run's certificates, each from its device's certificate detail view."""
+    return [link for c in run["result"]["certificates"]
+            for link in pem_links(user.get(f'/runs/{run["id"]}/devices/{c["common_name"]}/certificates').text)]
+
+
 def test_pem_download_happy_path(configured_user, store, data_dir):
     configured_user.post("/runs", data=form(mode="batch", count="2"))
     run = finished(store, "r1")
     assert run["status"] == "completed"
     certificates = run["result"]["certificates"]
-    links = pem_links(configured_user.get("/runs/r1").text)
+    assert pem_links(configured_user.get("/runs/r1").text) == []  # the tiles open the detail view instead
+    links = detail_links(configured_user, run)
     assert links == [f"/runs/r1/certificates/{c['serial']}.pem" for c in certificates]
     for c, link in zip(certificates, links):
         response = configured_user.get(link)
@@ -150,15 +157,16 @@ def test_pem_download_happy_path(configured_user, store, data_dir):
         cert = x509.load_pem_x509_certificate(response.content)
         assert format(cert.serial_number, "X") == c["serial"]
         assert response.content == (data_dir / "runs" / "r1" / "certificates" / f"{c['serial']}.pem").read_bytes()
-    # the polled devices card links the same way
-    assert pem_links(configured_user.get("/runs/r1/devices").text) == links
+    # the polled devices card opens the same detail views
+    card = configured_user.get("/runs/r1/devices").text
+    assert all(f'data-certs="/runs/r1/devices/{c["common_name"]}/certificates"' in card for c in certificates)
     assert "BEGIN CERTIFICATE" not in json.dumps(store.get_run("r1"))
 
 
 def test_pem_download_for_uc03(configured_user, store, enroll_net):
     configured_user.post("/runs", data=uc03_form())
     run = finished(store, "e1")
-    (link,) = pem_links(configured_user.get("/runs/e1").text)
+    (link,) = detail_links(configured_user, run)
     response = configured_user.get(link)
     assert response.status_code == 200
     assert x509.load_pem_x509_certificate(response.content).serial_number == int(
@@ -213,7 +221,13 @@ def test_no_links_without_pem_files(configured_user, store, data_dir):
     run = finished(store, "r1")
     shutil.rmtree(data_dir / "runs" / "r1" / "certificates")
     html = configured_user.get("/runs/r1").text
-    assert pem_links(html) == [] and run["result"]["certificates"][0]["common_name"] in html
+    c = run["result"]["certificates"][0]
+    detail = configured_user.get(f'/runs/r1/devices/{c["common_name"]}/certificates').text
+    assert pem_links(detail) == [] and c["common_name"] in html
+    # without the PEM: what the run knows, "–" for the rest
+    assert f'<dt>Serial</dt><dd class="mono wrap">{c["serial"]}</dd>' in detail
+    assert f'<dt>Chain</dt><dd class="wrap">{c["issuer"]}</dd>' in detail
+    assert '<dt>SHA-256</dt><dd class="mono wrap">–</dd>' in detail and '<dt>Key</dt><dd>ECDSA P-256</dd>' in detail
     serial = run["result"]["certificates"][0]["serial"]
     assert configured_user.get(f"/runs/r1/certificates/{serial}.pem").status_code == 404
 
@@ -225,9 +239,9 @@ def test_pem_files_follow_the_cleanup_mode(configured_user, store, data_dir):
     configured_user.post("/runs/r1/cleanup", data={"mode": "certificates"})
     assert cleaned(store, "r1")["cleanup_status"] == "done"
     assert configured_user.get(link).status_code == 200  # revoked, but the run keeps its downloads
-    assert pem_links(configured_user.get("/runs/r1").text) == [link]
+    assert detail_links(configured_user, store.get_run("r1")) == [link]
     configured_user.post("/runs/r1/cleanup", data={"mode": "full"})
     assert cleaned(store, "r1")["cleanup_status"] == "done"
     assert configured_user.get(link).status_code == 404
-    assert pem_links(configured_user.get("/runs/r1").text) == []
+    assert detail_links(configured_user, store.get_run("r1")) == []
     assert not (data_dir / "runs" / "r1").exists()
