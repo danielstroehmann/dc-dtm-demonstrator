@@ -7,7 +7,7 @@
   <div class="cert-pick">
     <select name="serial" aria-label="Certificate" hx-get="/runs/{{ run.id }}/devices/{{ d.name | urlencode }}/certificates"
             hx-target="#cert-detail" hx-swap="outerHTML">
-      {% for o in options %}<option value="{{ (o.serial or "") | upper }}"{% if (o.serial or "") | upper == chosen.serial %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+      {% for o in options %}<option value="{{ o.serial | serial_key }}"{% if o.serial | serial_key == chosen.serial %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
     </select>
     {% if pem_url %}<a href="{{ pem_url }}" download class="btn-icon btn-sm outline secondary" role="button">{{ icon("download") }}PEM</a>{% endif %}
   </div>

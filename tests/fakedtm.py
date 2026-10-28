@@ -227,6 +227,7 @@ class FakeDTM:
         self.jobs: dict[str, dict] = {}
 
         # behaviour knobs
+        self.serial_width = 0  # > 0: serials zero-padded to that many hex digits, as DTM may list them
         self.approval_status = "pending_approval"
         self.job_steps = ["in_progress", "completed"]  # statuses reported by successive GETs
         self.division_list_lag = 0      # division lists that do not yet show a new division
@@ -737,11 +738,14 @@ class FakeDTM:
                                                     "Invalid registered value provided in attribute: subject.common_name"}]})
         return None
 
+    def serial(self, cert: x509.Certificate) -> str:
+        return format(cert.serial_number, f"0{self.serial_width}x")
+
     def register_certificate(self, policy_id: str, cert: x509.Certificate) -> dict:
         """A certificate issued outside the fake's handlers (fake openssl cmp) – listed like any other."""
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         record = {"id": str(uuid.uuid4()), "policy_id": policy_id, "common_name": cn, "status": "ISSUED",
-                  "serial_number": format(cert.serial_number, "x"),
+                  "serial_number": self.serial(cert),
                   "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         self.certificates[record["id"]] = record
         self.pems[record["serial_number"]] = cert_pem(cert)
@@ -792,7 +796,7 @@ class FakeDTM:
         current = x509.load_pem_x509_certificate(self.tls_client_cert.encode())
         self.reenroll_presented.append(format(current.serial_number, "X"))
         record = next((c for c in self.certificates.values()
-                       if c["serial_number"] == format(current.serial_number, "x") and c["policy_id"] == oid), None)
+                       if c["serial_number"] == self.serial(current) and c["policy_id"] == oid), None)
         if record is None or record["status"] != "ISSUED" or current.issuer != self.ica_cert.subject:
             return _error(401, "est_unauthorized")
         current.verify_directly_issued_by(self.ica_cert)
@@ -871,7 +875,7 @@ class FakeDTM:
             cert, key = make_cert(cn, issuer_cert=self.ica_cert, issuer_key=self.ica_key)
         cert_id = str(uuid.uuid4())
         record = {"id": cert_id, "policy_id": policy_id, "common_name": cn, "status": "ISSUED",
-                  "serial_number": format(cert.serial_number, "x"),
+                  "serial_number": self.serial(cert),
                   "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}  # live format
         self.certificates[cert_id] = record
         self.pems[record["serial_number"]] = cert_pem(cert)

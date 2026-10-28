@@ -192,3 +192,41 @@ def test_issuer_runs_up_to_the_root_from_dtms_ca_list(configured_user, store):
     assert value(html, "Issuer") == f"{run['params']['ca_root']}<br>Fake ECDSA Issuing CA"
     store.update_run("r1", params=run["params"] | {"ca_root": ""})  # a run from before: the issuing CA only
     assert value(detail(configured_user, "r1", c["common_name"]).text, "Issuer") == "Fake ECDSA Issuing CA"
+
+
+def test_zero_padded_dtm_serials_find_the_saved_pem(configured_user, store, fake, data_dir):
+    """DTM may list a serial with leading zeros; the PEM saved at issuance is named without them."""
+    fake.serial_width = 42  # random serials have at most 40 hex digits – always padded
+    configured_user.post("/runs", data=uc06_form())
+    finished(store, "m1")
+    d = store.get_run("m1")["result"]["devices"][0]
+    listed = d["certificates"][0]["serial"]
+    assert listed.startswith("00")
+    serial = listed.upper().lstrip("0")
+    assert (data_dir / "runs" / "m1" / "certificates" / f"{serial}.pem").is_file()
+    for picked in (None, listed, listed.upper()):
+        html = detail(configured_user, "m1", d["name"], picked).text
+        assert value(html, "Serial") == serial and value(html, "SHA-256") != "–"
+        assert [sel for _v, _t, sel in options(html)] == [True]
+        assert f'href="/runs/m1/certificates/{serial}.pem" download' in html
+    for link in (serial, listed.upper()):
+        response = configured_user.get(f"/runs/m1/certificates/{link}.pem")
+        assert response.status_code == 200
+        assert x509.load_pem_x509_certificate(response.content).serial_number == int(listed, 16)
+
+
+def test_uc08_zero_padded_serial_is_read_from_dtm_once(configured_user, store, fake, docker, minion,  # noqa: F811
+                                                       data_dir):
+    fake.serial_width = 42
+    started(configured_user, store)
+    first, _second = names(store)
+    configured_user.post(f"/runs/t1/devices/{first}/enroll")
+    d = devices.device_of(idle(store)["result"], first)
+    operational = next(c for c in d["certificates"] if c["role"] == "operational")
+    serial = operational["serial"].upper().lstrip("0")
+    html = detail(configured_user, "t1", first).text
+    assert value(html, "Serial") == serial and value(html, "SHA-256") != "–"
+    assert f'href="/runs/t1/certificates/{serial}.pem" download' in html
+    assert configured_user.get(f"/runs/t1/certificates/{serial}.pem").status_code == 200
+    detail(configured_user, "t1", first)  # cached under the normalised name: no second call
+    assert fake.names("cert_download") == [operational["serial"]]

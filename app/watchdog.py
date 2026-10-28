@@ -92,12 +92,13 @@ class Watchdog:
         for run_id, reason in due:
             run = self.store.get_run(run_id)
             if run and not active(run) and not rolled_back(run):  # a busy run rolls back once it is done
-                if await self.rollback(run_id, reason):
+                if await self.rollback(run_id, reason, run.get("cleanup_status")):
                     break  # one rollback per tick reached DTM
         await self.sweep()
 
-    async def rollback(self, run_id: str, reason: str) -> bool:
-        """One automatic full rollback. False if it never reached DTM (the run's connection is gone)."""
+    async def rollback(self, run_id: str, reason: str, status: str | None = None) -> bool:
+        """One automatic full rollback. False if it never reached DTM (the run's connection is gone, or a manual
+        rollback claimed the run since its cleanup_status – `status` – was read)."""
         why = REASONS[reason]
         try:
             client = self.client_for(run_id)  # a local lookup – never falls back to another account
@@ -108,6 +109,9 @@ class Watchdog:
                             run_id, getattr(exc, "detail", type(exc).__name__))
             return False
         self.unreachable.discard(run_id)
+        if not self.store.claim_cleanup(run_id, status):
+            await client.aclose()
+            return False
         log.info("run %s: automatic full rollback (%s)", run_id, why)
         self.store.add_event(run_id, f"Automatic full rollback – {why}")
         try:

@@ -234,6 +234,12 @@ class Store:
         """Atomic status change – False if another request changed the status first."""
         return self._exec("UPDATE runs SET status = ? WHERE id = ? AND status = ?", (new, run_id, expected)).rowcount == 1
 
+    def claim_cleanup(self, run_id: str, expected: str | None) -> bool:
+        """Atomically marks a rollback as running – False if another one (manual or the watchdog's) claimed it
+        since the caller read cleanup_status."""
+        return self._exec("UPDATE runs SET cleanup_status = 'running', progress = NULL WHERE id = ? AND cleanup_status IS ?",
+                          (run_id, expected)).rowcount == 1
+
     def mark_interrupted(self) -> None:
         """Background tasks die with the process; make that visible after a restart."""
         self._exec("UPDATE runs SET status = 'interrupted' WHERE status IN ('pending', 'running', 'paused')")

@@ -515,6 +515,29 @@ def test_certificates_cleanup_keeps_full_rollback_available(configured_user, sto
     assert fake.policies == {} and fake.divisions == {}
 
 
+def test_cleanup_claimed_by_the_watchdog_meanwhile_starts_nothing(configured_user, store, fake, monkeypatch):
+    """The watchdog claims the rollback after the route read the run: the route must not start a second one."""
+    configured_user.post("/runs", data=form())
+    stale, real = finished(store, "r1"), store.get_run
+    assert store.claim_cleanup("r1", None)  # the watchdog's claim
+    monkeypatch.setattr(store, "get_run", lambda run_id: stale if run_id == "r1" else real(run_id))
+    fake.calls.clear()
+    response = configured_user.post("/runs/r1/cleanup", data={"mode": "full"}, follow_redirects=False)
+    assert response.status_code == 409
+    monkeypatch.undo()
+    assert store.get_run("r1")["cleanup_mode"] is None and fake.calls == []
+    assert not store.claim_cleanup("r1", None)  # still the watchdog's
+
+
+def test_cleanup_without_a_connection_releases_the_claim(configured_user, store):
+    configured_user.post("/runs", data=form())
+    params = finished(store, "r1")["params"]
+    store.update_run("r1", params=params | {"account_id": "no-longer-configured"})
+    response = configured_user.post("/runs/r1/cleanup", data={"mode": "full"}, follow_redirects=False)
+    assert response.status_code == 409 and "no longer configured" in response.text
+    assert store.get_run("r1")["cleanup_status"] is None
+
+
 @pytest.mark.parametrize("mode", ["everything", "", "FULL"])
 def test_cleanup_invalid_mode(configured_user, store, mode):
     configured_user.post("/runs", data=form())

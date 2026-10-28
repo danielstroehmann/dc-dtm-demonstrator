@@ -13,6 +13,9 @@ dir="$repo/.local/dev"
 name=$(basename "$repo" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_\n-' '-')
 project="dtm-dev-$name"  # one stack per checkout
 export DEV_REPO="$repo" DEMONSTRATOR_IMAGE="demonstrator:$project"
+# Labels this stack's UC-8 minions, so one checkout's cleanup never removes another one's.
+MINION_INSTANCE="dev-$(printf %s "$project" | openssl dgst -sha256 -r | cut -c1-12)"
+export MINION_INSTANCE
 export HTTPS_PORT="${DEV_HTTPS_PORT:-9443}" HTTP_PORT="${DEV_HTTP_PORT:-9080}"
 export SITE_HOSTS=localhost DEFAULT_SNI=localhost TLS_CERT_FILE=./tls/cert.pem TLS_KEY_FILE=./tls/key.pem
 compose() {

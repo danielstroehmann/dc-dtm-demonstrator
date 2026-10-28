@@ -84,6 +84,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["use_case_names"] = evergreen.DISPLAY_NAMES
     templates.env.globals["platforms"] = dtm.PLATFORMS
     templates.env.globals["platform_regions"] = dtm.PLATFORM_REGIONS
+    templates.env.filters["serial_key"] = tiles.serial_key
     templates.env.filters["dtm_message"] = enrollment.dtm_message  # also tidies runs stored before it existed
     templates.env.globals["catalog"] = evergreen.CATALOG
     templates.env.globals["snippets"] = snippets
@@ -767,12 +768,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         device = device_or_404(run, name)
         options = device_certificates(run, device)
         if serial:
-            chosen = next((o for o in options if (o.get("serial") or "").upper() == serial.upper()), None)
+            chosen = next((o for o in options if tiles.serial_key(o.get("serial")) == tiles.serial_key(serial)), None)
         else:
             # the current one – UC-8: the operational certificate, the bootstrap one stays active beside it
             current = [o for o in options if o["state"] == "active"] or options[:1]
             chosen = next((o for o in current if o.get("role") == "operational"), current[0] if current else None)
-        upper = ((chosen or {}).get("serial") or "").upper()
+        upper = tiles.serial_key((chosen or {}).get("serial"))
         if chosen is None or not SERIAL.fullmatch(upper):
             raise HTTPException(404, "Certificate not found")
         run_dir = data_dir / "runs" / run_id
@@ -780,7 +781,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         if info and info["serial"] != upper:  # never show another certificate than the one picked
             info = None
         issued = next((c for c in (run.get("result") or {}).get("certificates") or []
-                       if (c.get("serial") or "").upper() == upper), {})
+                       if tiles.serial_key(c.get("serial")) == upper), {})
         if issued.get("key_type"):  # stored as "ECDSA secp256r1" – the view names curves like the parsed PEM
             curve = issued["key_type"].rsplit(" ", 1)[-1]
             issued = issued | {"key_type": issued["key_type"].replace(curve, certinfo.CURVES.get(curve, curve))}
@@ -922,11 +923,11 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     async def run_certificate_pem(run_id: str, serial: str):
         run = get_run_or_404(run_id)
         # The serial must be one of the run's certificates (or one a device lists) – no path built from free input.
-        # DTM lists serials in lower case; the saved PEMs are named in upper case.
-        listed = [c | {"serial": (c.get("serial") or "").upper()} for d in tiles.devices(run)
-                  for c in d.get("certificates") or []]
+        # DTM lists serials in either case, maybe zero-padded; the saved PEMs are named by serial_key.
+        serial = tiles.serial_key(serial)
+        listed = [c for d in tiles.devices(run) for c in d.get("certificates") or []]
         info = next((c for c in ((run.get("result") or {}).get("certificates") or []) + listed
-                     if c.get("serial") == serial), None)
+                     if tiles.serial_key(c.get("serial")) == serial), None)
         path = data_dir / "runs" / run_id / "certificates" / f"{serial}.pem"
         if not info or not SERIAL.fullmatch(serial) or not path.is_file():
             raise HTTPException(404, "Certificate not found")
@@ -950,14 +951,20 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                 raise HTTPException(409, "Cleanup not possible right now")
             if rolled_back(run):
                 raise HTTPException(409, "This run has already been rolled back")
-            spawn(lambda c: cleanup.cleanup(store, c, run_id, mode, data_dir / "runs" / run_id), run_id)
+            # Claimed before the task starts, so a watchdog tick in between cannot start a second rollback
+            if not store.claim_cleanup(run_id, run.get("cleanup_status")):
+                raise HTTPException(409, "Cleanup not possible right now")
+            try:
+                spawn(lambda c: cleanup.cleanup(store, c, run_id, mode, data_dir / "runs" / run_id), run_id)
+            except HTTPException:  # no connection for the run's account: nothing started
+                store.update_run(run_id, cleanup_status=run.get("cleanup_status"))
+                raise
         except HTTPException as exc:
             if not from_list:
                 raise
             # htmx swaps no error responses – the row comes back with the current state and the reason
             return render(request, "_run_row.html", run=list_row(store.get_run(run_id)),
                           several=len(store.connections()) > 1, error=exc.detail)
-        store.update_run(run_id, cleanup_status="running", progress=None)  # no leftover numbers of the run
         if from_list:  # the row, now showing the rollback
             return await run_row(request, run_id)
         return RedirectResponse(f"/runs/{run_id}", status_code=303)

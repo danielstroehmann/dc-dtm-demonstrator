@@ -78,6 +78,12 @@ def wall(run: dict, found: list[dict]) -> dict:
             "columns": columns, "width": columns * pitch - gap, "height": rows * pitch - gap}
 
 
+def serial_key(serial: str | None) -> str:
+    """One spelling per serial: upper case without leading zeros – how the saved PEMs are named
+    (format(n, "X")). DTM lists serials in either case and may pad them with zeros."""
+    return (serial or "").upper().lstrip("0") or ("0" if serial else "")
+
+
 def short(serial: str | None) -> str:
     """First and last three hex digits – enough to tell a device's certificates apart."""
     serial = (serial or "").upper()  # DTM lists hex serials in either case

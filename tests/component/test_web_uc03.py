@@ -180,11 +180,13 @@ def test_pem_download_refuses_everything_else(configured_user, store, data_dir):
     serial = r1["result"]["certificates"][0]["serial"]
     other = r2["result"]["certificates"][0]["serial"]
     assert configured_user.get(f"/runs/r1/certificates/{serial}.pem").status_code == 200
+    # any spelling of the same serial (case, leading zeros) is that one certificate
+    same = configured_user.get(f"/runs/r1/certificates/00{serial.lower()}.pem")
+    assert same.status_code == 200 and same.content == configured_user.get(f"/runs/r1/certificates/{serial}.pem").content
     # a stray file in the directory that is not one of the run's certificates
     (data_dir / "runs" / "r1" / "certificates" / "ABCDEF.pem").write_text("not listed")
     for path in (f"/runs/r1/certificates/{other}.pem",        # another run's certificate
                  f"/runs/r2/certificates/{serial}.pem",        # ... and the other way round
-                 f"/runs/r1/certificates/{serial.lower()}.pem",
                  "/runs/r1/certificates/ABCDEF.pem",
                  f"/runs/r1/certificates/{serial}.PEM",
                  f"/runs/r1/certificates/{serial}",

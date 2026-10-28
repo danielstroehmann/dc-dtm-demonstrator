@@ -6,7 +6,7 @@
 <article class="card" id="overview"{% if oob %} hx-swap-oob="true"{% endif %}>
   <div class="card-head"><h2>Overview</h2></div>
   {% if r.devices %}{% set done = (r.renewals or []) | rejectattr("failed") | list %}{% set last = done[-1] if done else none %}
-  {# The devices themselves follow as tiles (_devices.html) #}
+  {# The devices themselves follow as tiles (_device_card.html; UC-8 firmware in _firmware.html) #}
   {% set retrofit = run.use_case == "uc07" %}
   {% if run.use_case == "uc08" %}{% set f = r.factory or {} %}
   {# UC-8: register + passcode in the factory, the minion's TrustEdge agent in the field #}

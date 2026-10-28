@@ -121,7 +121,7 @@ assert run['result']['certificates'][0]['serial'] == 'AB12', run
 assert [e['message'] for e in s.events('upgr1')] == ['seeded before the upgrade']
 assert [c['name'] for c in s.connections()] == ['Upgrade']
 " || fail "data after the update"
-curl_ -b "$dir/cookies" "$url/" | grep -q 'upgr1' || fail "the run is not listed after the update"
+grep -q 'upgr1' <<<"$(curl_ -b "$dir/cookies" "$url/")" || fail "the run is not listed after the update"
 settings=$(curl_ -b "$dir/cookies" "$url/settings")
 grep -q '<span class="badge">Self-signed default</span>' <<<"$settings" || fail "Settings does not show the default certificate"
 grep -q 'Reset to default' <<<"$settings" && fail "Settings offers a reset without a Settings certificate"

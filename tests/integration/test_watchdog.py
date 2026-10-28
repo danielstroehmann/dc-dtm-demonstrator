@@ -92,6 +92,17 @@ async def test_a_busy_run_waits_until_it_is_done(dog, configured_store, fake, tm
     assert rolled_back(store.get_run("old")), messages(store, "old")
 
 
+async def test_a_manual_rollback_claimed_meanwhile_is_not_doubled(dog, configured_store, fake, tmp_path, clock):
+    """The route claims the rollback after the tick read the run: the watchdog must not start a second one."""
+    store = configured_store
+    await run_aged(store, fake, "old", tmp_path, clock, 4 * HOUR)
+    assert store.claim_cleanup("old", None)  # the manual rollback's claim
+    fake.calls.clear()
+    assert await dog.rollback("old", "lifetime", None) is False
+    assert fake.calls == [] and store.get_run("old")["cleanup_mode"] is None
+    assert not any("Automatic" in m for m in messages(store, "old"))
+
+
 async def test_a_rolled_back_run_is_not_touched_again(dog, configured_store, fake, tmp_path, clock):
     store = configured_store
     await run_aged(store, fake, "old", tmp_path, clock, 4 * HOUR)
