@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -271,6 +272,14 @@ def test_tls_dir_empty_value_passes_validation(installer):  # noqa: F811
     assert "ERROR" not in result.stderr and calls[:1] == ["mkdir -p /opt/dtm-demonstrator"]
 
 
+@pytest.fixture
+def host_tmp():
+    """A temp dir --tls-dir accepts: pytest's tmp_path lies below /tmp on Linux, which the installer refuses."""
+    path = Path(tempfile.mkdtemp(dir="/var/tmp")).resolve()
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def _tls_dir_check(pattern: str) -> str:
     match = re.search(pattern, INSTALLER.read_text(), re.M | re.S)
     assert match, "install.sh changed – update the extraction"
@@ -284,9 +293,9 @@ def _tls_dir_check(pattern: str) -> str:
     ("docker/volumes", "--tls-dir must not contain or lie inside /var/lib/docker: /var/lib/docker/volumes"),
     ("sibling", None),  # same prefix, another directory
 ])
-def test_tls_dir_must_not_overlap_the_installation(tmp_path, inside, message):
+def test_tls_dir_must_not_overlap_the_installation(host_tmp, inside, message):
     """Root reads below TLS_HOST_DIR: it must not reach .env and keys of the installation or Docker's data."""
-    parent = (tmp_path / "base").resolve()
+    parent = host_tmp / "base"
     install = parent / "dtm-demonstrator"
     (install / "tls").mkdir(parents=True)
     (parent / "dtm-demonstrator-certs").mkdir()
@@ -355,9 +364,9 @@ def test_tls_dir_is_validated_first(installer, tmp_path, value, message):  # noq
     assert result.returncode == 1 and f"ERROR: {message}" in result.stderr and calls == []
 
 
-def test_valid_tls_dir_passes_validation(installer, tmp_path):  # noqa: F811
-    (tmp_path / "acme" / "live").mkdir(parents=True)
-    result, calls = installer("--version", "v0.1.0", "--tls-dir", str(tmp_path / "acme" / "live" / ".."))
+def test_valid_tls_dir_passes_validation(installer, host_tmp):  # noqa: F811
+    (host_tmp / "acme" / "live").mkdir(parents=True)
+    result, calls = installer("--version", "v0.1.0", "--tls-dir", str(host_tmp / "acme" / "live" / ".."))
     assert "ERROR" not in result.stderr
     assert calls[:1] == ["mkdir -p /opt/dtm-demonstrator"]  # reached the first system change
 
