@@ -687,7 +687,6 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
   font-size: 0.8rem; color: #333; background: #fff; border: 1px solid var(--dc-border); border-radius: 1rem; }
 .wall-chip::before { content: ""; width: 0.55rem; height: 0.55rem; border-radius: 50%; background: currentColor; }
 .wall-bar .wall-chip[aria-pressed="true"] { border-color: var(--dc-blue); background: var(--dc-blue-tint); }
-.wall-bar input.wall-search { width: 14rem; height: auto; margin: 0; padding: 0.15rem var(--s3) 0.15rem 2rem; font-size: 0.85rem; background-position: 0.6rem center; }
 .wall { display: block; max-width: 100%; height: auto; }
 .wall use { color: #b0b7bf; transform-box: fill-box; transform-origin: center; transition: opacity 0.15s ease; }
 .wall use[data-n] { cursor: pointer; }
@@ -704,7 +703,7 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 /* filter by a counter chip, highlight search hits */
 .wall[data-filter="pending"] use:not(.pending), .wall[data-filter="busy"] use:not(.busy), .wall[data-filter="issued"] use:not(.issued),
 .wall[data-filter="renewed"] use:not(.renewed), .wall[data-filter="failed"] use:not(.failed),
-.wall[data-filter="revoked"] use:not(.revoked), .wall.searching use:not(.hit) { opacity: 0.12; }
+.wall[data-filter="revoked"] use:not(.revoked) { opacity: 0.12; }
 @media (prefers-reduced-motion: reduce) { .wall use { animation: none !important; } }
 .side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 900; width: 34rem; padding: var(--s6) var(--s5) var(--s5);
   overflow-y: auto; background: var(--dc-grey-bg); border-left: 1px solid var(--dc-border); box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12); }
@@ -719,7 +718,7 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .cert-pick { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s2); align-items: stretch; }
 .cert-pick select { margin: 0; height: var(--control-h); padding-top: 0; padding-bottom: 0; font-size: 0.85rem; }
 .cert-pick a[role="button"] { display: inline-flex; align-items: center; height: var(--control-h); margin: 0; }
-.cert-detail .tbox { background: #fff; }
+.cert-detail .tbox { background: #fff; align-items: start; }
 .cert-detail .tbox > dd.wrap { white-space: normal; overflow-wrap: anywhere; }
 .panel-close { position: absolute; top: var(--s2); right: var(--s3); width: auto; margin: 0; padding: 0 var(--s2); line-height: 1.6; }
 

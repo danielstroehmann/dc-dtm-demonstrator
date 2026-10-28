@@ -375,7 +375,8 @@ class DTMClient:
         """Active intermediate CAs assigned to the account. They are used, never modified."""
         items = await self._list("/certificate-authority/api/v1/ca", items_key="items")
         return [
-            {"id": ca["id"], "name": ca["name"], "key_type": ca.get("key_type", "")}
+            {"id": ca["id"], "name": ca["name"], "key_type": ca.get("key_type", ""),
+             "root": (ca.get("issuer") or {}).get("name", "")}
             for ca in items
             if ca.get("cert_type") == "intermediate" and ca.get("status") == "active"
             and any(a.get("id") == self.config.account_id for a in ca.get("account_assignments", []))

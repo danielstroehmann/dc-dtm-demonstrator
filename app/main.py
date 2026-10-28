@@ -539,7 +539,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         params = {"connection_id": conn["id"], "connection_name": conn["name"],
                   "dtm_host": conn["host"], "account_id": conn["account_id"],
                   "variant": variant, "mode": mode, "count": count,
-                  "ca_id": ca_id, "ca_name": ca["name"], "key_type": evergreen.KEY_TYPES[ca["key_type"]],
+                  "ca_id": ca_id, "ca_name": ca["name"], "ca_root": ca.get("root", ""), "key_type": evergreen.KEY_TYPES[ca["key_type"]],
                   "approval": approval and mode == "batch" and variant == "api"}
         if enrolled:
             params |= {"protocol": protocol, "auth": auth_method}

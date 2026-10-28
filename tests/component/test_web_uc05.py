@@ -130,7 +130,7 @@ def test_uc05_overview_phase_pair(configured_user, store, enroll_net, count):
     assert results[0].endswith(" Passcode has reached its usage limit")
     assert results[1].endswith(" Invalid registered value provided in attribute: subject.common_name")
     assert '{"errors"' not in html and "{&#34;errors" not in "".join(results)
-    assert "Passcode-bound device certificates" in html and not re.search(r"UC-?\d", html)
+    assert "Passcode-bound device certificates" not in html and not re.search(r"UC-?\d", html)  # no subtitle
 
 
 def test_uc05_steps_and_rollback_from_the_web(configured_user, store, enroll_net):

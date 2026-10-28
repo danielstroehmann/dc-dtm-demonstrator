@@ -11,7 +11,6 @@
   <div class="card-head"><h2>Devices</h2>
     <div class="wall-bar">
       {% for s, n in w.counts.items() %}<button type="button" class="wall-chip {{ s }}" data-filter="{{ s }}" aria-pressed="false">{{ "{:,}".format(n) | replace(",", " ") }} {{ {"busy": "in progress", "revoked": "rolled back"}.get(s, s) }}</button>{% endfor %}
-      <input type="search" class="wall-search" placeholder="Name, CN or serial" aria-label="Search devices">
       {# UC-5 only: the field step for every device not enrolled yet – one click instead of one per cell #}
       {% set waiting = found | rejectattr("issued") | rejectattr("busy") | list %}
       {% if run.use_case == "uc05" and run.status == "paused" and not run.cleanup_status and waiting %}

@@ -97,7 +97,7 @@ def test_defaults_rest_with_api_key(configured_user, store, fake):
     assert (p["protocol"], p["auth"], p["field"], p["identity"]) == ("rest", "apikey", "rest", "serial")
     assert len(fake.devices) == 1 and fake.violations == []
     html = configured_user.get("/runs/m1").text
-    assert "Managed devices · REST API → REST API · API key · Serial number · 1 device ·" in html
+    assert "Managed devices ·" not in html  # no subtitle under the run title – the tile shows the device
     (device,) = run["result"]["devices"]
     (tile,) = tiles(html)  # one tile per device
     assert f'<h3 data-tip="{device["name"]}">{device["name"]}</h3>' in tile and '<span class="pill ok">active</span>' in tile

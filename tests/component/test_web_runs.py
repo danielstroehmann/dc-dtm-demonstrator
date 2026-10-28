@@ -318,7 +318,7 @@ def test_event_log_is_capped_newest_first(configured_store, user, store):
     for i in range(250):
         store.add_event("p2", f"event-{i:03d}")
     page = user.get("/runs/p2").text
-    assert "latest 200 of 250" in page
+    assert "latest 200 of 250" not in page and "<h2>Timeline</h2>" in page  # no event count in the heading
     assert "event-249" in page and "event-050" in page and "event-049" not in page
     assert page.index("event-249") < page.index("event-050")  # newest first
     assert page.count('<time class="t"') == 200
@@ -345,7 +345,7 @@ def test_timeline_shows_clock_relative_to_first_event(configured_store, user, st
     assert entry("success", "2026-10-23T10:00:07+00:00", "0:07", "second") in page
     assert entry("step", "2026-10-23T10:00:00+00:00", "0:00", "first") in page
     assert page.index('<span class="msg">fourth') < page.index('<span class="msg">first')
-    assert "4 events" in page
+    assert "4 events" not in page and "<h2>Timeline</h2>" in page  # no event count in the heading
     assert 'hx-get="/runs/p3/timeline"' not in page  # finished runs do not poll
 
 
@@ -356,7 +356,7 @@ def test_timeline_route_returns_items_only(configured_store, user, store):
         store.add_event("p4", f"event-{i:03d}")
     page = user.get("/runs/p4").text
     assert re.search(r'<ol class="timeline"\s+hx-get="/runs/p4/timeline" hx-trigger="every 1s" hx-swap="innerHTML"', page)
-    assert "latest 200 of 250" in page
+    assert "latest 200 of 250" not in page and "<h2>Timeline</h2>" in page  # no event count in the heading
     items = user.get("/runs/p4/timeline", headers={"HX-Request": "true"})
     assert items.status_code == 200
     html = items.text.strip()
@@ -634,7 +634,7 @@ def test_up_to_ten_tiles_then_the_minion_wall(configured_store, user, store, n, 
     first = cells(html)[0]
     assert 'data-n="robot-c1-uc01-batch-0001"' in first and 'data-i="1"' in first and 'data-s="1"' in first
     assert 'data-tip="robot-c1-uc01-batch-0001 · 1 · until 2027-10-23"' in first
-    assert 'class="wall-search"' in html and 'id="side-panel" class="side-panel" hidden' in html
+    assert 'class="wall-search"' not in html and 'id="side-panel" class="side-panel" hidden' in html  # no search box
     assert " style=" not in html[html.index('<svg class="wall'):]  # the CSP forbids inline styles
 
 
@@ -751,7 +751,9 @@ def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store)
     store.create_run("x1", "uc99", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
     store.update_run("x1", status="failed")
     page = user.get("/runs/x1")
-    assert page.status_code == 200 and "<p>uc99 · Single" in page.text
+    # the run page renders an unknown use case (no subtitle that would look its title up)
+    assert page.status_code == 200 and '<h1>Run x1 <span class="pill bad">failed</span></h1>' in page.text
+    assert "<p>uc99" not in page.text
     index = user.get("/")
     # an unknown use case shows its raw ID – no internal "UC-n" numbering, no tooltip attribute
     assert index.status_code == 200 and re.search(r"<td>uc99</td>", index.text)
@@ -761,7 +763,8 @@ def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store)
     store.update_run("x2", status="failed")
     index = user.get("/").text
     assert re.search(r"<td>legacy</td>", index) and "UC-legacy" not in index
-    assert "<p>legacy · Single" in user.get("/runs/x2").text
+    legacy = user.get("/runs/x2")
+    assert legacy.status_code == 200 and "<h1>Run x2 " in legacy.text and "UC-legacy" not in legacy.text
 
 
 def test_progress_card_during_cleanup(configured_store, user, store):

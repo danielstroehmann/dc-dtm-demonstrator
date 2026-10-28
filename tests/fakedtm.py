@@ -287,7 +287,8 @@ class FakeDTM:
 
     def _ca(self, ca_id, name, key_type, *, cert_type="intermediate", status="active", account=None):
         return {"id": ca_id, "name": name, "key_type": key_type, "cert_type": cert_type, "status": status,
-                "account_assignments": [{"id": account or self.account_id}]}
+                "account_assignments": [{"id": account or self.account_id}]} \
+            | ({"issuer": {"id": "root-" + ca_id, "name": f"Fake {key_type.upper()} Root"}} if cert_type == "intermediate" else {})
 
     # client wiring
     def transport(self) -> httpx.MockTransport:

@@ -70,7 +70,7 @@ def test_uc03_run_through_the_web(configured_user, store, enroll_net):
         "api", "single", False, "rest", "certificate", 1)
     assert len(enroll_net.issued()) == 1 and enroll_net.violations == []
     html = configured_user.get("/runs/e1").text
-    assert "REST API · Factory certificate · 1 request ·" in html
+    assert "· 1 request ·" not in html  # no subtitle: the run page shows the run, not its settings
     assert "1,000 devices ≈" in html and f'{run["result"]["estimate_min"]} min' in html
     assert "<summary>First enrollment</summary>" in html
     assert "Upload done" not in html
@@ -81,7 +81,7 @@ def test_uc03_scep_through_the_web(configured_user, store, enroll_net, scep_clie
     assert response.status_code == 303
     run = finished(store, "e1")
     assert run["status"] == "completed", run["error"]
-    assert "SCEP · Passcode · 1 request ·" in configured_user.get("/runs/e1").text
+    assert "· 1 request ·" not in configured_user.get("/runs/e1").text
     passcode = enroll_net.active_auth("passcode")[0]["body"]["passcode"]
     for path in ("/runs/e1", "/runs/e1/timeline", "/runs/e1/api?dialect=curl", "/runs/e1/api?dialect=powershell"):
         assert passcode not in configured_user.get(path).text
@@ -90,7 +90,7 @@ def test_uc03_scep_through_the_web(configured_user, store, enroll_net, scep_clie
 def test_uc03_single_request_wording(configured_user, store, enroll_net):
     configured_user.post("/runs", data=uc03_form(count="1"))
     assert finished(store, "e1")["status"] == "completed"
-    assert "EST · Passcode · 1 request ·" in configured_user.get("/runs/e1").text
+    assert "· 1 request ·" not in configured_user.get("/runs/e1").text
 
 
 def test_uc03_failed_run_page_shows_the_error_without_secret(configured_user, store, enroll_net):
@@ -226,7 +226,7 @@ def test_no_links_without_pem_files(configured_user, store, data_dir):
     assert pem_links(detail) == [] and c["common_name"] in html
     # without the PEM: what the run knows, "–" for the rest
     assert f'<dt>Serial</dt><dd class="mono wrap">{c["serial"]}</dd>' in detail
-    assert f'<dt>Chain</dt><dd class="wrap">{c["issuer"]}</dd>' in detail
+    assert f'<dt>Issuer</dt><dd class="wrap">{c["issuer"]} → Fake ECDSA Root</dd>' in detail
     assert '<dt>SHA-256</dt><dd class="mono wrap">–</dd>' in detail and '<dt>Key</dt><dd>ECDSA P-256</dd>' in detail
     serial = run["result"]["certificates"][0]["serial"]
     assert configured_user.get(f"/runs/r1/certificates/{serial}.pem").status_code == 404

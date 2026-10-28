@@ -48,7 +48,7 @@ def test_uc04_forces_est_and_one_device(configured_user, store, enroll_net):
     (tile,) = tiles(html)  # the one device carries its Renew button – no separate renewal card
     assert 'action="/runs/d1/renew"' in tile and ">Renew</button>" in tile and "<h2>Field renewal</h2>" not in html
     assert "EST · renewal 0 of 5" in tile and tile.count("<li>") == 1  # nothing renewed yet
-    assert "Renewable device certificates · EST · Factory certificate · 1 request" in html  # run-page title
+    assert "Renewable device certificates" not in html  # no subtitle under the run title
     # the renewal block of the reproducible steps is there before the first renewal
     assert_phase_titles(configured_user.get("/runs/d1/api?dialect=curl").text,
                         [("Factory enrollment", "factory"), ("Field renewal", "refresh")])
@@ -62,7 +62,9 @@ def test_uc04_protocol_is_est_or_cmpv2(configured_user, store, enroll_net, cmp_o
     assert run["status"] == "completed", run["error"]
     assert run["params"]["protocol"] == expected
     label = {"est": "EST", "cmpv2": "CMPv2"}[expected]
-    assert f"Renewable device certificates · {label} · Passcode · 1 request" in configured_user.get("/runs/d1").text
+    html = configured_user.get("/runs/d1").text
+    (tile,) = tiles(html)  # the protocol shows on the device tile – the run page has no subtitle
+    assert f"{label} · renewal 0 of 5" in tile and "Renewable device certificates" not in html
 
 
 def test_uc04_cmp_renewal_through_the_web(configured_user, store, enroll_net, cmp_openssl):
@@ -99,8 +101,11 @@ def test_renew_through_the_web(configured_user, store, enroll_net):
     assert "<small>Renewals</small>" in html and "<small" in html and "Last renewal" in html
     (tile,) = tiles(html)  # current and previous certificate, the new one first
     assert tile.count("<li>") == 2 and "EST · renewal 1 of 5" in tile and re.search(r"Renewed in \d+\.\d\d s", tile)
-    short = f"{serial[:3]}…{serial[-3:]}"
-    assert tile.index(f'<span class="mono muted">{short}</span>') < tile.index('<span class="cert-state">renewed</span>')
+    # each row names the certificate's CN (not a short serial): the new one first, then the renewed one
+    rows = re.findall(r'<li><span class="cert-state[^"]*">([^<]+)</span>\s*<span class="mono cn">([^<]+)</span>', tile)
+    cn = store.get_run("d1")["result"]["certificates"][-1]["common_name"]
+    assert [state for state, _ in rows][1] == "renewed" and [name for _, name in rows] == [cn, cn]
+    assert f"{serial[:3]}…{serial[-3:]}" not in tile
     assert "PRIVATE KEY" not in html
     api = configured_user.get("/runs/d1/api?dialect=curl").text
     assert_phase_titles(api, [("Factory enrollment", "factory"), ("Field renewal", "refresh")])

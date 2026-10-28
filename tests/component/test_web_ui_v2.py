@@ -257,7 +257,7 @@ def test_run_header_pill(configured_store, user, store, status, kind):
     html = user.get("/runs/h1").text
     assert f'<h1>Run h1 <span class="pill {kind}">{status}</span></h1>' in html
     title = evergreen.USE_CASES["uc01"].title
-    assert f"<p>{title} · Batch (3) · via API · Default</p>" in html
+    assert title not in html and "Batch (3)" not in html  # no subtitle under the run title
 
 
 def test_live_line_only_for_unfinished_cleanup(configured_store, user, store):
@@ -287,7 +287,7 @@ def test_connection_name_is_escaped_in_chip_select_and_run_pages(user, store):
     home = user.get("/").text
     assert f"<option value=\"{a}\" selected>{escaped} · {HOST}</option>" in home
     assert f"<td>{escaped}</td>" in home  # runs table, connection column (two connections)
-    assert f"· {escaped}</p>" in user.get("/runs/x1").text
+    assert f"· {escaped}</p>" not in user.get("/runs/x1").text  # no run subtitle – the chip (checked above) names it
 
 
 def test_use_case_title_is_escaped_in_tiles_and_tooltips(configured_store, user, store, monkeypatch):
@@ -304,7 +304,9 @@ def test_use_case_title_is_escaped_in_tiles_and_tooltips(configured_store, user,
     assert f"<td>{escaped}</td>" in html  # runs table use-case cell (text, no tooltip attribute)
     page = user.get("/runs/t1").text
     assert hostile not in page and 'onmouseover="alert(1)' not in page
-    assert f"<p>{escaped} · Batch (3)" in page  # run page title line
+    assert escaped not in page  # the run page has no subtitle any more
+    form = user.get("/runs/new/evergreen").text  # the title still shows on the start form
+    assert hostile not in form and 'onmouseover="alert(1)' not in form and f"<h1>{escaped}" in form
 
 
 # --- CSS contract: buttons are never full width ------------------------------------------------------

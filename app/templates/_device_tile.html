@@ -71,7 +71,7 @@
       <ul class="tbox certs" data-certs="/runs/{{ run.id }}/devices/{{ d.name | urlencode }}/certificates" tabindex="0" aria-label="Certificate details">
         {% for c in shown %}
         <li><span class="cert-state{{ ' ok' if c.state == 'active' }}">{{ c.role if c.role is defined else c.state }}</span>
-          <span class="mono muted">{{ c.short }}</span>{% if loop.first %}<span class="muted right">{{ icon("chevron") }}</span>{% else %}<span></span>{% endif %}</li>
+          <span class="mono cn">{{ c.common_name or "–" }}</span>{% if loop.first %}<span class="muted right">{{ icon("chevron") }}</span>{% else %}<span></span>{% endif %}</li>
         {% endfor %}
         {% set earlier = listed[shown | length:] %}
         {% if earlier %}<li class="earlier"><span class="muted">+ {{ earlier | length }} earlier</span></li>{% endif %}

@@ -15,7 +15,10 @@
     <dt>CN</dt><dd class="mono">{{ i.common_name or chosen.common_name or "–" }}</dd>
     {% if i.sans %}<dt>SANs</dt><dd class="mono wrap">{{ i.sans | join(", ") }}</dd>{% endif %}
     <dt>Validity</dt><dd>{% if info %}{{ i.not_before }} → {{ i.not_after }} UTC{% elif issued.not_after %}{{ issued.not_before or "–" }} → {{ issued.not_after }}{% else %}– → {{ chosen.valid_to or "–" }}{% endif %}</dd>
-    <dt>Chain</dt><dd class="wrap">{{ i.chain[1:] | join(" → ") if i.chain and i.chain | length > 1 else issued.issuer or "–" }}</dd>
+    {# Up to the root: the parsed chain, completed by the issuing CA's root the run noted from DTM's CA list (DTM-issued certificates only – not UC-7's device-ID one) #}
+    {% set issuers = i.chain[1:] if i.chain and i.chain | length > 1 else [issued.issuer] if issued.issuer else [] %}
+    {% if issuers and not chosen.file and run.params.ca_root and run.params.ca_root not in issuers %}{% set issuers = issuers + [run.params.ca_root] %}{% endif %}
+    <dt>Issuer</dt><dd class="wrap">{{ issuers | join(" → ") or "–" }}</dd>
     <dt>Serial</dt><dd class="mono wrap">{{ chosen.serial }}</dd>
     <dt>SHA-256</dt><dd class="mono wrap">{{ i.sha256 or "–" }}</dd>
     <dt>Key usage</dt><dd class="wrap">{{ i.key_usage | join(", ") if i.key_usage else "–" }}</dd>

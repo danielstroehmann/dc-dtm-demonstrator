@@ -37,7 +37,7 @@ def test_detail_of_a_saved_certificate(configured_user, store, data_dir):
     saved = x509.load_pem_x509_certificate((data_dir / "runs" / "r1" / "certificates" / f"{c['serial']}.pem").read_bytes())
     assert value(html, "CN") == c["common_name"] and value(html, "Serial") == c["serial"]
     assert value(html, "SHA-256").replace(":", "") == saved.fingerprint(hashes.SHA256()).hex().upper()
-    assert value(html, "Chain") == "Fake ECDSA Issuing CA"  # the run keeps no CA chain – the leaf's issuer
+    assert value(html, "Issuer") == "Fake ECDSA Issuing CA → Fake ECDSA Root"  # leaf's issuer, root from the CA list
     assert value(html, "Key") == "ECDSA P-256" and value(html, "Validity").endswith(" UTC")
     assert value(html, "Key usage") == "–" and value(html, "Extended key usage") == "–"  # the fake sets neither
     assert "<dt>SANs</dt>" not in html  # only when the certificate has some
@@ -79,7 +79,7 @@ def test_without_a_pem_only_what_the_run_knows(configured_store, user, store, fa
     cert_run(store, 1)
     html = detail(user, "c1", "robot-c1-uc01-batch-0001").text
     assert value(html, "CN") == "robot-c1-uc01-batch-0001" and value(html, "Serial") == "1"
-    assert value(html, "Chain") == "ICA" and value(html, "Key") == "ECDSA P-256"
+    assert value(html, "Issuer") == "ICA" and value(html, "Key") == "ECDSA P-256"
     assert value(html, "Validity") == "– → 2027-10-23 10:00 UTC"
     assert value(html, "SHA-256") == "–" and "download" not in html
     assert fake.calls == []
@@ -111,7 +111,7 @@ def test_uc07_lists_the_device_id_certificate(configured_user, store, enroll_net
         (devices.device_dir(data_dir / "runs" / "u1", name) / "device-id.crt").read_bytes())
     serial = format(device_id.serial_number, "X")
     assert options(html) == [(serial, f"Device ID · {serial[:3]}…{serial[-3:]}", True)]
-    assert value(html, "Chain") == "robot-u1-uc07-device-id-ica → robot-u1-uc07-manufacturer-root"
+    assert value(html, "Issuer") == "robot-u1-uc07-device-id-ica → robot-u1-uc07-manufacturer-root"
     assert "download" not in html  # demo material of the manufacturer, not a DTM certificate
 
 
@@ -125,7 +125,7 @@ def test_uc08_reads_the_certificate_from_dtm_once(configured_user, store, fake, 
     html = detail(configured_user, "t1", first).text  # default: the operational certificate
     assert fake.names("cert_download") == [operational["serial"]] and fake.violations == []
     assert value(html, "CN") == first and value(html, "Serial") == operational["serial"].upper()
-    assert value(html, "SHA-256") != "–" and value(html, "Chain") == "Fake ECDSA Issuing CA"
+    assert value(html, "SHA-256") != "–" and value(html, "Issuer") == "Fake ECDSA Issuing CA → Fake ECDSA Root"
     short = {c["role"]: f"{c['serial'][:3]}…{c['serial'][-3:]}".upper() for c in (bootstrap, operational)}
     assert options(html) == [(bootstrap["serial"].upper(), f"Bootstrap · {short['bootstrap']} · active", False),
                              (operational["serial"].upper(), f"Operational · {short['operational']} · active", True)]
@@ -180,3 +180,15 @@ def test_detail_escapes_dtm_values(configured_store, user, store):
         {"common_name": "robot-c1", "serial": "AB", "not_after": evil, "issuer": evil, "key_type": evil}]})
     html = detail(user, "c1", "robot-c1").text
     assert evil not in html and "&lt;script&gt;" in html
+
+
+def test_issuer_runs_up_to_the_root_from_dtms_ca_list(configured_user, store):
+    """DTM's CA list names each intermediate's root – the run notes it, the detail ends the issuer chain with it."""
+    configured_user.post("/runs", data=form())
+    run = finished(store, "r1")
+    assert run["params"]["ca_root"].startswith("Fake ") and run["params"]["ca_root"].endswith(" Root")
+    c = run["result"]["certificates"][0]
+    html = detail(configured_user, "r1", c["common_name"]).text
+    assert value(html, "Issuer") == f"Fake ECDSA Issuing CA → {run['params']['ca_root']}"
+    store.update_run("r1", params=run["params"] | {"ca_root": ""})  # a run from before: the issuing CA only
+    assert value(detail(configured_user, "r1", c["common_name"]).text, "Issuer") == "Fake ECDSA Issuing CA"

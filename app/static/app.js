@@ -129,19 +129,9 @@ setInterval(tickCountdowns, 1000);
 document.addEventListener("htmx:afterSwap", tickCountdowns);
 document.addEventListener("DOMContentLoaded", tickCountdowns);
 
-// Minion wall (from 11 devices): counter chips filter, the search highlights by name / CN / serial, a click on a cell
+// Minion wall (from 11 devices): counter chips filter, a click on a cell
 // opens that device's tile in the side panel (same actions as a tile). Cells stay plain <use> elements – classes only.
 // A tile's certificates (wall panel or large tile) open their detail view in the same panel.
-function wallSearch(input) {
-  const wall = input.closest(".card").querySelector(".wall");
-  const query = input.value.trim().toLowerCase();
-  wall.classList.toggle("searching", query !== "");
-  for (const cell of wall.querySelectorAll("use[data-n]")) {
-    cell.classList.toggle("hit", query !== "" && `${cell.dataset.tip} ${cell.dataset.s}`.toLowerCase().includes(query));
-  }
-  return wall.querySelector("use.hit");
-}
-
 // tile: URL of the tile to show above the detail, null to show none, undefined to keep the one shown
 function openPanel(certs, tile) {
   const panel = document.getElementById("side-panel");
@@ -191,17 +181,9 @@ document.addEventListener("click", (event) => {
   chip.setAttribute("aria-pressed", String(on));
   if (on) wall.dataset.filter = chip.dataset.filter; else delete wall.dataset.filter;
 });
-document.addEventListener("input", (event) => {
-  if (event.target.matches(".wall-search")) wallSearch(event.target);
-});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closePanel();
   if (event.key === "Enter" && event.target.matches("[data-certs]")) openCertificates(event.target);
-  if (event.key === "Enter" && event.target.matches(".wall-search")) {
-    event.preventDefault();
-    const hit = wallSearch(event.target);
-    if (hit) openDevice(hit);
-  }
 });
 
 // While a batch issues, the polled wall pops the cells whose state changed.
