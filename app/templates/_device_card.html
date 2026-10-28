@@ -2,11 +2,11 @@
 {# Devices of every use case: up to tiles.WALL_FROM - 1 as large tiles, each with its own enroll / renew button – from
    there on the minion wall: one cell per device, coloured by state; a click opens the device's tile in the side panel.
    A click on a tile's certificates opens their detail view in the same panel.
-   Devices act independently; the page reloads when one finishes (HX-Refresh). Polled while the run works – a batch
+   Devices act independently; when one starts or finishes, the card is swapped in place (_run_update.html). Polled while the run works – a batch
    issues, or UC-5's field step enrolls one device after the other – so each cell turns green as its device does. #}
 {% set found = found if found is defined else tiles.devices(run) %}
 {% set filling = run.status == "running" and found %}
-<article class="card" id="devices" {% if filling %}hx-get="/runs/{{ run.id }}/devices" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<article class="card" id="devices"{% if oob %} hx-swap-oob="true"{% endif %} {% if filling %}hx-get="/runs/{{ run.id }}/devices" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   {% if found | length >= tiles.WALL_FROM %}
   {% set w = tiles.wall(run, found) %}
   {# The action sits in the card head like every card's action; the counters below filter the wall – no buttons #}
@@ -28,7 +28,15 @@
     {% for c in w.cells %}<use href="#minion-head" x="{{ (loop.index0 % w.columns) * w.pitch }}" y="{{ (loop.index0 // w.columns) * w.pitch }}" width="{{ w.size }}" height="{{ w.size }}" class="{{ c.state }}"{% if c.name %} data-i="{{ loop.index }}" data-n="{{ c.name }}" data-s="{{ c.serial }}" data-tip="{{ c.tip }}"{% endif %}/>{% endfor %}
   </svg>
   {% else %}
-  <div class="card-head"><h2>Devices</h2></div>
+  <div class="card-head"><h2>Devices</h2>
+    {# UC-8 only: every IoT minion not started yet – the tiles keep their own button #}
+    {% set waiting = found | selectattr("name") | rejectattr("container") | rejectattr("issued") | rejectattr("busy") | list %}
+    {% if run.use_case == "uc08" and run.status == "completed" and not run.cleanup_status and waiting %}
+    <form method="post" action="/runs/{{ run.id }}/devices/start-all" hx-post="/runs/{{ run.id }}/devices/start-all" hx-target="#live" hx-swap="outerHTML" class="inline">
+      <button type="submit" class="btn-sm btn-icon field-action">{{ icon("container") }}Start all {{ waiting | length }}</button>
+    </form>
+    {% endif %}
+  </div>
   <div class="device-tiles">
     {% for d in found %}
     {% with loop_index = loop.index %}{% include "_device_tile.html" %}{% endwith %}

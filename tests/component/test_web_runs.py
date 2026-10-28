@@ -310,7 +310,8 @@ def test_active_run_page_polls(configured_store, user, store):
     store.create_run("p1", "uc01", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
     store.update_run("p1", status="running")
     page = user.get("/runs/p1").text
-    assert 'hx-get="/runs/p1/live?busy="' in page and 'hx-trigger="every 1s"' in page
+    # the poll tells the server what the page shows: nothing busy, phase "running" without a cleanup
+    assert 'hx-get="/runs/p1/live?busy=&amp;phase=running%7C"' in page and 'hx-trigger="every 1s"' in page
     assert "Full rollback" not in page
 
 
@@ -357,7 +358,7 @@ def test_timeline_route_returns_items_only(configured_store, user, store):
     for i in range(250):
         store.add_event("p4", f"event-{i:03d}")
     page = user.get("/runs/p4").text
-    assert re.search(r'<ol class="timeline"\s+hx-get="/runs/p4/timeline" hx-trigger="every 1s" hx-swap="innerHTML"', page)
+    assert re.search(r'<ol class="timeline" id="timeline"\s+hx-get="/runs/p4/timeline" hx-trigger="every 1s" hx-swap="innerHTML"', page)
     assert "latest 200 of 250" not in page and "<h2>Timeline</h2>" in page  # no event count in the heading
     items = user.get("/runs/p4/timeline", headers={"HX-Request": "true"})
     assert items.status_code == 200
@@ -1130,7 +1131,7 @@ def test_only_get_and_post_routes():
     assert methods <= {"GET", "HEAD", "POST"}
     posts = sorted(r.path for r in app.routes if "POST" in (getattr(r, "methods", None) or set()))
     assert posts == ["/login", "/logout", "/runs", "/runs/{run_id}/cleanup", "/runs/{run_id}/delete",
-                     "/runs/{run_id}/devices/add", "/runs/{run_id}/devices/{name}/{action}",
+                     "/runs/{run_id}/devices/add", "/runs/{run_id}/devices/start-all", "/runs/{run_id}/devices/{name}/{action}",
                      "/runs/{run_id}/enroll", "/runs/{run_id}/firmware/{action}/{value}", "/runs/{run_id}/renew",
                      "/settings/connections", "/settings/connections/{connection_id}/default",
                      "/settings/connections/{connection_id}/delete",

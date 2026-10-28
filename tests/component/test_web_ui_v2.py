@@ -265,7 +265,7 @@ def test_live_line_only_for_unfinished_cleanup(configured_store, user, store):
     store.update_run("l1", status="failed", cleanup_status="running")
     live = user.get("/runs/l1/live").text
     assert '<p class="status-line">Cleanup: <span class="status running">running</span></p>' in live
-    assert "failed" not in live  # the run status is in the page header, not in the live line
+    assert "failed" not in re.sub(r"<[^>]+>", "", live)  # the run status is in the page header, not in the live line
     store.update_run("l1", cleanup_status="done")
     assert 'class="status-line"' not in user.get("/runs/l1/live").text
 

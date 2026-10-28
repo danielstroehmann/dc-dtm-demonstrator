@@ -259,10 +259,20 @@ def minions_build() -> str:
             "docker build -t dtm-minion minion/")
 
 
-async def enroll(store: Store, client: DTMClient, run_id: str, run_dir: Path, name: str) -> None:
-    """Per click: the device goes into the field – its minion starts."""
-    await device_action(store, run_id, name, "Field start",
-                        lambda log: _field(store, client, run_id, run_dir, name, log))
+START_STAGGER_S = 5  # Start all: the minions start one after the other – not every DTM call at once
+
+
+def startable(device: dict) -> bool:
+    """A device whose minion can start: not started, not enrolled, not acting (tiles.devices)."""
+    return bool(device["name"]) and not device.get("container") and not device.get("issued") and not device["busy"]
+
+
+async def enroll(store: Store, client: DTMClient, run_id: str, run_dir: Path, name: str, delay: float = 0) -> None:
+    """Per click: the device goes into the field – its minion starts (after delay: Start all staggers them)."""
+    async def act(log):
+        await asyncio.sleep(delay)
+        await _field(store, client, run_id, run_dir, name, log)
+    await device_action(store, run_id, name, "Field start", act)
 
 
 async def _field(store: Store, client: DTMClient, run_id: str, run_dir: Path, name: str, log) -> None:

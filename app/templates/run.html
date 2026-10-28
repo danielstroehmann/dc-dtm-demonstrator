@@ -5,7 +5,8 @@
 {% block content %}
 {% set p = run.params %}
 {% set finished = run.result and run.status not in ("pending", "running", "paused") %}
-{# Phases: Run → Result → Clean up (started from the runs list). The page reloads at every phase change (HX-Refresh). #}
+{# Phases: Run → Result → Clean up (started from the runs list). The page reloads at every phase change (HX-Refresh);
+   devices acting only swap their cards and the status pill (_run_update.html). #}
 {% if rolled_back %}{% set phase = 4 %}{% elif run.cleanup_status %}{% set phase = 3 %}
 {% elif run.status in ("pending", "running", "paused") %}{% set phase = 1 %}{% else %}{% set phase = 2 %}{% endif %}
 {# The heading names the use case; the run ID stays in the breadcrumb #}

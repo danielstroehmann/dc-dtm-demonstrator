@@ -4,8 +4,6 @@
   <div class="card-head"><h2>Timeline</h2>
     <button type="button" class="btn-sm outline" data-debug-toggle aria-pressed="false">Debug</button></div>
   <div class="timeline-scroll" tabindex="0" aria-label="Timeline, newest first">
-    <ol class="timeline" {% if active %}hx-get="/runs/{{ run.id }}/timeline" hx-trigger="every 1s" hx-swap="innerHTML"{% endif %}>
-      {% include "_timeline_items.html" %}
-    </ol>
+    {% include "_timeline_list.html" %}
   </div>
 </article>

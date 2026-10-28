@@ -300,17 +300,22 @@ def test_device_tile_route(configured_user, store, fake):
     assert configured_user.get("/runs/nope/devices/x/tile").status_code == 404
 
 
-def test_live_view_reloads_when_a_device_finishes(configured_user, store, fake):
+def test_live_view_swaps_the_cards_when_a_device_finishes(configured_user, store, fake):
     configured_user.post("/runs", data=uc06_form())
     finished(store, "m1")
     (name,) = device_names(store)
     hx = {"HX-Request": "true"}
     devices.commit(store, "m1", lambda r: r.update(busy=[name]))
-    acting = configured_user.get(f"/runs/m1/live?busy={name}", headers=hx)
-    assert acting.status_code == 200 and "HX-Refresh" not in acting.headers
+    acting = configured_user.get(f"/runs/m1/live?busy={name}&phase=completed%7C", headers=hx)
+    assert acting.status_code == 200 and "HX-Refresh" not in acting.headers and "hx-swap-oob" not in acting.text
     devices.commit(store, "m1", lambda r: r.update(busy=[]))
-    done = configured_user.get(f"/runs/m1/live?busy={name}", headers=hx)
-    assert done.headers.get("HX-Refresh") == "true"
+    done = configured_user.get(f"/runs/m1/live?busy={name}&phase=completed%7C", headers=hx)
+    # no reload: the device's tile, the overview and the timeline come out of band; polling stops
+    assert done.status_code == 200 and "HX-Refresh" not in done.headers
+    assert 'id="devices" hx-swap-oob="true"' in done.text and name in done.text and 'aria-busy="true"' not in done.text
+    assert 'id="overview" hx-swap-oob="true"' in done.text and 'hx-get="/runs/m1/live' not in done.text
+    # a page rendered before the phase was sent still reloads once nothing is active
+    assert configured_user.get(f"/runs/m1/live?busy={name}", headers=hx).headers.get("HX-Refresh") == "true"
 
 
 def test_renew_without_connection_does_not_stay_busy(configured_user, store, fake):

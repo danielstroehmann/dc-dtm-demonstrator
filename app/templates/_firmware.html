@@ -7,7 +7,7 @@
 {% set full = deployed | length >= firmware.MAX_DEPLOYMENTS %}
 {% set adding = "adding" in (r.busy or []) %}
 {% set can_add = run.status == "completed" and not run.cleanup_status and r.devices | length < max_minions %}
-<div class="firmware-split">
+<div class="firmware-split" id="firmware"{% if oob %} hx-swap-oob="true"{% endif %}>
 <article class="card firmware-card">
   <div class="card-head"><h2>Firmware</h2>{% if old %}<span class="muted">Started before the shared firmware catalogue – start a new run to deploy its versions</span>{% endif %}</div>
   {# Box concept: versions and new versions share one cell – figure, label, action row of fixed height #}
@@ -17,7 +17,7 @@
       {% for v in ((r.firmware or []) if old else firmware.catalog(store_catalog, run.params.account_id) | reverse) %}
       <div class="fw-cell">{{ firmware.svg(v) | safe }}<span>{{ firmware.semver(v) }}</span>
         <span class="fw-action">{% if old or v.name in deployed %}<span class="pill ok">deployed</span>
-        {% elif open %}<form method="post" action="/runs/{{ run.id }}/firmware/deploy/{{ v.name }}" class="inline">
+        {% elif open %}<form method="post" action="/runs/{{ run.id }}/firmware/deploy/{{ v.name }}" hx-post="/runs/{{ run.id }}/firmware/deploy/{{ v.name }}" hx-target="#live" hx-swap="outerHTML" class="inline">
           <button type="submit" class="btn-sm outline" {% if acting or full %}disabled{% endif %}
                   {% if full %}data-tip="At most {{ firmware.MAX_DEPLOYMENTS }} deployments per run"{% endif %}>Deploy</button></form>{% endif %}</span>
       </div>
@@ -26,7 +26,7 @@
     {% if open %}
     <div class="fw-box fw-new">
       {% for c in firmware.CHARACTERS %}
-      <form method="post" action="/runs/{{ run.id }}/firmware/new/{{ c }}" class="inline">
+      <form method="post" action="/runs/{{ run.id }}/firmware/new/{{ c }}" hx-post="/runs/{{ run.id }}/firmware/new/{{ c }}" hx-target="#live" hx-swap="outerHTML" class="inline">
         <button type="submit" class="fw-cell fw-pick" {% if acting %}disabled{% endif %} data-tip="New version with the {{ c }} – the colour is rolled">
           {{ firmware.svg({"character": c, "color": "#9e9e9e"}, c) | safe }}<span>{{ c }}</span><span class="fw-action muted">{{ "…" if acting else "new version" }}</span></button>
       </form>
@@ -37,7 +37,7 @@
 </article>
 <article class="card add-card">
   <div class="card-head"><h2>Add IoT minion</h2></div>
-  <form method="post" action="/runs/{{ run.id }}/devices/add" class="inline">
+  <form method="post" action="/runs/{{ run.id }}/devices/add" hx-post="/runs/{{ run.id }}/devices/add" hx-target="#live" hx-swap="outerHTML" class="inline">
     <button type="submit" class="add-minion" {% if adding or not can_add %}disabled{% endif %} {% if adding %}aria-busy="true"{% endif %}
             data-tip="{{ 'At most ' ~ max_minions ~ ' IoT minions per run' if r.devices | length >= max_minions else 'One more device from the factory – registered with its own passcode' }}"
             aria-label="Add an IoT minion">{% if not adding %}+{% endif %}</button>

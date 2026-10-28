@@ -297,3 +297,68 @@ async def test_launcher_healthz():
     async with _httpx.AsyncClient(transport=_httpx.ASGITransport(app=launcher.api), base_url="http://l") as http:
         assert (await http.get("/healthz")).json() == {"ok": True}
         assert (await http.get("/docs")).status_code == 404  # no API browser on the launcher
+
+
+# --- start all IoT minions -----------------------------------------------------------------------------
+
+def start_all_button(html: str) -> str | None:
+    found = re.search(r'<form method="post" action="/runs/t1/devices/start-all"[^>]*>\s*<button[^>]*>.*?</button>', html, re.S)
+    return found and found.group(0)
+
+
+def test_start_all_starts_each_waiting_minion_once(configured_user, store, fake, docker, minion, monkeypatch):
+    monkeypatch.setattr(trustedge, "START_STAGGER_S", 0)
+    started(configured_user, store, count="3")
+    first, second, third = names(store)
+    configured_user.post(f"/runs/t1/devices/{first}/enroll")
+    idle(store)
+    button = start_all_button(configured_user.get("/runs/t1").text)
+    assert button and "Start all 2" in button and 'class="btn-sm btn-icon field-action"' in button
+    assert 'hx-post="/runs/t1/devices/start-all" hx-target="#live"' in button
+    devices.commit(store, "t1", lambda r: r.update(busy=[second]))  # its own click is starting it
+    assert "Start all 1" in start_all_button(configured_user.get("/runs/t1").text)
+    response = configured_user.post("/runs/t1/devices/start-all", headers={"HX-Request": "true"})
+    # answered in place: #live polls with the started minion busy, its tile acting
+    assert response.status_code == 200 and "HX-Refresh" not in response.headers
+    assert f"busy={second}%2C{third}" in response.text
+    wait_for(lambda: devices.device_of(store.get_run("t1")["result"], third)["issued"], what="the third minion")
+    # only the waiting one started – the running and the busy one were skipped
+    assert [m["SERIAL"] for m in minion.started] == [devices.device_of(store.get_run("t1")["result"], n)["serial"]
+                                                      for n in (first, third)]
+    devices.commit(store, "t1", lambda r: r.update(busy=[]))
+    assert start_all_button(configured_user.get("/runs/t1").text) is not None  # the second one still waits
+
+
+def test_start_all_double_click_and_guards(configured_user, store, fake, docker, minion, monkeypatch):
+    monkeypatch.setattr(trustedge, "START_STAGGER_S", 0)
+    started(configured_user, store)
+    first, second = names(store)
+    devices.commit(store, "t1", lambda r: r.update(busy=[first, second]))  # Start all is running
+    assert start_all_button(configured_user.get("/runs/t1").text) is None  # nothing waits
+    response = configured_user.post("/runs/t1/devices/start-all", follow_redirects=False)
+    assert response.status_code == 303 and minion.started == []  # a double click starts nothing
+    devices.commit(store, "t1", lambda r: r.update(busy=[]))
+    docker.image_present = False  # the minion runtime is gone
+    response = configured_user.post("/runs/t1/devices/start-all", follow_redirects=False)
+    assert response.status_code == 409 and "runtime" in response.text and not store.get_run("t1")["result"]["busy"]
+    docker.image_present = True
+    assert configured_user.post("/runs/nope/devices/start-all", follow_redirects=False).status_code == 404
+    configured_user.post("/runs/t1/cleanup", data={"mode": "full"})
+    assert cleaned(store, "t1")["cleanup_status"] == "done"
+    assert start_all_button(configured_user.get("/runs/t1").text) is None
+    assert configured_user.post("/runs/t1/devices/start-all", follow_redirects=False).status_code == 409
+    assert minion.started == []
+
+
+def test_start_all_only_for_iot_minions(configured_user, store, enroll_net):
+    configured_user.post("/runs", data=uc07_form())
+    run = finished(store, "u1")
+    assert run["status"] == "completed", run["error"]
+    assert "/devices/start-all" not in configured_user.get("/runs/u1").text
+    response = configured_user.post("/runs/u1/devices/start-all", follow_redirects=False)
+    assert response.status_code == 409 and "IoT minions" in response.text
+
+
+def test_start_all_requires_login(web, configured_store):
+    response = web.post("/runs/t1/devices/start-all", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/login"

@@ -577,14 +577,25 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return render(request, "run.html", nav="runs", **live_context(run), dialect="curl")
 
     @app.get("/runs/{run_id}/live")
-    async def run_live(request: Request, run_id: str, busy: str = ""):
+    async def run_live(request: Request, run_id: str, busy: str = "", phase: str = ""):
         run = get_run_or_404(run_id)
-        # busy: the devices acting when the page was rendered – one finishing reloads its tile's results
-        now_busy = ",".join((run.get("result") or {}).get("busy") or [])
-        if request.headers.get("hx-request") and (not active(run) or busy != now_busy):
-            # The page was polling and the run/cleanup/a device just finished: reload once to show the result.
-            return HTMLResponse("", headers={"HX-Refresh": "true"})
+        if request.headers.get("hx-request"):
+            # phase/busy: what the page showed when it was rendered. A new phase (run or cleanup finished) changes the
+            # whole page – reload once. A device starting or finishing only changes the cards that show devices – they
+            # are swapped in place (_run_update.html), so the scroll position, the side panel and the feedback form stay.
+            # Pages rendered before the phase was sent reload as soon as nothing is active any more.
+            if (phase != live_phase(run)) if phase else not active(run):
+                return HTMLResponse("", headers={"HX-Refresh": "true"})
+            if busy != live_busy(run) or not active(run):
+                return render(request, "_run_update.html", **live_context(run))
         return render(request, "_run_live.html", **live_context(run))
+
+    def acted(request: Request, run_id: str, name: str | None = None):
+        """The answer to a click on a device or firmware action: htmx swaps the run page's live parts in place (the
+        clicked device's tile too, when it sits in the wall's side panel); a plain form post shows the run."""
+        if not request.headers.get("hx-request"):
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        return render(request, "_run_update.html", **live_context(get_run_or_404(run_id)), acted=name)
 
     @app.get("/runs/{run_id}/timeline")
     async def run_timeline(request: Request, run_id: str):
@@ -608,7 +619,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         else:
             progress = None
         return {"run": run, "events": timeline, "events_total": len(events), "active": active(run),
-                "progress": progress,
+                "progress": progress, "live_phase": live_phase(run), "live_busy": live_busy(run),
                 "rolled_back": rolled_back(run),
                 "artifact_available": _artifact_path(data_dir, run) is not None}
 
@@ -618,12 +629,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         return render(request, "_device_card.html", run=get_run_or_404(run_id))
 
     @app.post("/runs/{run_id}/renew")
-    async def renew_run(run_id: str):
+    async def renew_run(request: Request, run_id: str):
         """UC-4: the run's one device renews. Device-level use cases renew per device (see below)."""
         run = get_run_or_404(run_id)
         renewable = run["use_case"] == "uc04"
         if renewable and run["status"] == "renewing":  # double click: just show the run
-            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+            return acted(request, run_id)
         if not renewable or run["status"] != "completed" or run.get("cleanup_status"):
             raise HTTPException(409, "Only a completed run of renewable device certificates that is not cleaned up can be renewed")
         limit = max_renewals(run)
@@ -632,7 +643,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         # Claim the run before the task starts – a concurrent request must not start a second renewal.
         if store.claim_status(run_id, "completed", "renewing"):
             spawn(lambda _c: enrollment.renew(store, run_id, data_dir / "runs" / run_id), run_id, with_client=False)
-        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        return acted(request, run_id)
 
     def device_or_404(run: dict, name: str) -> dict:
         # The name must be one of the run's devices – nothing is built from free input.
@@ -740,14 +751,14 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                       pem_url=f"/runs/{run_id}/certificates/{upper}.pem" if downloadable else None)
 
     @app.post("/runs/{run_id}/devices/add")
-    async def add_device(run_id: str):
+    async def add_device(request: Request, run_id: str):
         """UC-8 per click: one more IoT minion from the factory."""
         run = get_run_or_404(run_id)
         result = run.get("result") or {}
         if run["use_case"] != "uc08" or not result.get("devices"):
             raise HTTPException(404, "No IoT minions in this run")
         if trustedge.ADDING in (result.get("busy") or []):  # a double click
-            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+            return acted(request, run_id)
         if run["status"] != "completed" or run.get("cleanup_status"):
             raise HTTPException(409, "Only a completed run that is not cleaned up can add devices")
         if len(result["devices"]) >= trustedge.MAX_DEVICES:
@@ -758,17 +769,44 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         except Exception:
             devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != trustedge.ADDING]))
             raise
-        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        return acted(request, run_id)
+
+    @app.post("/runs/{run_id}/devices/start-all")
+    async def start_all_minions(request: Request, run_id: str):
+        """UC-8: every IoT minion not started yet goes into the field – one after the other (trustedge.START_STAGGER_S
+        apart), each through the same path as its tile's button."""
+        run = get_run_or_404(run_id)
+        if run["use_case"] != "uc08":
+            raise HTTPException(409, "Only IoT minions start from the devices card")
+        if run["status"] != "completed" or run.get("cleanup_status"):
+            raise HTTPException(409, "Only a completed run that is not cleaned up can start its IoT minions")
+        waiting = [d["name"] for d in tiles.devices(run) if trustedge.startable(d)]
+        if not waiting:  # a double click: they are starting already
+            return acted(request, run_id)
+        if not await minions.available():
+            raise HTTPException(409, "The IoT minion runtime is not available")
+        # All marked at once – a second click, or a click on a tile, finds them busy
+        devices.commit(store, run_id, lambda r: r.update(busy=[*(r.get("busy") or []), *waiting]))
+        pending = list(waiting)
+        try:
+            for i, name in enumerate(waiting):
+                spawn(lambda c, n=name, i=i: trustedge.enroll(store, c, run_id, data_dir / "runs" / run_id, n,
+                                                             delay=i * trustedge.START_STAGGER_S), run_id)
+                pending.remove(name)
+        except Exception:  # no client (connection gone or changed) – the minions not started must not stay busy
+            devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n not in pending]))
+            raise
+        return acted(request, run_id)
 
     @app.post("/runs/{run_id}/firmware/{action}/{value}")
-    async def firmware_action(run_id: str, action: str, value: str):
+    async def firmware_action(request: Request, run_id: str, action: str, value: str):
         """UC-8 per click: a new firmware version (new/<figure>) or a catalogue version to the devices (deploy/<name>)."""
         run = get_run_or_404(run_id)
         result = run.get("result") or {}
         if run["use_case"] != "uc08" or not result.get("devices") or action not in ("new", "deploy"):
             raise HTTPException(404, "No firmware for this run")
         if firmware.BUSY in (result.get("busy") or []):  # a double click
-            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+            return acted(request, run_id)
         if run["status"] != "completed" or run.get("cleanup_status"):
             raise HTTPException(409, "Only a completed run that is not cleaned up can change firmware")
         if action == "new" and value not in firmware.CHARACTERS:
@@ -788,10 +826,10 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         except Exception:
             devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != firmware.BUSY]))
             raise
-        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        return acted(request, run_id)
 
     @app.post("/runs/{run_id}/devices/{name}/{action}")
-    async def device_action(run_id: str, name: str, action: str):
+    async def device_action(request: Request, run_id: str, name: str, action: str):
         """One device, per click – UC-7 enrolls it in the field, UC-6/UC-7 renew it, UC-5 enrolls it with its passcode."""
         run = get_run_or_404(run_id)
         result = run.get("result") or {}
@@ -799,7 +837,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(404, "Device not found")
         device = device_or_404(run, name)
         if device["busy"]:  # a double click: just show the run
-            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+            return acted(request, run_id, name)
         if run["use_case"] == "uc05":
             # The paused run's task holds the passcodes and enrolls the devices marked busy (enrollment._field_clicks)
             if action != "enroll" or run["status"] != "paused" or run.get("cleanup_status"):
@@ -807,7 +845,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             if device["issued"]:
                 raise HTTPException(409, "This device is enrolled already")
             devices.commit(store, run_id, lambda r: r.update(busy=[*(r.get("busy") or []), name]))
-            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+            return acted(request, run_id, name)
         if run["status"] != "completed" or run.get("cleanup_status"):
             raise HTTPException(409, "Only a completed run that is not cleaned up can act on its devices")
         if action == "enroll" and (run["use_case"] not in FIELD_START or device.get("issued") or device.get("container")):
@@ -829,7 +867,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         except Exception:  # no client (connection gone or changed) – the device must not stay busy
             devices.commit(store, run_id, lambda r: r.update(busy=[n for n in r.get("busy") or [] if n != name]))
             raise
-        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        return acted(request, run_id, name)
 
     @app.post("/runs/{run_id}/enroll")
     async def enroll_run(run_id: str):
@@ -919,6 +957,19 @@ def _asset_hash(directory: Path) -> str:
 def _public(conn: dict) -> dict:
     """Connection data for templates – never the API key."""
     return {k: v for k, v in conn.items() if k != "api_key"}
+
+
+def live_phase(run: dict) -> str:
+    """What decides the whole run page (stepper, header, which cards exist): a change reloads it. UC-4 renewing is a
+    device acting, not a phase – the run stays in its result phase."""
+    status = "completed" if run["status"] == "renewing" else run["status"]
+    return f"{status}|{run.get('cleanup_status') or ''}"
+
+
+def live_busy(run: dict) -> str:
+    """What is acting on the run's devices (devices, adding, firmware; UC-4: its renewal) – a change swaps the cards
+    that show device results in place."""
+    return ",".join([*((run.get("result") or {}).get("busy") or []), *(["renewing"] if run["status"] == "renewing" else [])])
 
 
 def _clock(seconds: float) -> str:

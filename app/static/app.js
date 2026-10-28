@@ -186,19 +186,36 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && event.target.matches("[data-certs]")) openCertificates(event.target);
 });
 
-// While a batch issues, the polled wall pops the cells whose state changed.
+// While a batch issues (the card is polled) or a device starts or finishes (the card is swapped out of band), the
+// wall pops the cells whose state changed and keeps the counter filter picked.
 let wallBefore = null;
-document.addEventListener("htmx:beforeSwap", (event) => {
-  if (event.detail.target.id === "devices") {
-    wallBefore = [...event.detail.target.querySelectorAll(".wall use")].map((cell) => cell.getAttribute("class"));
-  }
-});
+function keepWall(event) {
+  const target = event.detail.target;
+  if (target.id !== "devices" || !target.querySelector(".wall")) return;
+  const cells = [...target.querySelectorAll(".wall use")];
+  wallBefore = {
+    cells: cells.map((cell) => cell.getAttribute("class").replace(/ ?\b(pop|selected)\b/g, "")),
+    filter: target.querySelector(".wall").dataset.filter,
+    selected: cells.findIndex((cell) => cell.classList.contains("selected")),
+  };
+}
+document.addEventListener("htmx:beforeSwap", keepWall);
+document.addEventListener("htmx:oobBeforeSwap", keepWall);
 document.addEventListener("htmx:afterSettle", () => {
   if (!wallBefore) return;
-  document.querySelectorAll("#devices .wall use").forEach((cell, i) => {
-    if (wallBefore[i] !== undefined && wallBefore[i] !== cell.getAttribute("class")) cell.classList.add("pop");
-  });
+  const { cells, filter, selected } = wallBefore;
   wallBefore = null;
+  const wall = document.querySelector("#devices .wall");
+  if (!wall) return;
+  wall.querySelectorAll("use").forEach((cell, i) => {
+    if (cells[i] !== undefined && cells[i] !== cell.getAttribute("class")) cell.classList.add("pop");
+    if (i === selected) cell.classList.add("selected");
+  });
+  const chip = filter && document.querySelector(`#devices .wall-chip[data-filter="${filter}"]`);
+  if (chip) {
+    wall.dataset.filter = filter;
+    chip.setAttribute("aria-pressed", "true");
+  }
 });
 
 // Timeline Debug toggle: every API call and heartbeat, full height – remembered in this browser only

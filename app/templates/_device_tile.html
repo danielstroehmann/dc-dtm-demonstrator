@@ -1,6 +1,7 @@
 {% from "_icons.html" import icon, pill %}
 {# One device tile (see _device_card.html) – also served alone while its device acts and in the wall's side panel, so
-   the tile follows the device live. Needs run, d (from tiles.devices) and loop_index. #}
+   the tile follows the device live. Needs run, d (from tiles.devices) and loop_index. Its buttons post with htmx: the
+   answer swaps the run page's live parts in place (_run_update.html) – no reload. #}
 {% set r = run.result %}
 {% set p = run.params %}
 {% set uc = run.use_case %}
@@ -16,7 +17,7 @@
     {% set installed = d.firmware or 1 %}
     {# A window into the minion: only what the device itself reports – a running one is watched for updates #}
     {% set watched = minion and d.container and not busy and open %}
-    <section class="device-tile{% if current %} enrolled{% endif %}" id="tile-{{ loop_index }}"
+    <section class="device-tile{% if current %} enrolled{% endif %}" id="tile-{{ loop_index }}"{% if tile_oob %} hx-swap-oob="true"{% endif %}
       {% if busy or watched %}hx-get="/runs/{{ run.id }}/devices/{{ d.name }}/tile?i={{ loop_index }}" hx-trigger="every {{ '2s' if busy else '5s' }}" hx-swap="outerHTML"{% endif %}>
       <div class="device-head">
         <span class="device-icon">{{ icon("chip") }}</span>
@@ -82,18 +83,19 @@
         <span class="muted">{% if busy and minion %}{{ stages.get(d.stage, d.stage) | capitalize }} …{% elif d.last %}{{ d.last.action }} in {{ "%.2f" | format(d.last.seconds) }} s{% endif %}</span>
         {% if open and uc == "uc04" %}
         {% set limit = max_renewals(run) %}
-        <form method="post" action="/runs/{{ run.id }}/renew" class="inline">
+        <form method="post" action="/runs/{{ run.id }}/renew" hx-post="/runs/{{ run.id }}/renew" hx-target="#live" hx-swap="outerHTML" class="inline">
           <button type="submit" class="btn-sm btn-icon" {% if busy or (r.renewals or []) | length >= limit %}disabled{% endif %}
                   {% if busy %}aria-busy="true"{% endif %}
                   {% if (r.renewals or []) | length >= limit %}data-tip="At most {{ limit }} renewals per run"{% endif %}>{{ icon("refresh") }}Renew</button>
         </form>
         {% elif uc == "uc05" and run.status == "paused" and not run.cleanup_status and not d.issued %}
-        <form method="post" action="/runs/{{ run.id }}/devices/{{ d.name }}/enroll" class="inline">
+        <form method="post" action="/runs/{{ run.id }}/devices/{{ d.name }}/enroll" hx-post="/runs/{{ run.id }}/devices/{{ d.name }}/enroll" hx-target="#live" hx-swap="outerHTML" class="inline">
           <button type="submit" class="btn-sm btn-icon field-action" {% if busy %}disabled aria-busy="true"{% endif %}>{{ icon("key") }}Enroll</button>
         </form>
         {% elif open and advanced %}
         {% set used = renewals_of(r, d.name) %}
-        <form method="post" action="/runs/{{ run.id }}/devices/{{ d.name }}/{{ 'renew' if d.issued else 'enroll' }}" class="inline">
+        {% set url = "/runs/" ~ run.id ~ "/devices/" ~ d.name ~ ("/renew" if d.issued else "/enroll") %}
+        <form method="post" action="{{ url }}" hx-post="{{ url }}" hx-target="#live" hx-swap="outerHTML" class="inline">
           {% if minion and not d.issued %}
           {% if not d.container %}<button type="submit" class="btn-sm btn-icon field-action" {% if busy %}disabled{% endif %}
                   {% if busy %}aria-busy="true"{% endif %}>{{ icon("container") }}Start IoT minion</button>{% endif %}

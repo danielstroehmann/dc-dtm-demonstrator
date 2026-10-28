@@ -3,7 +3,7 @@
 {% set r = run.result %}
 {# A web UI batch run waiting for the portal has nothing to show yet – no empty card #}
 {% if r.duration_s is defined or r.devices or r.response or r.portal_values or r.checks %}
-<article class="card">
+<article class="card" id="overview"{% if oob %} hx-swap-oob="true"{% endif %}>
   <div class="card-head"><h2>Overview</h2></div>
   {% if r.devices %}{% set done = (r.renewals or []) | rejectattr("failed") | list %}{% set last = done[-1] if done else none %}
   {# The devices themselves follow as tiles (_devices.html) #}

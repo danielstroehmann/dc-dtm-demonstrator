@@ -1,0 +1,4 @@
+{# The timeline's list – polled while anything is active; swapped out of band when a device starts or finishes. #}
+<ol class="timeline" id="timeline"{% if oob %} hx-swap-oob="true"{% endif %} {% if active %}hx-get="/runs/{{ run.id }}/timeline" hx-trigger="every 1s" hx-swap="innerHTML"{% endif %}>
+  {% include "_timeline_items.html" %}
+</ol>

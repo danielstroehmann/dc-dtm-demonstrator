@@ -18,9 +18,9 @@
 {%- elif name == "inbox" %}<path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1 2h6l1-2h5"/>
 {%- endif %}</svg>
 {%- endmacro %}
-{% macro pill(status) -%}
+{% macro pill(status, oob="") -%}
 {%- set kind = {"completed": "ok", "done": "ok", "failed": "bad", "interrupted": "bad", "running": "run", "pending": "run", "waiting": "run", "paused": "", "renewing": "run", "enrolling": "run", "active": "ok", "passed": "ok"}.get(status, "") -%}
-<span class="pill {{ kind }}">{{ status }}</span>
+<span class="pill {{ kind }}"{% if oob %} hx-swap-oob="{{ oob }}"{% endif %}>{{ status }}</span>
 {%- endmacro %}
 {# The run's lifetime until the automatic rollback: a circle filling in quarters – green, orange in the last one;
    an empty grey circle once the watchdog gave up (parked) #}

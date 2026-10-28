@@ -231,7 +231,7 @@ def test_batch_overview_says_all_requests(configured_user, store, enroll_net):
 
 def enroll_buttons(html: str) -> list[str]:
     """The devices whose tile offers the field enrollment (no run-wide button any more)."""
-    return re.findall(r'<form method="post" action="/runs/\w+/devices/([\w-]+)/enroll" class="inline">\s*'
+    return re.findall(r'<form method="post" action="/runs/\w+/devices/([\w-]+)/enroll"[^>]* class="inline">\s*'
                       r'<button type="submit" class="btn-sm btn-icon field-action"\s*>.*?Enroll</button>', html, re.S)
 
 

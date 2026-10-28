@@ -1,5 +1,6 @@
-{# Polled every second while the run or its cleanup is active; reloads the page once it ends. #}
-<div id="live" {% if active %}hx-get="/runs/{{ run.id }}/live?busy={{ ((run.result or {}).busy or []) | join(',') | urlencode }}" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+{# Polled every second while the run, its cleanup or a device is active. A new phase reloads the page; a device starting
+   or finishing swaps the cards that show devices in place (_run_update.html). #}
+<div id="live" {% if active %}hx-get="/runs/{{ run.id }}/live?busy={{ live_busy | urlencode }}&amp;phase={{ live_phase | urlencode }}" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
   {# The run status sits in the page header; only an unfinished cleanup is reported here. #}
   {% if run.cleanup_status and run.cleanup_status != "done" %}
   <p class="status-line">Cleanup: <span class="status {{ run.cleanup_status }}">{{ run.cleanup_status }}</span></p>
