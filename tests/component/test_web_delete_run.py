@@ -266,7 +266,7 @@ def test_running_rollback_shows_in_the_buttons_box_and_polls(configured_store, u
     meter = re.search(r'<span class="row-action rollback-meter ([^"]+)" role="progressbar"([^>]*)>', slot)
     assert meter and meter.group(1) == cls
     assert (aria in meter.group(2)) if aria else "aria-valuenow" not in meter.group(2)
-    assert f'data-tip="{(progress or {}).get("label") or "Rolling back"}"' in meter.group(2)
+    assert "data-tip-card" in meter.group(2) and 'data-tip="' not in meter.group(2)  # a hover card, not a text tip
     assert f"<span>{text}</span>" in slot and "<button" not in slot and "<form" not in slot
     assert " style=" not in slot  # CSP: the fill is a class
 
@@ -412,4 +412,6 @@ def test_meter_shows_the_short_phase_and_the_full_label_as_tooltip(configured_st
     store.update_run("r1", status="completed", cleanup_mode="full", cleanup_status="running", progress=progress)
     slot = action_slot(user.get("/").text, "r1")
     assert f"<span>{text}</span>" in slot
-    assert f'data-tip="{progress["label"]}"' in slot and f'aria-valuetext="{progress["label"]}"' in slot
+    assert f'aria-valuetext="{progress["label"]}"' in slot
+    card = slot[slot.index('<template><div class="tip-card">'):]
+    assert f"<p>{progress['label']}</p>" in card and "<progress" in card  # the hover card: full label + bar

@@ -21,7 +21,15 @@
     <span class="row-action rollback-meter {{ 'indeterminate' if share is none else 'p-%d' % share }}" role="progressbar" aria-label="Full rollback running" tabindex="0"
           aria-valuetext="{{ pg.label or 'Rolling back' }}"
           {% if share is not none %}aria-valuenow="{{ share }}" aria-valuemin="0" aria-valuemax="100"{% endif %}
-          data-tip="{{ pg.label or 'Rolling back' }}"><span>{% if share is not none %}Revoking {{ pg.done }}/{{ pg.total }}{% else %}{{ pg.short or "Rolling back" }}{% endif %}</span></span>
+          data-tip-card><span>{% if share is not none %}Revoking {{ pg.done }}/{{ pg.total }}{% else %}{{ pg.short or "Rolling back" }}{% endif %}</span>
+      {#- The hover card (app.js copies it into the tooltip and follows the row's refresh) -#}
+      <template><div class="tip-card">
+        <div class="tip-card-head"><strong>Full rollback</strong><span class="elapsed" {% if pg.started %}data-since="{{ pg.started }}"{% endif %}></span></div>
+        <p>{{ pg.label or "Rolling back" }}</p>
+        {% if share is not none %}<progress value="{{ pg.done }}" max="{{ pg.total }}"></progress>
+        <p class="tip-card-foot"><span>{{ pg.done }} of {{ pg.total }} done</span><span>{{ share }} %</span></p>
+        {% else %}<progress></progress>{% endif %}
+      </div></template></span>
     {% elif run.rolled_back -%}
     <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">
       <button type="submit" class="row-action secondary outline" aria-label="Delete run {{ run.id }}">Delete</button>

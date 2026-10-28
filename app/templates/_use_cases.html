@@ -4,7 +4,7 @@
 <form method="get">
   {% if connections | length > 1 %}
   <label class="conn-select">Connection
-    <select name="connection">
+    <select name="connection" data-hosts="{% for c in connections %}{{ c.id }}={{ c.host }} {% endfor %}">
       {% for c in connections %}<option value="{{ c.id }}" {% if c.id == selected %}selected{% endif %}>{{ c.name }} · {{ c.host }}</option>{% endfor %}
     </select>
   </label>
@@ -17,7 +17,11 @@
                      else ("Needs the IoT minion runtime (Docker)" if key == "uc08" and not minions_ready else "") %}
     <article class="tile{% if missing %} unavailable{% endif %}">
       <div class="tile-top"><span class="tile-icon{% if uc.license == "advanced" %} advanced{% endif %}{% if key == "uc08" %} dark{% endif %}" data-tip="{{ uc.tip or ('Advanced license' if uc.license == 'advanced' else uc.title) }}">{{ icon(icons.get(key, "key")) }}</span>
-        <h3>{{ uc.title }}</h3></div>
+        <h3>{{ uc.title }}</h3>
+        {# Bound to a platform, but another connection is selected above: the run takes the platform's connection #}
+        {% if uc.platform and not missing and connections | length > 1 %}{% set warn = "Runs on your " ~ uc.platform ~ " connection – the other platform does not support it yet" %}
+        <span class="platform-warn" data-platform="{{ uc.platform }}" data-tip="{{ warn }}" tabindex="0" aria-label="{{ warn }}"
+          {% if (connections | selectattr("id", "equalto", selected) | map(attribute="host") | first) == uc.platform %}hidden{% endif %}>{{ icon("alert") }}</span>{% endif %}</div>
       <ul class="tags">{% for tag in uc.tags %}<li>{{ tag }}</li>{% endfor %}</ul>
       <div class="tile-foot"><span {% if missing %}data-tip="{{ missing }}"{% endif %}><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"
         aria-label="Start {{ uc.title }}" {% if missing %}disabled{% endif %}>{{ icon("play") }}Start</button></span></div>

@@ -250,3 +250,24 @@ def test_several_connections_on_the_same_host_can_be_saved(two, store, fakes):
         ("US again", HOST, ACCOUNT_ID), ("NL again", HOST, OTHER_ACCOUNT_ID)])
     response = save(name="us AGAIN", account_id=OTHER_ACCOUNT_ID, api_key=KEY_B)
     assert response.status_code == 400 and "already exists" in response.text and len(store.connections()) == 4
+
+
+def test_platform_bound_tile_warns_while_another_platform_is_selected(store, auth, fakes, data_dir, monkeypatch):
+    """UC-8 runs on US only: with an NL connection selected its tile shows the warning, with US it is hidden."""
+    from tests.component.test_web_uc08 import FakeDocker
+    FakeDocker().install(monkeypatch)
+    us = store.save_connection(None, "US", HOST, ACCOUNT_ID, API_KEY)
+    nl = store.save_connection(None, "NL", "one.nl.digicert.com", OTHER_ACCOUNT_ID, KEY_B)
+    app = create_app(store, auth, client_factory=lambda c, o: DTMClient(c, o, transport=fakes[c.account_id].transport()),
+                     data_dir=data_dir)
+    with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as client:
+        client.post("/login", data={"password": PASSWORD})
+
+        def warning(connection):
+            html = client.get(f"/runs/new?connection={connection}").text
+            found = re.findall(r'<span class="platform-warn" data-platform="([^"]+)"[^>]*?(hidden)?>', html)
+            hosts = re.search(r'data-hosts="([^"]*)"', html).group(1).split()  # the select tells the script
+            assert sorted(hosts) == sorted([f"{us}={HOST}", f"{nl}=one.nl.digicert.com"])
+            return found
+
+        assert warning(nl) == [(HOST, "")] and warning(us) == [(HOST, "hidden")]

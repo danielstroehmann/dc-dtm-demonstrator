@@ -41,10 +41,24 @@ function tipText(el) {
   return el.matches(TRUNCATING) && el.scrollWidth > el.clientWidth ? el.textContent.trim() : "";
 }
 
+// A hover card (data-tip-card): its <template> child is shown instead of a text – e.g. a rollback's progress
+function elapsed(since) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - since));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+let tipOwner = null;
+
 function showTip(el) {
-  const text = tipText(el);
-  if (!text) return;
-  tip.textContent = text;
+  const card = el.matches("[data-tip-card]") && el.querySelector(":scope > template");
+  const text = card ? "" : tipText(el);
+  if (!card && !text) return;
+  if (card) {
+    tip.replaceChildren(card.content.cloneNode(true));
+    tip.querySelectorAll("[data-since]").forEach((n) => { n.textContent = elapsed(Number(n.dataset.since)); });
+  } else tip.textContent = text;
+  tip.classList.toggle("card", !!card);
+  tipOwner = el;
   tip.classList.add("show");
   const box = el.getBoundingClientRect();
   const left = Math.min(Math.max(8, box.left + box.width / 2 - tip.offsetWidth / 2),
@@ -55,15 +69,26 @@ function showTip(el) {
   tip.style.top = `${(above < 0 ? box.bottom + 8 : above) + window.scrollY}px`;
 }
 
-function hideTip() { tip.classList.remove("show"); }
+function hideTip() { tip.classList.remove("show"); tipOwner = null; }
 
+const TIPPED = `[data-tip], [data-tip-card], ${TRUNCATING}`;
 for (const [on, off] of [["mouseover", "mouseout"], ["focusin", "focusout"]]) {
   document.addEventListener(on, (event) => {
-    const el = event.target.closest(`[data-tip], ${TRUNCATING}`);
+    const el = event.target.closest(TIPPED);
     if (el) showTip(el);
   });
-  document.addEventListener(off, hideTip);
+  document.addEventListener(off, (event) => {
+    // moving within the element (onto its own text) keeps the tip
+    if (!(tipOwner && event.relatedTarget && tipOwner.contains(event.relatedTarget))) hideTip();
+  });
 }
+// A hover card under the pointer follows its row's refresh (the old element is gone after the swap)
+document.addEventListener("htmx:afterSettle", () => {
+  if (!tipOwner || tipOwner.isConnected) return;
+  const hovered = [...document.querySelectorAll(":hover")].pop();
+  const el = hovered && hovered.closest("[data-tip-card]");
+  if (el) showTip(el); else hideTip();
+});
 document.addEventListener("scroll", hideTip, { passive: true });
 
 // Guided form (New run → Evergreen Device IDs): a question is shown only while its data-when
@@ -237,3 +262,12 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("DOMContentLoaded", () => applyDebug(storedDebug()));
 document.addEventListener("htmx:afterSwap", () => applyDebug(storedDebug()));
+
+// Use-case tiles: a tile bound to another platform than the selected connection shows its warning
+document.querySelectorAll(".conn-select select").forEach((select) => {
+  select.addEventListener("change", () => {
+    const hosts = Object.fromEntries(select.dataset.hosts.trim().split(/\s+/).map((pair) => pair.split("=")));
+    const host = hosts[select.value];
+    select.form.querySelectorAll(".platform-warn").forEach((w) => { w.hidden = w.dataset.platform === host; });
+  });
+});
