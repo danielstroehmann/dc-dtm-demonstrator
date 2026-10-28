@@ -12,6 +12,7 @@ certificate may have been renewed while the demonstrator was down; if they are n
 from them serves. The .env pair is always written as default-*.pem too: that is what "Reset to
 default" in Settings goes back to – the app itself cannot read the files .env points to."""
 
+import fcntl
 import json
 import os
 import stat
@@ -41,6 +42,10 @@ GROUP = int(os.environ.get("TLS_GROUP", "10001"))
 
 
 class TLSError(Exception):
+    pass
+
+
+class KeyMismatch(TLSError):
     pass
 
 
@@ -94,7 +99,7 @@ def check(chain: list[x509.Certificate], key) -> x509.Certificate:
     leaf = chain[0]
     public = lambda k: k.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)  # noqa: E731
     if public(leaf.public_key()) != public(key.public_key()):
-        raise TLSError("the private key does not belong to the certificate (the server certificate must come first)")
+        raise KeyMismatch("the private key does not belong to the certificate (the server certificate must come first)")
     return leaf
 
 
@@ -108,12 +113,46 @@ def usable(chain: list[x509.Certificate], key) -> x509.Certificate:
     return leaf
 
 
+def _read_open(fd: int) -> bytes | None:
+    """At most MAX_SIZE + 1 bytes of an open regular file – None for anything else (a FIFO, a device, a directory)."""
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        return None
+    with os.fdopen(fd, "rb", closefd=False) as handle:
+        return handle.read(MAX_SIZE + 1)
+
+
+def read_private(path: Path) -> bytes:
+    """One of the services' own small files (a request, the host paths) in the directory the app writes to as well:
+    no link followed, no FIFO waited for, nothing large. OSError, or ValueError for anything but such a file."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        data = _read_open(fd)
+    finally:
+        os.close(fd)
+    if data is None or len(data) > MAX_SIZE:
+        raise ValueError(f"{path.name} is not a small regular file")
+    return data
+
+
+def _opened_inside(fd: int, real: Path, root: Path) -> bool:
+    """What was opened, not what was resolved before: a link swapped in between must not lead out of the directory."""
+    try:
+        opened = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:  # no /proc (macOS, development only): the file opened must still be the one resolved
+        try:
+            return os.path.samestat(os.fstat(fd), os.lstat(real))
+        except OSError:
+            return False
+    return Path(opened).is_relative_to(root)
+
+
 def read_host(path: str, what: str) -> bytes:
     """A file below HOST_DIR – also after following its links, so Settings cannot read any other file."""
     if not HOST_DIR:
         raise TLSError("no host directory is configured – set TLS_HOST_DIR in .env")
+    root = Path(HOST_DIR).resolve()
     real = Path(os.path.realpath(path))
-    if not real.is_relative_to(Path(HOST_DIR).resolve()):
+    if not real.is_relative_to(root):
         raise TLSError(f"{what} {path} is outside {HOST_DIR} (links followed)")
     try:
         fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)  # non-blocking: a FIFO must not hang the service
@@ -124,15 +163,14 @@ def read_host(path: str, what: str) -> bytes:
     except OSError as exc:  # e.g. not root's: the service has no CAP_DAC_OVERRIDE
         raise TLSError(f"{what} {path} cannot be read – it must be readable by root") from exc
     try:
-        regular = stat.S_ISREG(os.fstat(fd).st_mode)
-        if regular:
-            with os.fdopen(fd, "rb", closefd=False) as handle:
-                data = handle.read(MAX_SIZE + 1)
+        if not _opened_inside(fd, real, root):
+            raise TLSError(f"{what} {path} is outside {HOST_DIR} (links followed)")
+        data = _read_open(fd)
     except OSError as exc:
         raise TLSError(f"{what} {path} cannot be read") from exc
     finally:
         os.close(fd)
-    if not regular:
+    if data is None:
         raise TLSError(f"{what} {path} is not a file")
     if len(data) > MAX_SIZE:
         raise TLSError(f"{what} {path} is larger than 1 MB – not a certificate or key")
@@ -176,13 +214,33 @@ def pem_pair(chain: list[x509.Certificate], key) -> tuple[bytes, bytes]:
 
 
 def write_file(path: Path, data: bytes, private: bool) -> None:
+    """Atomic (the proxy never sees half a file) – and never through a link planted in the shared directory: the
+    root services write here as well as the app."""
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data)
-    if os.geteuid() == 0:  # the tls service: hand the file to the app's group (an owner may chgrp to its own groups)
-        with suppress(OSError):  # not a member (compose without group_add): the directory warning says it all
-            os.chown(tmp, -1, GROUP)
-    tmp.chmod(0o640 if private else 0o644)
-    tmp.replace(path)  # atomic: the proxy never sees half a file
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        if os.geteuid() == 0:  # the tls services: hand it to the app's group (an owner may chgrp to its own groups)
+            with suppress(OSError):  # not a member (compose without group_add): the directory warning says it all
+                os.fchown(fd, -1, GROUP)
+        os.fchmod(fd, 0o640 if private else 0o644)
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(data)
+    finally:
+        os.close(fd)
+    tmp.replace(path)
+
+
+def lock(directory: Path) -> int:
+    """Blocks until this process holds the exclusive flock on the shared directory – the `tls` service, the app and
+    tls-watch change its files one at a time. Closing the returned descriptor releases it."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def write(chain: list[x509.Certificate], key, names: tuple[str, str] = ACTIVE) -> None:
@@ -216,7 +274,7 @@ def from_settings() -> tuple[list[x509.Certificate], object] | None:
 def from_host() -> tuple[list[x509.Certificate], object] | None:
     """Host paths chosen in Settings, read again; on success they are the Settings pair from now on."""
     try:
-        config = json.loads((TARGET / HOST_PATHS).read_bytes())
+        config = json.loads(read_private(TARGET / HOST_PATHS))
         chain, key = load_host(config)
     except FileNotFoundError:
         return None
@@ -230,6 +288,16 @@ def from_host() -> tuple[list[x509.Certificate], object] | None:
 
 
 def main() -> int:
+    if not TARGET.is_dir():  # nobody else can be changing files in it
+        return _main()
+    fd = lock(TARGET)  # tls-watch may already run (or the app, on a restart of this service alone)
+    try:
+        return _main()
+    finally:
+        os.close(fd)
+
+
+def _main() -> int:
     settings = from_host() or from_settings()
     try:
         kind, chain, key = resolve()

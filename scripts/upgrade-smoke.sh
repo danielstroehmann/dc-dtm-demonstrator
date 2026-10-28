@@ -25,7 +25,7 @@ compose() { docker compose -p "$project" --project-directory "$dir" -f "$dir/doc
 # shellcheck disable=SC2329  # invoked by the trap
 cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; $as_root rm -rf "$dir"; }
 trap cleanup EXIT
-fail() { echo "upgrade smoke: FAIL – $*" >&2; compose logs tls proxy app 2>&1 | tail -60 >&2; exit 1; }
+fail() { echo "upgrade smoke: FAIL – $*" >&2; compose logs tls tls-watch proxy app 2>&1 | tail -60 >&2; exit 1; }
 ok() { echo "upgrade smoke: ok – $*"; }
 
 url="https://localhost:$port"
@@ -99,11 +99,13 @@ compose down --remove-orphans >/dev/null
 cp "$repo/deploy/docker-compose.yml" "$repo/deploy/Caddyfile" "$dir/"
 env_set DEMONSTRATOR_IMAGE "$new_image"
 grep -q '^MINION_INSTANCE=' "$dir/.env" || env_set MINION_INSTANCE "dtm-$(openssl rand -hex 4)"
+mkdir -p "$dir/tls-host" && chmod 700 "$dir/tls-host"  # mounted in place of an unset TLS_HOST_DIR
 if $linux && [ "${SKIP_INSTALLER_CHOWN:-}" != 1 ]; then
 	$as_root chown 0:10001 "$dir/tls-live" && $as_root chmod 770 "$dir/tls-live"
 fi
-compose up -d --quiet-pull app tls proxy || fail "new stack does not start on the old data"
+compose up -d --quiet-pull app tls tls-watch proxy || fail "new stack does not start on the old data"
 healthy "new version"
+[ -n "$(compose ps -q --status running tls-watch)" ] || fail "tls-watch does not run on the old data"
 
 [ "$(served)" = "$old_cert" ] || fail "the update changed the served certificate"
 [ "$(curl_ -o /dev/null -w '%{http_code}' -b "$dir/cookies" "$url/")" = 200 ] || fail "the old session is not valid any more"
@@ -139,7 +141,7 @@ code=$(upload)
 [ "$(served)" = "$(fingerprint "$dir/up-cert.pem")" ] || fail "the Settings certificate is not served live"
 ok "Settings certificate applied live"
 compose down >/dev/null
-compose up -d app tls proxy >/dev/null || fail "restart"
+compose up -d app tls tls-watch proxy >/dev/null || fail "restart"
 healthy "restart"
 [ "$(served)" = "$(fingerprint "$dir/up-cert.pem")" ] || fail "the Settings certificate is lost after a restart"
 docker kill "$(compose ps -q proxy)" >/dev/null && compose up -d proxy >/dev/null

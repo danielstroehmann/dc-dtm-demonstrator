@@ -9,21 +9,25 @@ The app writes a request with a fresh id (tls_settings.REQUEST); within a second
 upload, applies them live (rollback included, tls_settings) and answers in STATUS with that id. The applied paths are
 kept in HOST_PATHS – with the PKCS#12 password, because every renewal has to be opened again (0640, the app's group;
 never logged or shown). Every minute the files are read again: a renewed certificate is applied, an unusable one keeps
-the current certificate, and the error shows in Settings until the files are fine again."""
+the current certificate, and the error shows in Settings until the files are fine again. The first check waits a
+minute too: at start the `tls` service has just read the host paths, and the proxy may not be up yet. A proxy that
+cannot be reached keeps the new files (Caddy reads them when it starts); the reload is retried every second."""
 
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
 
 from . import tls_settings, tls_setup
-from .tls_settings import STATUS, REQUEST, ApplyError
+from .tls_settings import STATUS, REQUEST, ApplyError, Unreachable
 from .tls_setup import HOST_PATHS, SETTINGS, TLSError
 
 log = logging.getLogger("demonstrator")
 INTERVAL = 60  # seconds between renewal checks
 POLL = 1  # seconds between looks for a request
+SETTLE = 2  # seconds; certbot swaps the live links one by one – a key mismatch is read again once after this
 _state: dict = {}  # what STATUS says: the last request answered, the last renewal check
 
 
@@ -35,23 +39,37 @@ def _write_status() -> None:
     tls_setup.write_file(tls_settings.LIVE / STATUS, json.dumps(_state).encode(), private=True)
 
 
+def _apply(chain, key, config: dict) -> None:
+    try:
+        tls_settings.apply_host(chain, key, config)
+    except Unreachable:
+        if not _state.get("reload_pending"):
+            log.warning("TLS: the certificate is stored – the proxy picks it up when it can be reached")
+        _state["reload_pending"] = True
+    else:
+        _state["reload_pending"] = False
+
+
 def handle_request() -> None:
     path = tls_settings.LIVE / REQUEST
-    try:
-        request = json.loads(path.read_bytes())
-        request_id = str(request["id"])
-        fields = [str(request.get(k, "")) for k in ("certificate", "private_key", "keystore", "password")]
-    except FileNotFoundError:
+    if not os.path.lexists(path):
         return
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        log.warning("TLS: unreadable host path request ignored (%s)", type(exc).__name__)
-        path.unlink(missing_ok=True)
-        return
+    # Read under the lock: the app withdraws an unanswered request under it, so a withdrawn one is never applied.
     with tls_settings.locked():
+        try:
+            request = json.loads(tls_setup.read_private(path))
+            request_id = str(request["id"])
+            fields = [str(request.get(k, "")) for k in ("certificate", "private_key", "keystore", "password")]
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            log.warning("TLS: unreadable host path request ignored (%s)", type(exc).__name__)
+            path.unlink(missing_ok=True)
+            return
         try:  # the app checked the paths as text already; checked again, the request file is no authority
             config = tls_settings.host_config(str(request.get("mode")), *fields)
             chain, key = tls_setup.load_host(config)
-            tls_settings.apply_host(chain, key, config)
+            _apply(chain, key, config)
         except (TLSError, ApplyError) as exc:
             log.warning("TLS: certificate from the host path refused: %s", exc)
             _state.update(request=request_id, request_error=str(exc))
@@ -59,6 +77,21 @@ def handle_request() -> None:
             log.info("TLS: certificate from the host path applied: %s", chain[0].subject.rfc4514_string())
             _state.update(request=request_id, request_error=None, checked=_now(), error=None)
         path.unlink(missing_ok=True)
+        _write_status()
+
+
+def retry_reload() -> None:
+    """After an unreachable proxy: the stored files are served once a reload gets through."""
+    with tls_settings.locked():
+        try:
+            tls_settings.reload(quiet=True)
+        except Unreachable:
+            return
+        except ApplyError as exc:
+            _state.update(error=str(exc))
+        else:
+            log.info("TLS: the proxy can be reached again – it serves the certificate from the host path")
+        _state["reload_pending"] = False
         _write_status()
 
 
@@ -73,7 +106,7 @@ def check() -> None:
     """A renewal (the links point to new files) is applied; unusable files keep the current certificate."""
     with tls_settings.locked():
         try:
-            config = json.loads((tls_settings.LIVE / HOST_PATHS).read_bytes())
+            config = json.loads(tls_setup.read_private(tls_settings.LIVE / HOST_PATHS))
         except FileNotFoundError:
             return  # no host path chosen, or an upload / reset replaced it
         except (OSError, ValueError) as exc:
@@ -81,12 +114,16 @@ def check() -> None:
             return
         error = None
         try:
-            chain, key = tls_setup.load_host(config)
+            try:
+                chain, key = tls_setup.load_host(config)
+            except tls_setup.KeyMismatch:  # maybe caught in the middle of a renewal
+                time.sleep(SETTLE)
+                chain, key = tls_setup.load_host(config)
             if tls_setup.pem_pair(chain, key) != _current():
-                tls_settings.apply_host(chain, key, config)
+                _apply(chain, key, config)
                 log.info("TLS: renewed certificate from the host path applied: %s, valid until %s",
                          chain[0].subject.rfc4514_string(), f"{chain[0].not_valid_after_utc:%Y-%m-%d}")
-        except (TLSError, ApplyError, KeyError, AttributeError) as exc:
+        except (TLSError, ApplyError, KeyError, AttributeError, TypeError) as exc:
             error = str(exc) if isinstance(exc, (TLSError, ApplyError)) else "the configuration is not usable"
         if error and error != _state.get("error"):  # once per new problem, not every minute
             log.warning("TLS: the certificate from the host path stays as it is: %s", error)
@@ -99,9 +136,11 @@ def check() -> None:
 def run(rounds: int | None = None) -> None:
     """The service's loop; `rounds` bounds it for tests."""
     _state.update(tls_settings._json(STATUS))
-    next_check = 0.0
+    next_check = time.monotonic() + INTERVAL
     while rounds is None or rounds > 0:
         _safely(handle_request)
+        if _state.get("reload_pending"):
+            _safely(retry_reload)
         if time.monotonic() >= next_check:
             _safely(check)
             next_check = time.monotonic() + INTERVAL

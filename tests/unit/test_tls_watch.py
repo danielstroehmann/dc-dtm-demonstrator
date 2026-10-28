@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography import x509
@@ -61,6 +62,7 @@ def started(caddy, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setattr(tls_setup, "TARGET", caddy.live)
     monkeypatch.setattr(tls_setup, "SOURCE", tmp_path / "tls-in")  # nothing in .env
     monkeypatch.setattr(tls_watch, "_state", {})
+    monkeypatch.setattr(tls_watch, "SETTLE", 0)
     tls_setup.write([cert], key, tls_setup.DEFAULT)
     tls_setup.write([cert], key)
     caddy.served = cert
@@ -237,17 +239,37 @@ def test_request_outside_the_directory_is_refused_by_the_watcher_too(caddy, star
     assert caddy.requests == []
 
 
-@pytest.mark.parametrize("fail", ["refuse", "unreachable"])
-def test_a_reload_failure_rolls_back(caddy, started, host, fail):  # noqa: F811
+def test_a_refused_reload_rolls_back(caddy, started, host):  # noqa: F811
     issue(host, 1)
     before = files(caddy.live)
-    caddy.fail = fail
+    caddy.fail = "refuse"
     request(pem_config(host))
     tls_watch.handle_request()
-    assert answer()["request_error"] in ("The proxy refused the certificate – the previous one stays active.",
-                                         "The proxy could not be reached – the previous certificate stays active.")
+    assert answer()["request_error"] == "The proxy refused the certificate – the previous one stays active."
     assert files(caddy.live) == before
     assert caddy.served == started and tls_settings.status()["source"] == "Self-signed default"
+
+
+def test_an_unreachable_proxy_keeps_the_files_and_the_reload_is_retried(caddy, started, host, caplog):  # noqa: F811
+    """At start the watcher may run before the proxy: the new files stay (Caddy reads them when it starts) instead
+    of a rollback to what was there before."""
+    cert, _ = issue(host, 1)
+    caddy.fail = "unreachable"
+    request(pem_config(host))
+    tls_watch.handle_request()
+    status = answer()
+    assert status["request_error"] is None and status["reload_pending"] is True
+    assert x509.load_pem_x509_certificates((caddy.live / "cert.pem").read_bytes()) == [cert]
+    assert not [p for p in caddy.live.iterdir() if p.name.endswith(".bak")]
+    info = tls_settings.status()
+    assert info["source"] == "From host path" and info["check_error"] == tls_settings.RELOAD_PENDING
+    caplog.clear()
+    tls_watch.retry_reload()  # still down: nothing changes, and no warning every second
+    assert answer()["reload_pending"] is True and caddy.served == started and "not reachable" not in caplog.text
+    caddy.fail = None
+    tls_watch.retry_reload()
+    assert caddy.served == cert and answer()["reload_pending"] is False
+    assert tls_settings.status()["check_error"] is None
 
 
 def test_unreadable_request_is_dropped(caddy, started):  # noqa: F811
@@ -322,6 +344,76 @@ def test_an_old_answer_is_not_taken_for_the_new_request(caddy, started, host, mo
         tls_settings.request_host(pem_config(host))
 
 
+def _blocked(target) -> tuple[threading.Thread, list]:
+    """target() in a thread that is expected to wait for the lock; its exception, if any, is kept."""
+    errors = []
+
+    def run():
+        try:
+            target()
+        except Exception as exc:  # noqa: BLE001 – handed to the test
+            errors.append(exc)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, errors
+
+
+def test_a_request_withdrawn_while_the_watcher_waits_for_the_lock_is_not_applied(caddy, started, host):  # noqa: F811
+    issue(host, 1)
+    request(pem_config(host))
+    with tls_settings.locked():  # the app, withdrawing after its timeout
+        thread, errors = _blocked(tls_watch.handle_request)
+        thread.join(0.3)
+        assert thread.is_alive()  # waits for the lock
+        (caddy.live / tls_settings.REQUEST).unlink()
+    thread.join(5)
+    assert not thread.is_alive() and errors == []
+    assert caddy.requests == [] and caddy.served == started and not (caddy.live / tls_settings.STATUS).exists()
+
+
+def test_an_answer_given_while_the_app_waits_for_the_lock_counts(caddy, started, host, monkeypatch):  # noqa: F811
+    """A reload can take longer than ANSWER_TIMEOUT: the app then waits for the watcher instead of withdrawing."""
+    cert, _ = issue(host, 1)
+    monkeypatch.setattr(tls_settings, "ANSWER_TIMEOUT", 0.2)
+    taken, release = threading.Event(), threading.Event()
+
+    def slow_watcher():  # takes the request, then holds the lock past the app's timeout
+        while not (caddy.live / tls_settings.REQUEST).exists():
+            time.sleep(0.01)
+        with tls_settings.locked():
+            taken.set()
+            release.wait(5)
+            tls_watch._state.clear()
+            config = json.loads((caddy.live / tls_settings.REQUEST).read_bytes())
+            chain, key = tls_setup.load_host(pem_config(host))
+            tls_settings.apply_host(chain, key, pem_config(host))
+            tls_watch._state.update(request=config["id"], request_error=None)
+            (caddy.live / tls_settings.REQUEST).unlink()
+            tls_watch._write_status()
+    watcher_thread, watcher_errors = _blocked(slow_watcher)
+    app_thread, app_errors = _blocked(lambda: tls_settings.request_host(pem_config(host)))
+    assert taken.wait(5)
+    time.sleep(0.4)  # past ANSWER_TIMEOUT
+    assert app_thread.is_alive()  # waits for the lock instead of withdrawing
+    release.set()
+    app_thread.join(5)
+    watcher_thread.join(5)
+    assert app_errors == [] and watcher_errors == [] and caddy.served == cert
+
+
+def test_the_tls_service_waits_for_the_lock(caddy, host, applied, monkeypatch):  # noqa: F811
+    """At start tls-watch may already run: the one-shot service must not write in the middle of its changes."""
+    renewed, _ = issue(host, 2)
+    with tls_settings.locked():
+        thread, errors = _blocked(tls_setup.main)
+        thread.join(0.3)
+        assert thread.is_alive()
+        assert x509.load_pem_x509_certificates((caddy.live / "cert.pem").read_bytes()) == [applied]
+    thread.join(5)
+    assert not thread.is_alive() and errors == []
+    assert x509.load_pem_x509_certificates((caddy.live / "cert.pem").read_bytes()) == [renewed]
+
+
 # --- renewals ------------------------------------------------------------------------------------------
 
 @pytest.fixture
@@ -371,12 +463,73 @@ def test_an_unusable_renewal_keeps_the_current_certificate(caddy, host, applied,
 
 def test_a_renewal_the_proxy_refuses_is_retried(caddy, host, applied):  # noqa: F811
     renewed, _ = issue(host, 2)
-    caddy.fail = "unreachable"
+    caddy.fail = "refuse"
     tls_watch.check()
-    assert caddy.served == applied and "could not be reached" in answer()["error"]
+    assert caddy.served == applied and answer()["error"].startswith("The proxy refused the certificate")
+    assert x509.load_pem_x509_certificates((caddy.live / "cert.pem").read_bytes()) == [applied]  # rolled back
     caddy.fail = None
     tls_watch.check()
     assert caddy.served == renewed and answer()["error"] is None
+
+
+def test_a_renewal_while_the_proxy_is_down_is_kept_and_reloaded_later(caddy, host, applied):  # noqa: F811
+    renewed, _ = issue(host, 2)
+    caddy.fail = "unreachable"
+    tls_watch.check()
+    assert caddy.served == applied and answer()["reload_pending"] is True and answer()["error"] is None
+    assert x509.load_pem_x509_certificates((caddy.live / "cert.pem").read_bytes()) == [renewed]
+    caddy.fail = None
+    tls_watch.check()  # the files are current: the check itself does not reload ...
+    assert caddy.served == applied
+    tls_watch.retry_reload()  # ... the retry does
+    assert caddy.served == renewed and answer()["reload_pending"] is False
+
+
+def test_a_key_mismatch_in_the_middle_of_a_renewal_is_read_again(caddy, host, applied, monkeypatch):  # noqa: F811
+    """certbot swaps fullchain.pem and privkey.pem one after the other: a check in between must not report an error."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    renewed = make_cert(NAME, key, sans=(NAME,))
+    archive, live = host / "archive" / NAME, host / "live" / NAME
+    (archive / "fullchain2.pem").write_bytes(pem(renewed))
+    (archive / "privkey2.pem").write_bytes(key_pem(key))
+    (live / "fullchain.pem").unlink()
+    (live / "fullchain.pem").symlink_to(f"../../archive/{NAME}/fullchain2.pem")  # the key link still points to 1
+    pauses = []
+
+    def renewal_finishes(seconds):
+        pauses.append(seconds)
+        (live / "privkey.pem").unlink()
+        (live / "privkey.pem").symlink_to(f"../../archive/{NAME}/privkey2.pem")
+    monkeypatch.setattr(tls_watch, "SETTLE", 2)
+    monkeypatch.setattr(tls_watch, "time", SimpleNamespace(sleep=renewal_finishes, monotonic=time.monotonic))
+    tls_watch.check()
+    assert pauses == [2] and caddy.served == renewed and answer()["error"] is None
+
+
+def test_a_malformed_host_path_configuration_is_reported_not_raised(caddy, started, host):  # noqa: F811
+    (caddy.live / tls_setup.HOST_PATHS).write_text(json.dumps({"mode": "pem", "certificate": 1, "private_key": 2}))
+    tls_watch.check()
+    assert answer()["error"] == "the configuration is not usable" and caddy.requests == []
+
+
+@pytest.mark.parametrize("case", ["link", "fifo", "large"])
+def test_the_watchers_own_files_are_read_safely(caddy, started, host, tmp_path, case):  # noqa: F811
+    """A request or settings-paths.json the app's group could replace: no link followed, no FIFO, nothing large."""
+    issue(host, 1)
+    for name in (tls_settings.REQUEST, tls_setup.HOST_PATHS):
+        path = caddy.live / name
+        if case == "link":
+            target = tmp_path / f"{name}.elsewhere"
+            target.write_text(json.dumps({"id": "planted"} | pem_config(host)))
+            path.symlink_to(target)
+        if case == "fifo":
+            os.mkfifo(path)
+        if case == "large":
+            path.write_text(json.dumps({"id": "big", "pad": "x" * tls_setup.MAX_SIZE} | pem_config(host)))
+    tls_watch.handle_request()
+    tls_watch.check()
+    assert caddy.requests == [] and not os.path.lexists(caddy.live / tls_settings.REQUEST)
+    assert not (caddy.live / tls_settings.STATUS).exists()
 
 
 def test_check_without_host_paths_does_nothing(caddy, started):  # noqa: F811
@@ -384,18 +537,25 @@ def test_check_without_host_paths_does_nothing(caddy, started):  # noqa: F811
     assert caddy.requests == [] and not (caddy.live / tls_settings.STATUS).exists()
 
 
-def test_run_handles_requests_and_survives_a_broken_step(caddy, started, host, monkeypatch, caplog):  # noqa: F811
+def test_run_handles_requests_at_once_checks_after_a_minute_and_survives_a_broken_step(
+        caddy, started, host, monkeypatch, caplog):  # noqa: F811
+    """The first check waits INTERVAL: at start the tls service has just read the host paths and the proxy may not
+    be up yet – a check then would race both. Requests are handled in the first round."""
     cert, _ = issue(host, 1)
-    monkeypatch.setattr(tls_watch, "POLL", 0)
-    calls = []
+    clock = [0.0]
+    monkeypatch.setattr(tls_watch, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    calls, handled = [], []
 
     def broken():
-        calls.append(1)
+        calls.append(clock[0])
         raise RuntimeError("disk full")
     monkeypatch.setattr(tls_watch, "check", broken)
     request(pem_config(host))
-    tls_watch.run(rounds=2)
-    assert caddy.served == cert and calls == [1]  # the check ran once (then waits INTERVAL), the request was handled
+    real_handle = tls_watch.handle_request
+    monkeypatch.setattr(tls_watch, "handle_request", lambda: handled.append(clock[0]) or real_handle())
+    tls_watch.run(rounds=tls_watch.INTERVAL + 2)
+    assert caddy.served == cert and handled[0] == 0 and calls == [tls_watch.INTERVAL]
     assert "TLS: broken failed" in caplog.text
 
 

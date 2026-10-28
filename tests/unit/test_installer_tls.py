@@ -52,12 +52,13 @@ def tls(tmp_path):
     env_file = install / ".env"
 
     def run(env_lines: str = "", hosts: str = "demo.local 192.0.2.10", default_sni: str = "192.0.2.10",
-            tls_mode: str = "", tls_cert: str = "", tls_key: str = "", tls_dir: str = "", keep_env: bool = False):
+            tls_mode: str = "", tls_cert: str = "", tls_key: str = "", tls_dir: str | None = None,
+            keep_env: bool = False):
         if not keep_env:
             env_file.write_text(env_lines)
         env = {"PATH": os.environ["PATH"], "INSTALL_DIR": str(install), "env_file": str(env_file), "hosts": hosts,
                "default_sni": default_sni, "tls_mode": tls_mode, "tls_cert": tls_cert, "tls_key": tls_key,
-               "tls_dir": tls_dir}
+               "tls_dir": tls_dir or "", "tls_dir_set": "false" if tls_dir is None else "true"}
         result = subprocess.run([BASH, "-c", _snippet()], capture_output=True, text=True, timeout=60, env=env,
                                 cwd=tmp_path)
         return result, dict(re.findall(r"^([A-Z_0-9]+)='(.*)'$", env_file.read_text(), re.M))
@@ -254,6 +255,78 @@ def test_tls_dir_is_written_and_kept_on_updates(tls, tmp_path):
     assert result.returncode == 0 and env["TLS_HOST_DIR"] == "/etc/digicert"
     result, env = tls(keep_env=True, tls_dir="/srv-certs/acme")  # given again: replaced
     assert env["TLS_HOST_DIR"] == "/srv-certs/acme" and tls.env_file.read_text().count("TLS_HOST_DIR=") == 1
+
+
+@needs_openssl
+def test_tls_dir_can_be_cleared(tls):
+    result, env = tls(tls_dir="/etc/digicert")
+    assert result.returncode == 0 and env["TLS_HOST_DIR"] == "/etc/digicert"
+    result, env = tls(keep_env=True, tls_dir="")  # install.sh --tls-dir ""
+    assert result.returncode == 0, result.stderr
+    assert env["TLS_HOST_DIR"] == "" and tls.env_file.read_text().count("TLS_HOST_DIR=") == 1
+
+
+def test_tls_dir_empty_value_passes_validation(installer):  # noqa: F811
+    result, calls = installer("--version", "v0.1.0", "--tls-dir", "")
+    assert "ERROR" not in result.stderr and calls[:1] == ["mkdir -p /opt/dtm-demonstrator"]
+
+
+def _tls_dir_check(pattern: str) -> str:
+    match = re.search(pattern, INSTALLER.read_text(), re.M | re.S)
+    assert match, "install.sh changed – update the extraction"
+    return match.group(0)
+
+
+@pytest.mark.parametrize("inside,message", [
+    ("install", "--tls-dir must not contain or lie inside {install}: {install}"),
+    ("install/tls", "--tls-dir must not contain or lie inside {install}: {install}/tls"),
+    ("parent", "--tls-dir must not contain or lie inside {install}: {parent}"),  # covers the installation
+    ("docker/volumes", "--tls-dir must not contain or lie inside /var/lib/docker: /var/lib/docker/volumes"),
+    ("sibling", None),  # same prefix, another directory
+])
+def test_tls_dir_must_not_overlap_the_installation(tmp_path, inside, message):
+    """Root reads below TLS_HOST_DIR: it must not reach .env and keys of the installation or Docker's data."""
+    parent = (tmp_path / "base").resolve()
+    install = parent / "dtm-demonstrator"
+    (install / "tls").mkdir(parents=True)
+    (parent / "dtm-demonstrator-certs").mkdir()
+    value = {"install": str(install), "install/tls": f"{install}/tls", "parent": str(parent),
+             "docker/volumes": "/var/lib/docker/volumes", "sibling": f"{parent}/dtm-demonstrator-certs"}[inside]
+    block = _tls_dir_check(r'^overlaps\(\) .*?^fi$')
+    script = f'set -euo pipefail\ndie() {{ echo "ERROR: $*" >&2; exit 1; }}\n{block}\necho ok\n'
+    if inside == "docker/volumes":  # not on every machine: what the check sees once realpath ran
+        script = script.replace('[ -d "$tls_dir" ]', "true").replace('tls_dir=$(realpath "$tls_dir")', ":")
+    result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=10,
+                            env={"PATH": os.environ["PATH"], "INSTALL_DIR": str(install), "tls_dir": value})
+    if message is None:
+        assert result.returncode == 0 and result.stdout == "ok\n", result.stderr
+    else:
+        assert result.returncode == 1
+        assert result.stderr == f"ERROR: {message.format(install=install, parent=parent)}\n"
+
+
+@pytest.mark.parametrize("docker_root,refused", [("{tmp}/docker-data", True), ("", True), ("{tmp}/other", False)])
+def test_tls_dir_must_not_overlap_dockers_data_root(tmp_path, docker_root, refused):
+    """Checked again once Docker runs: daemon.json may have moved its data root."""
+    docker_root = docker_root.format(tmp=tmp_path)
+    stub = tmp_path / "bin" / "docker"
+    stub.parent.mkdir()
+    stub.write_text(f'#!/bin/sh\n[ "$1 $2 $3" = "info -f {{{{.DockerRootDir}}}}" ] && echo "{docker_root}"\n')
+    stub.chmod(0o755)
+    tls_dir = f"{tmp_path}/docker-data/volumes" if docker_root else "/var/lib/docker/x"
+    if docker_root and not refused:
+        tls_dir = f"{tmp_path}/docker-data"
+    block = _tls_dir_check(r'^if \[ -n "\$tls_dir" \]; then  # Docker\'s actual data root.*?^fi$')
+    overlaps = _tls_dir_check(r'^overlaps\(\) .*?$')
+    script = f'set -euo pipefail\ndie() {{ echo "ERROR: $*" >&2; exit 1; }}\n{overlaps}\n{block}\necho ok\n'
+    result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=10,
+                            env={"PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}", "tls_dir": tls_dir})
+    if refused:
+        expected = docker_root or "/var/lib/docker"
+        assert result.returncode == 1
+        assert result.stderr == f"ERROR: --tls-dir must not contain or lie inside {expected}: {tls_dir}\n"
+    else:
+        assert result.returncode == 0 and result.stdout == "ok\n", result.stderr
 
 
 @needs_openssl

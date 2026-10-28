@@ -23,7 +23,8 @@ services:
 
   # Resolves the TLS settings of .env at every start (PEM pair, else PKCS#12) and hands Caddy a checked
   # PEM pair in ./tls-live; on a problem it stops with a clear message and the proxy does not start.
-  # An unset path is mounted as /dev/null (read as empty); a set one must exist (no directory is created).
+  # An unset path is mounted as /dev/null (read as empty); a set one must exist (no directory is created) – except
+  # TLS_HOST_DIR: if it disappears, an empty one is created rather than stopping the stack (Settings shows the error).
   # A certificate set in Settings (kept in ./tls-live) wins over .env; host paths set there are read again.
   tls:
     image: ${DEMONSTRATOR_IMAGE}
@@ -38,7 +39,7 @@ services:
       - {type: bind, source: "${TLS_CERT_FILE:-/dev/null}", target: /tls-in/cert.pem, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${TLS_KEY_FILE:-/dev/null}", target: /tls-in/key.pem, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${TLS_PKCS12_FILE:-/dev/null}", target: /tls-in/keystore.p12, read_only: true, bind: {create_host_path: false}}
-      - &tls-host-dir {type: bind, source: "${TLS_HOST_DIR:-./tls-host}", target: "${TLS_HOST_DIR:-/tls-host}", read_only: true, bind: {create_host_path: false}}
+      - &tls-host-dir {type: bind, source: "${TLS_HOST_DIR:-./tls-host}", target: "${TLS_HOST_DIR:-/tls-host}", read_only: true, bind: {create_host_path: true}}
       - ./tls-live:/tls
     network_mode: none
     read_only: true

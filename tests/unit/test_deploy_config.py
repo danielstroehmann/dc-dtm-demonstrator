@@ -75,8 +75,10 @@ def test_compose_tls_service_contract():
     assert [(b["source"], b["target"]) for b in binds] == [
         ("${TLS_CERT_FILE:-/dev/null}", "/tls-in/cert.pem"), ("${TLS_KEY_FILE:-/dev/null}", "/tls-in/key.pem"),
         ("${TLS_PKCS12_FILE:-/dev/null}", "/tls-in/keystore.p12"), HOST_DIR_MOUNT]
-    for b in binds:  # read-only, and a missing path is an error instead of a created directory
-        assert b["type"] == "bind" and b["read_only"] is True and b["bind"] == {"create_host_path": False}
+    for b in binds:  # read-only, and a missing file is an error instead of a created directory
+        assert b["type"] == "bind" and b["read_only"] is True
+        # a vanished TLS_HOST_DIR is created (empty) instead of stopping the stack
+        assert b["bind"] == {"create_host_path": (b["source"], b["target"]) == HOST_DIR_MOUNT}
     assert "./tls-live:/tls" in tls["volumes"]
     assert tls["network_mode"] == "none" and tls["read_only"] is True and tls["cap_drop"] == ["ALL"]
     assert tls["security_opt"] == ["no-new-privileges:true"] and "ports" not in tls
@@ -102,7 +104,7 @@ def test_tls_watch_service_contract():
     assert watch["healthcheck"] == {"disable": True}
     host = [v for v in watch["volumes"] if isinstance(v, dict)]
     assert [(b["source"], b["target"]) for b in host] == [HOST_DIR_MOUNT]
-    assert host[0]["read_only"] is True and host[0]["bind"] == {"create_host_path": False}
+    assert host[0]["read_only"] is True and host[0]["bind"] == {"create_host_path": True}
     assert sorted(v for v in watch["volumes"] if isinstance(v, str)) == ["./tls-live:/tls-live",
                                                                          "caddy-admin:/run/caddy-admin"]
     # the one-shot service keeps gating the proxy at start

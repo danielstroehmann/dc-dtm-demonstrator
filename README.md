@@ -45,7 +45,7 @@ curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/late
 
 Then open one of the printed URLs – **the first visit sets the login password**. Options (`… | sudo bash -s -- <options>`): `--version vX.Y.Z` or
 `--branch dev` (development preview), `--host NAME` (repeatable), `--tls-cert … --tls-key …` (own PEM pair),
-`--tls-dir PATH` (host directory whose certificate files Settings may use by path),
+`--tls-dir PATH` (host directory whose certificate files Settings may use by path; `--tls-dir ""` clears it),
 `--port N`, `--http-port N` (plain HTTP, redirects to HTTPS; default 80), `--yes` (no questions), `--reset-password` (forgotten password, or someone else was first: the next visitor
 sets a new one, all sessions end), `--uninstall [--purge]`. Running it again updates the installation and keeps data,
 password and settings.

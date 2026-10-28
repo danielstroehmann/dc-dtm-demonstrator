@@ -15,7 +15,7 @@ INSTALL_DIR="/opt/dtm-demonstrator"
 APP_UID=10001
 
 version="" branch="" tls_mode="" tls_cert="" tls_key="" tls_dir="" hosts="" port="" http_port="" local_image="" local_files=""
-uninstall=false purge=false assume_yes=false reset_password=false
+uninstall=false purge=false assume_yes=false reset_password=false tls_dir_set=false
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -29,7 +29,7 @@ Options:
   --tls-key PATH        use this private key (PEM) – written to TLS_KEY_FILE in .env
   --tls selfsigned      back to the generated self-signed certificate
   --tls-dir PATH        host directory (e.g. /etc/digicert) whose certificate files Settings may use by path,
-                        renewals included – written to TLS_HOST_DIR in .env
+                        renewals included – written to TLS_HOST_DIR in .env (--tls-dir "" clears it)
                         (TLS is configured in .env: TLS_CERT_FILE/TLS_KEY_FILE or TLS_PKCS12_FILE)
   --host NAME           host name or IP the UI is reached by (repeatable; default: host name + IPs)
   --port N              HTTPS port (default 443)
@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
 		--tls) tls_mode="${2:?}"; shift 2 ;;
 		--tls-cert) tls_cert="${2:?}"; shift 2 ;;
 		--tls-key) tls_key="${2:?}"; shift 2 ;;
-		--tls-dir) tls_dir="${2:?}"; shift 2 ;;
+		--tls-dir) tls_dir="${2?}"; tls_dir_set=true; shift 2 ;;
 		--host) hosts="${hosts:+$hosts }${2:?}"; shift 2 ;;
 		--port) port="${2:?}"; shift 2 ;;
 		--http-port) http_port="${2:?}"; shift 2 ;;
@@ -76,12 +76,17 @@ VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
 # "custom" is kept for older command lines: it means --tls-cert/--tls-key
 [ -z "$tls_mode" ] || [[ "$tls_mode" =~ ^(selfsigned|custom)$ ]] || die "--tls must be selfsigned or custom"
 [ "$tls_mode" != custom ] || [ -n "$tls_cert$tls_key" ] || die "--tls custom needs --tls-cert and --tls-key"
+overlaps() { [[ "$1/" == "$2/"* || "$2/" == "$1/"* ]]; }  # one directory is, contains or lies inside the other
 if [ -n "$tls_dir" ]; then
 	# Mounted at the same path in the tls services' containers: it must not cover one of their system directories.
 	{ [[ "$tls_dir" == /* ]] && [ -d "$tls_dir" ]; } || die "--tls-dir needs an existing absolute directory: $tls_dir"
 	tls_dir=$(realpath "$tls_dir")
 	{ [[ "$tls_dir" =~ ^(/[A-Za-z0-9._-]+){2,}$ ]] && ! [[ "$tls_dir" =~ ^/(bin|dev|lib[^/]*|proc|run|sbin|srv|sys|tmp|usr|tls[^/]*)/ ]]; } \
 		|| die "--tls-dir must be a directory like /etc/digicert (two levels or more, no system directory, plain characters): $tls_dir"
+	# Root reads below it: not the installation (.env, keys, data) nor Docker's data (other containers' files).
+	for dir in "$INSTALL_DIR" /var/lib/docker; do
+		! overlaps "$tls_dir" "$dir" || die "--tls-dir must not contain or lie inside $dir: $tls_dir"
+	done
 fi
 
 compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrator "$@"; }
@@ -203,6 +208,10 @@ if ! command -v docker >/dev/null; then
 	touch "$INSTALL_DIR/.installed-docker"
 fi
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
+if [ -n "$tls_dir" ]; then  # Docker's actual data root – daemon.json may have moved it
+	docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
+	! overlaps "$tls_dir" "${docker_root:-/var/lib/docker}" || die "--tls-dir must not contain or lie inside ${docker_root:-/var/lib/docker}: $tls_dir"
+fi
 
 # --- files ----------------------------------------------------------------------------------
 fetch() {
@@ -231,7 +240,7 @@ fi
 if ! grep -q '^# TLS_HOST_DIR:' "$env_file"; then
 	cat >>"$env_file" <<'EOF'
 # TLS_HOST_DIR: a host directory (e.g. /etc/digicert) whose certificate files Settings → HTTPS certificate may use
-#   by path – read-only, renewals applied within a minute. Set with: install.sh --tls-dir PATH
+#   by path – read-only, renewals applied within a minute. Set with: install.sh --tls-dir PATH (clear: --tls-dir "")
 EOF
 fi
 chmod 600 "$env_file"
@@ -344,7 +353,7 @@ fi
 env_rewrite TLS_MODE
 grep -q '^TLS_PKCS12_FILE=' "$env_file" || env_set TLS_PKCS12_FILE ""
 grep -q '^TLS_PKCS12_PASSWORD=' "$env_file" || env_set TLS_PKCS12_PASSWORD ""
-[ -z "$tls_dir" ] || env_set TLS_HOST_DIR "$tls_dir"  # checked with the options above
+! $tls_dir_set || env_set TLS_HOST_DIR "$tls_dir"  # checked with the options above; "" clears it
 grep -q '^TLS_HOST_DIR=' "$env_file" || env_set TLS_HOST_DIR ""
 
 fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"

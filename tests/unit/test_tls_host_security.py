@@ -4,6 +4,7 @@ and at start (a tampered settings-paths.json); every path field validated, not o
 password kept out of answers and logs when a request is refused."""
 
 import json
+import os
 import logging
 
 import pytest
@@ -133,3 +134,27 @@ def test_a_refused_pkcs12_request_keeps_the_password_out_of_answer_and_log(caddy
     assert "Leak-Me-Not-7" not in status and "Leak-Me-Not-7" not in caplog.text
     assert caddy.served == started and caddy.requests == []
     assert not (caddy.live / tls_setup.HOST_PATHS).exists() and not (caddy.live / tls_settings.REQUEST).exists()
+
+
+def test_a_link_swapped_in_after_resolving_is_refused(host, outside, monkeypatch):
+    """TOCTOU: the path resolved inside, but before the open a link to a file outside took its place."""
+    root, _ = outside
+    (host / "cert.pem").symlink_to(root / "archive" / NAME / "fullchain1.pem")
+    monkeypatch.setattr(tls_setup.os.path, "realpath", lambda path, **_: str(path))  # resolved before the swap
+    with pytest.raises(TLSError) as caught:
+        tls_setup.read_host(f"{host}/cert.pem", "the certificate file")
+    assert str(caught.value) == f"the certificate file {host}/cert.pem is outside {host} (links followed)"
+
+
+def test_write_file_never_follows_a_planted_link(tmp_path):
+    """The live directory is writable for the app's group; the root services write there, too."""
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    victim.chmod(0o600)
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / ".cert.pem.tmp").symlink_to(victim)
+    tls_setup.write_file(live / "cert.pem", b"new", private=True)
+    assert victim.read_text() == "untouched" and oct(victim.stat().st_mode & 0o777) == "0o600"
+    assert (live / "cert.pem").read_bytes() == b"new" and not (live / "cert.pem").is_symlink()
+    assert oct((live / "cert.pem").stat().st_mode & 0o777) == "0o640" and not os.path.lexists(live / ".cert.pem.tmp")

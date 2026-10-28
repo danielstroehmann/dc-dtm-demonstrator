@@ -12,9 +12,10 @@ Caddy does not watch certificate files. After swapping them, the app re-posts Ca
 with "Cache-Control: must-revalidate", which forces a reload that re-reads the files (what `caddy reload --force`
 does). The admin API listens only on a unix socket in a volume that just the proxy, the app and tls-watch mount – no
 TCP port, nothing reachable from the host network or the other containers. A config Caddy refuses leaves it running unchanged;
-the previous files are then put back."""
+the previous files are then put back. An admin socket that does not answer (the proxy is down or restarting) puts them
+back for an upload or reset, which the admin is told failed; the watcher keeps its checked files instead – Caddy reads
+them when it starts – and retries the reload."""
 
-import fcntl
 import json
 import logging
 import os
@@ -38,13 +39,18 @@ ADMIN_SOCKET = os.environ.get("CADDY_ADMIN_SOCKET", "/run/caddy-admin/admin.sock
 SELF_SIGNED = "DTM Demonstrator self-signed"  # the organisation the installer puts in its default certificate
 REQUEST = "settings-paths.request.json"  # host paths to apply, written by the app (holds a PKCS#12 password: 0640)
 STATUS = "settings-paths.status.json"  # the watcher's answer to a request, and its last renewal check
-ANSWER_TIMEOUT = 10  # seconds; the watcher looks for a request every second
+ANSWER_TIMEOUT = 10  # seconds; the watcher looks for a request every second (a slow reload: see request_host)
+RELOAD_PENDING = "The proxy could not be reached – the certificate is stored and served once the proxy is back."
 MAX_PATH = 1024
 _swapping = threading.Lock()
 
 
 class ApplyError(Exception):
     """A short message for the form; the previous certificate is active again."""
+
+
+class Unreachable(ApplyError):
+    """Caddy's admin socket did not answer – unlike a refusal, nothing says the files are wrong."""
 
 
 def parse(mode: str, certificate: bytes, private_key: bytes, keystore: bytes, password: str):
@@ -100,7 +106,8 @@ def admin_client() -> httpx.Client:
     return httpx.Client(transport=httpx.HTTPTransport(uds=ADMIN_SOCKET), base_url="http://127.0.0.1", timeout=20)
 
 
-def reload() -> None:
+def reload(quiet: bool = False) -> None:
+    """quiet: an unreachable admin socket is expected (the watcher's retries) – not logged every time."""
     try:
         with admin_client() as client:
             config = client.get("/config/")
@@ -111,8 +118,8 @@ def reload() -> None:
         log.warning("TLS: Caddy refused the reload: HTTP %s %s", exc.response.status_code, exc.response.text[:500])
         raise ApplyError("The proxy refused the certificate – the previous one stays active.") from exc
     except httpx.HTTPError as exc:
-        log.warning("TLS: Caddy admin API not reachable: %s", exc)
-        raise ApplyError("The proxy could not be reached – the previous certificate stays active.") from exc
+        log.log(logging.DEBUG if quiet else logging.WARNING, "TLS: Caddy admin API not reachable: %s", exc)
+        raise Unreachable("The proxy could not be reached – the previous certificate stays active.") from exc
 
 
 @contextmanager
@@ -121,19 +128,19 @@ def locked():
     tls-watch service. Not reentrant."""
     with _swapping:
         try:
-            fd = os.open(LIVE, os.O_RDONLY)
+            fd = tls_setup.lock(LIVE)
         except OSError as exc:
             log.error("TLS: the certificate directory cannot be opened: %s", exc)
             raise ApplyError("The certificate could not be stored – the previous one stays active.") from exc
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
             os.close(fd)  # releases the lock
 
 
-def _swap(files: dict[str, bytes | None]) -> None:
-    """Writes (or, for None, removes) the files, reloads Caddy and on any failure puts the previous files back.
+def _swap(files: dict[str, bytes | None], keep_unreachable: bool = False) -> None:
+    """Writes (or, for None, removes) the files, reloads Caddy and on any failure puts the previous files back –
+    with keep_unreachable not when only the admin socket did not answer (Unreachable is raised all the same).
     Call it within locked()."""
     backups, touched = {}, []
     reloading = False
@@ -149,6 +156,10 @@ def _swap(files: dict[str, bytes | None]) -> None:
         reloading = True
         reload()
     except (OSError, ApplyError) as exc:
+        if keep_unreachable and isinstance(exc, Unreachable):
+            for backup in backups.values():
+                backup.unlink(missing_ok=True)
+            raise
         for name in touched:
             (LIVE / name).unlink(missing_ok=True)
             if name in backups:
@@ -186,15 +197,16 @@ def reset() -> None:
 
 
 def apply_host(chain, key, config: dict) -> None:
-    """The watcher's side: the pair read from the host paths becomes the Settings pair. Call it within locked()."""
+    """The watcher's side: the pair read from the host paths becomes the Settings pair. Only a refusal by Caddy rolls
+    back; an unreachable proxy keeps the checked files and raises Unreachable. Call it within locked()."""
     cert_pem, key_pem = tls_setup.pem_pair(chain, key)
     _swap({ACTIVE[0]: cert_pem, ACTIVE[1]: key_pem, SETTINGS[0]: cert_pem, SETTINGS[1]: key_pem,
-           HOST_PATHS: json.dumps(config).encode()})
+           HOST_PATHS: json.dumps(config).encode()}, keep_unreachable=True)
 
 
 def _json(name: str) -> dict:
     try:
-        data = json.loads((LIVE / name).read_bytes())
+        data = json.loads(tls_setup.read_private(LIVE / name))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -209,18 +221,23 @@ def request_host(config: dict) -> None:
         log.error("TLS: the host path request cannot be written: %s", exc)
         raise ApplyError("The request could not be stored – the previous certificate stays active.") from exc
     deadline = time.monotonic() + ANSWER_TIMEOUT
-    while time.monotonic() < deadline:
-        status = _json(STATUS)
-        if status.get("request") == request_id:
-            if status.get("request_error"):
-                raise TLSError(str(status["request_error"]))
-            log.info("TLS: certificate from the host path applied")
-            return
+    while (status := _json(STATUS)).get("request") != request_id:
+        if time.monotonic() >= deadline:
+            # The watcher reads the request under the lock: once we hold it, it has either answered (a reload can
+            # take longer than ANSWER_TIMEOUT) or not taken the request – then withdrawn, a watcher starting later
+            # must not apply it unasked.
+            with locked():
+                status = _json(STATUS)
+                if status.get("request") != request_id:
+                    (LIVE / REQUEST).unlink(missing_ok=True)
+                    log.warning("TLS: the tls-watch service did not answer within %s s", ANSWER_TIMEOUT)
+                    raise ApplyError("The tls-watch service did not answer – the request was withdrawn. Check that "
+                                     "the service runs, then try again.")
+            break
         time.sleep(0.2)
-    (LIVE / REQUEST).unlink(missing_ok=True)  # withdrawn: a watcher starting later must not apply it unasked
-    log.warning("TLS: the tls-watch service did not answer within %s s", ANSWER_TIMEOUT)
-    raise ApplyError("The tls-watch service did not answer – the request was withdrawn. Check that the service "
-                     "runs, then try again.")
+    if status.get("request_error"):
+        raise TLSError(str(status["request_error"]))
+    log.info("TLS: certificate from the host path applied")
 
 
 def status() -> dict | None:
@@ -255,7 +272,7 @@ def status() -> dict | None:
         # the password of a PKCS#12 file is never shown
         "host_paths": [host[k] for k in ("certificate", "private_key", "keystore") if isinstance(host.get(k), str)],
         "checked": _when(watch.get("checked")),
-        "check_error": watch.get("error"),
+        "check_error": watch.get("error") or (RELOAD_PENDING if watch.get("reload_pending") else None),
         # also after a restart fell back from a broken Settings pair
         "can_reset": settings.exists() or (LIVE / HOST_PATHS).exists(),
     }
