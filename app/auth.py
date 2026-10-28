@@ -21,17 +21,23 @@ MAX_PASSWORD = 256  # Argon2 hashes any length; a cap keeps a single request che
 log = logging.getLogger("demonstrator")
 
 
+def default_hasher() -> PasswordHasher:
+    return PasswordHasher()
+
+
 class Auth:
-    def __init__(self, password: str | None, secret: str, secure_cookie: bool = True, store=None):
+    def __init__(self, password: str | None, secret: str, secure_cookie: bool = True, store=None,
+                 hasher: PasswordHasher | None = None):
         """store: where the hash lives (the app's Store); without one it is kept in memory (tests).
-        password: an initial password, set only while none is stored (the .env migration)."""
+        password: an initial password, set only while none is stored (the .env migration).
+        hasher: Argon2 with its default (deliberately slow) parameters unless a test injects cheaper ones."""
         if len(secret) < 32:
             raise RuntimeError("JWT secret must be at least 32 characters")
         self._secret = secret
         self.secure_cookie = secure_cookie
         self._store = store
         self._memory: dict[str, str] = {}
-        self._hasher = PasswordHasher()
+        self._hasher = hasher or default_hasher()
         if password:  # the installer reads these lines to tell the operator what happened
             if self.set_password(password):
                 log.info("login password taken over from ADMIN_PASSWORD")

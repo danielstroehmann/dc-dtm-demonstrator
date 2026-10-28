@@ -13,6 +13,8 @@ from app.auth import ALGORITHM, COOKIE, MAX_PASSWORD, PASSWORD_KEY, SESSION_HOUR
 from app.store import Store
 from tests.conftest import PASSWORD, SECRET
 
+pytestmark = pytest.mark.real_kdf  # the hashing itself is under test: production Argon2 cost
+
 
 def request_with(token: str | None) -> Request:
     headers = [(b"cookie", f"{COOKIE}={token}".encode())] if token is not None else []

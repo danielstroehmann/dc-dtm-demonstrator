@@ -9,9 +9,10 @@ from pathlib import Path
 import httpx
 
 import pytest
+from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
-from app import cleanup, evergreen
+from app import auth as auth_module, cleanup, evergreen
 from app.auth import Auth
 from app.main import create_app
 from app.store import Store
@@ -21,15 +22,35 @@ PASSWORD = "correct horse battery staple 42!"
 SECRET = "s" * 48
 
 
+def _live_selected(config) -> bool:
+    markexpr = config.getoption("markexpr") or ""
+    return "live" in markexpr and "not live" not in markexpr
+
+
+def pytest_xdist_auto_num_workers(config):
+    """-n auto: one worker per CPU – but live tests run one after another (DTM load)."""
+    return 0 if _live_selected(config) else None
+
+
 def pytest_collection_modifyitems(config, items):
     """Live tests create real DTM objects – run them only when explicitly selected with -m live."""
-    markexpr = config.getoption("markexpr") or ""
-    if "live" in markexpr and "not live" not in markexpr:
+    if _live_selected(config):
         return
     skip = pytest.mark.skip(reason="live DTM tests run only with -m live")
     for item in items:
         if item.get_closest_marker("live"):
             item.add_marker(skip)
+
+
+# Argon2 at its production cost (~60 ms per hash) runs only where the hashing itself is under test (marker
+# real_kdf); everywhere else a real Argon2 with minimal cost – it still hashes and still refuses a wrong password.
+FAST_HASHER = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+
+
+@pytest.fixture(autouse=True)
+def fast_kdf(request, monkeypatch):
+    if not request.node.get_closest_marker("real_kdf"):
+        monkeypatch.setattr(auth_module, "default_hasher", lambda: FAST_HASHER)
 
 
 @pytest.fixture(autouse=True)
