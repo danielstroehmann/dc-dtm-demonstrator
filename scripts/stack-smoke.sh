@@ -15,7 +15,7 @@ cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; $as_root r
 trap cleanup EXIT
 
 cp "$repo/deploy/docker-compose.yml" "$repo/deploy/Caddyfile" "$dir/"
-mkdir -p "$dir/tls" "$dir/tls-live" "$dir/caddy-data" "$dir/data"
+mkdir -p "$dir/tls" "$dir/tls-host" "$dir/tls-live" "$dir/caddy-data" "$dir/data"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj "/CN=localhost" \
 	-addext "subjectAltName=DNS:localhost" -keyout "$dir/tls/key.pem" -out "$dir/tls/cert.pem" 2>/dev/null
 chmod 600 "$dir/tls/key.pem"

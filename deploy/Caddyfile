@@ -2,8 +2,8 @@
 # points to (default: a self-signed pair; your own PEM pair or a PKCS#12 file) – or set in Settings, which the app
 # applies live through the admin API. No ACME, no internal CA.
 {
-	# Admin API only on a unix socket in a volume that just the app shares (no TCP listener anywhere); the app's
-	# uid needs write access to connect, the volume confines it.
+	# Admin API only on a unix socket in a volume that just the app and tls-watch share (no TCP listener anywhere);
+	# the app's uid needs write access to connect, the volume confines it.
 	admin unix//run/caddy-admin/admin.sock|0666
 	# Clients send no SNI when connecting by IP address.
 	default_sni {$DEFAULT_SNI}

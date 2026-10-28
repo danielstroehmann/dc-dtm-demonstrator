@@ -7,6 +7,7 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}  # only an older .env's password, taken over once
       JWT_SECRET: ${JWT_SECRET}
       MINION_LAUNCHER: http://launcher:8080  # UC-8: minions only through the launcher below
+      TLS_HOST_DIR: ${TLS_HOST_DIR:-}  # Settings checks host paths against it; only tls-watch reads the files
     volumes:
       - ./data:/data
       # The HTTPS certificate set in Settings: written next to what the proxy serves, applied by a reload
@@ -23,7 +24,7 @@ services:
   # Resolves the TLS settings of .env at every start (PEM pair, else PKCS#12) and hands Caddy a checked
   # PEM pair in ./tls-live; on a problem it stops with a clear message and the proxy does not start.
   # An unset path is mounted as /dev/null (read as empty); a set one must exist (no directory is created).
-  # A certificate set in Settings (kept in ./tls-live) wins over .env.
+  # A certificate set in Settings (kept in ./tls-live) wins over .env; host paths set there are read again.
   tls:
     image: ${DEMONSTRATOR_IMAGE}
     restart: "no"
@@ -32,15 +33,39 @@ services:
     command: ["python", "-m", "app.tls_setup"]
     environment:
       TLS_PKCS12_PASSWORD: ${TLS_PKCS12_PASSWORD:-}
+      TLS_HOST_DIR: ${TLS_HOST_DIR:-}
     volumes:
       - {type: bind, source: "${TLS_CERT_FILE:-/dev/null}", target: /tls-in/cert.pem, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${TLS_KEY_FILE:-/dev/null}", target: /tls-in/key.pem, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${TLS_PKCS12_FILE:-/dev/null}", target: /tls-in/keystore.p12, read_only: true, bind: {create_host_path: false}}
+      - &tls-host-dir {type: bind, source: "${TLS_HOST_DIR:-./tls-host}", target: "${TLS_HOST_DIR:-/tls-host}", read_only: true, bind: {create_host_path: false}}
       - ./tls-live:/tls
     network_mode: none
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+
+  # The HTTPS certificate from paths on the Docker host chosen in Settings, and its renewals (app/tls_watch.py).
+  # Root reads root-only keys (certbot: 0600, directories 0700) – only below TLS_HOST_DIR, mounted read-only at the
+  # same path so symlinks resolve as on the host (unset: an empty placeholder). No network; Caddy's admin socket.
+  tls-watch:
+    image: ${DEMONSTRATOR_IMAGE}
+    restart: unless-stopped
+    user: "0"
+    group_add: ["10001"]  # the app's group: reads its requests, hands the files to the app and the proxy
+    command: ["python", "-m", "app.tls_watch"]
+    healthcheck: {disable: true}  # the image's check targets the web app's port
+    environment:
+      TLS_HOST_DIR: ${TLS_HOST_DIR:-}
+    volumes:
+      - *tls-host-dir
+      - ./tls-live:/tls-live
+      - caddy-admin:/run/caddy-admin
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
 
   proxy:
     image: caddy:2.10.2-alpine
@@ -68,7 +93,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./tls-live:/tls:ro
       - ./caddy-data:/data
-      - caddy-admin:/run/caddy-admin  # the admin API's unix socket (Caddyfile), shared with the app only
+      - caddy-admin:/run/caddy-admin  # the admin API's unix socket (Caddyfile), shared with the app and tls-watch
     group_add: ["10001"]  # reads the keys the app writes (0640, the app's group) without CAP_DAC_OVERRIDE
     networks: [internal]
     cap_drop: [ALL]

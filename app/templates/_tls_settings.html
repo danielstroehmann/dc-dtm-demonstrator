@@ -1,4 +1,5 @@
-{# The demonstrator's own HTTPS certificate (app/tls_settings.py): what is served, and an upload that applies live. #}
+{# The demonstrator's own HTTPS certificate (app/tls_settings.py): what is served, and an upload or host paths
+   (read by the tls-watch service) that apply live. #}
 <section class="block" id="tls">
   <article class="card">
     <div class="card-head"><h2>HTTPS certificate {% if tls %}<span class="badge">{{ tls.source }}</span>{% endif %}</h2>
@@ -16,6 +17,10 @@
       <dt>Issuer</dt><dd>{{ tls.issuer }}</dd>
       <dt>Valid until</dt><dd class="{{ tls.state }}">{{ tls.not_after }}{% if tls.state == "expired" %} · expired{% elif tls.state == "soon" %} · {{ tls.days_left }} days left{% endif %}</dd>
       <dt>SHA-256</dt><dd class="mono">{{ tls.sha256 }}</dd>
+      {% if tls.host_paths %}
+      <dt>Host path</dt><dd class="mono">{{ tls.host_paths | join(" · ") }}</dd>
+      <dt>Renewal check</dt><dd{% if tls.check_error %} class="expired"{% endif %}>{{ tls.checked or "–" }}{% if tls.check_error %} · {{ tls.check_error[:1] | upper }}{{ tls.check_error[1:] }} – the current certificate stays{% endif %}</dd>
+      {% endif %}
     </dl>
     {% else %}
     <p class="muted">The active certificate cannot be read.</p>
@@ -26,8 +31,31 @@
       <div class="fields q-grid">
         <div class="seg-group"><span class="seg-label" id="l-tls-mode">Format</span>
           <div role="radiogroup" aria-labelledby="l-tls-mode" class="segmented">
-            {% for value, text in [("pem", "PEM pair"), ("pkcs12", "PKCS#12")] %}<label><input type="radio" name="mode" value="{{ value }}" {% if tls_form.mode == value or (value == "pem" and tls_form.mode != "pkcs12") %}checked{% endif %}> {{ text }}</label>{% endfor %}
+            {% for value, text in [("pem", "PEM pair"), ("pkcs12", "PKCS#12"), ("host", "Path on host")] %}<label><input type="radio" name="mode" value="{{ value }}" {% if tls_form.mode == value or (value == "pem" and tls_form.mode not in ("pkcs12", "host")) %}checked{% endif %}{% if value == "host" and not tls_host_dir %} disabled{% endif %}> {{ text }}</label>{% endfor %}
           </div></div>
+        <div class="seg-group" data-when="mode=host"><span class="seg-label" id="l-tls-host-format">Files</span>
+          <div role="radiogroup" aria-labelledby="l-tls-host-format" class="segmented">
+            {% for value, text in [("pem", "PEM pair"), ("pkcs12", "PKCS#12")] %}<label><input type="radio" name="host_format" value="{{ value }}" {% if tls_form.host_format == value or (value == "pem" and tls_form.host_format != "pkcs12") %}checked{% endif %}> {{ text }}</label>{% endfor %}
+          </div></div>
+        <div class="field" data-when="mode=host host_format=pem">
+          <label for="tls-host-certificate" class="field-label">Certificate with chain</label>
+          <input id="tls-host-certificate" name="host_certificate" value="{{ tls_form.host_certificate }}" autocomplete="off"
+                 placeholder="{{ tls_host_dir }}/live/…/fullchain.pem">
+        </div>
+        <div class="field" data-when="mode=host host_format=pem">
+          <label for="tls-host-key" class="field-label">Private key</label>
+          <input id="tls-host-key" name="host_private_key" value="{{ tls_form.host_private_key }}" autocomplete="off"
+                 placeholder="{{ tls_host_dir }}/live/…/privkey.pem">
+        </div>
+        <div class="field" data-when="mode=host host_format=pkcs12">
+          <label for="tls-host-keystore" class="field-label">PKCS#12 file</label>
+          <input id="tls-host-keystore" name="host_keystore" value="{{ tls_form.host_keystore }}" autocomplete="off"
+                 placeholder="{{ tls_host_dir }}/….p12">
+        </div>
+        <div class="field" data-when="mode=host host_format=pkcs12">
+          <label for="tls-host-password" class="field-label">Password</label>
+          <input id="tls-host-password" type="password" name="host_password" autocomplete="off">
+        </div>
         <div class="field" data-when="mode=pem">
           <label for="tls-certificate" class="field-label">Certificate with chain</label>
           <input id="tls-certificate" type="file" name="certificate" accept=".pem,.crt,.cer">
@@ -45,8 +73,10 @@
           <input id="tls-password" type="password" name="password" autocomplete="off">
         </div>
       </div>
+      {% if not tls_host_dir %}<p class="muted">Path on host: set TLS_HOST_DIR in .env (or run install.sh --tls-dir PATH) and run the installer again.</p>{% endif %}
       <div class="action-bar">
-        <button type="submit">Upload and apply</button>
+        <button type="submit" data-when="mode=pem | mode=pkcs12">Upload and apply</button>
+        <button type="submit" data-when="mode=host" hidden>Apply</button>
       </div>
     </form>
   </article>

@@ -43,12 +43,14 @@ def sh(tmp_path):
     install, bin_dir, calls = tmp_path / "opt", tmp_path / "bin", tmp_path / "calls.log"
     install.mkdir()
     bin_dir.mkdir()
-    for name in ("docker", "openssl", "curl", "sleep", "systemctl", "journalctl"):
+    # seq: the wait loops give up after two tries instead of 60 – same outcome, without ~180 stub process starts
+    for name in ("docker", "openssl", "curl", "sleep", "seq", "systemctl", "journalctl"):
         _executable(bin_dir / name, f'#!/bin/sh\necho "{name} $*" >> "$CALLS"\n' + {
             "docker": 'case "$1" in inspect) echo "$HEALTH" ;; compose) shift; '
                       'case "$*" in *" ps -q "*) [ -n "$APP_RUNNING" ] && echo 4f2a9c ;; '
                       '*" logs "*) cat "$COMPOSE_LOGS_FILE" ;; esac ;; esac\nexit 0\n',
             "openssl": 'case "$1" in rand) echo "rotated$$secret" ;; esac\nexit 0\n',
+            "seq": 'echo 1; echo 2\n',
             "curl": 'case "$*" in *"/healthz"*) exit 0 ;; *"/login"*) printf "%s" "$LOGIN_PAGE"; exit 0 ;; '
                     '*) printf "302 https://192.0.2.10/"; exit 0 ;; esac\n',
         }.get(name, "exit 0\n"))

@@ -31,7 +31,7 @@ esac
 
 # Owners as install.sh sets them (TLS root, data the app's uid) – needs sudo on Linux; Docker Desktop maps owners.
 as_root=""; [ "$(uname)" = Linux ] && as_root="sudo"
-mkdir -p "$dir/tls" "$dir/tls-live" "$dir/caddy-data" "$dir/data"
+mkdir -p "$dir/tls" "$dir/tls-host" "$dir/tls-live" "$dir/caddy-data" "$dir/data"
 cp "$repo/deploy/Caddyfile" "$dir/Caddyfile"
 if [ ! -s "$dir/.env" ]; then
 	(umask 077 && printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >"$dir/.env")

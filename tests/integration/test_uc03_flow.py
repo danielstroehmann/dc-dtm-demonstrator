@@ -761,8 +761,8 @@ async def test_station_cmp_argv_is_accepted_by_real_openssl(store, enroll_net, c
         target.write_text(content)
         argv = [str(target) if a == argv[argv.index(flag) + 1] else a for a in argv]
     argv[argv.index("-server") + 1] = "https://127.0.0.1:9/cmp/DIOT_abc"
-    for flag in ("-msg_timeout", "-total_timeout"):
-        argv[argv.index(flag) + 1] = "5"
+    for flag in ("-msg_timeout", "-total_timeout"):  # nothing listens: openssl retries until the timeout ends
+        argv[argv.index(flag) + 1] = "1"
     env = {"PATH": "/usr/bin:/bin"} | ({"CMP_SECRET": call["cmp_secret"]} if call["cmp_secret"] else {})
     result = subprocess.run([real, *argv], env=env, capture_output=True, text=True, timeout=30)
     output = (result.stdout + result.stderr).lower()
