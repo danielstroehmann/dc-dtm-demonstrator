@@ -745,7 +745,3 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .tip-card progress::-webkit-progress-value { background: #f57c00; }
 .tip-card progress::-moz-progress-bar { background: #f57c00; }
 
-/* ---- Use-case tile bound to another platform than the selected connection ---- */
-.tile-top .platform-warn { margin-left: auto; display: inline-flex; color: var(--dc-orange); }
-.tile-top .platform-warn[hidden] { display: none; }
-.tile-top .platform-warn svg { width: 1.25rem; height: 1.25rem; }

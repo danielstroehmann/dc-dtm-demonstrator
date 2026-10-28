@@ -284,11 +284,17 @@ document.addEventListener("click", (event) => {
 document.addEventListener("DOMContentLoaded", () => applyDebug(storedDebug()));
 document.addEventListener("htmx:afterSwap", () => applyDebug(storedDebug()));
 
-// Use-case tiles: a tile bound to another platform than the selected connection shows its warning
+// Use-case tiles: a tile bound to another platform than the selected connection is greyed out
 document.querySelectorAll(".conn-select select").forEach((select) => {
   select.addEventListener("change", () => {
     const hosts = Object.fromEntries(select.dataset.hosts.trim().split(/\s+/).map((pair) => pair.split("=")));
-    const host = hosts[select.value];
-    select.form.querySelectorAll(".platform-warn").forEach((w) => { w.hidden = w.dataset.platform === host; });
+    select.form.querySelectorAll(".tile[data-platform]").forEach((tile) => {
+      const off = tile.dataset.platform !== hosts[select.value];
+      const slot = tile.querySelector(".tile-foot > span");
+      tile.classList.toggle("unavailable", off);
+      slot.querySelector("button").disabled = off;
+      if (off) slot.dataset.tip = `Select a connection to ${tile.dataset.platform} above`;
+      else delete slot.dataset.tip;
+    });
   });
 });

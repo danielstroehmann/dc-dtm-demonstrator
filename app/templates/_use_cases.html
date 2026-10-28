@@ -11,17 +11,17 @@
   {% elif selected %}<input type="hidden" name="connection" value="{{ selected }}">{% endif %}
   <div class="tiles">
     {% set hosts = connections | map(attribute="host") | list %}
+    {% set selected_host = connections | selectattr("id", "equalto", selected) | map(attribute="host") | first %}
     {% for key, uc in catalog.items() %}
-    {# A use case bound to a platform (or to the minion runtime) is shown, but greyed out, without it #}
+    {# A use case bound to a platform (or to the minion runtime) is shown, but greyed out, without it – also while a
+       connection to another platform is selected above (app.js follows the select) #}
     {% set missing = ("Needs a connection to " ~ uc.platform) if uc.platform and uc.platform not in hosts
-                     else ("Needs the IoT minion runtime (Docker)" if key == "uc08" and not minions_ready else "") %}
-    <article class="tile{% if missing %} unavailable{% endif %}">
+                     else ("Needs the IoT minion runtime (Docker)" if key == "uc08" and not minions_ready
+                     else ("Select a connection to " ~ uc.platform ~ " above" if uc.platform and selected_host and selected_host != uc.platform else "")) %}
+    {% set follows = uc.platform and uc.platform in hosts and not (key == "uc08" and not minions_ready) %}
+    <article class="tile{% if missing %} unavailable{% endif %}"{% if follows %} data-platform="{{ uc.platform }}"{% endif %}>
       <div class="tile-top"><span class="tile-icon{% if uc.license == "advanced" %} advanced{% endif %}{% if key == "uc08" %} dark{% endif %}" data-tip="{{ uc.tip or ('Advanced license' if uc.license == 'advanced' else uc.title) }}">{{ icon(icons.get(key, "key")) }}</span>
-        <h3>{{ uc.title }}</h3>
-        {# Bound to a platform, but another connection is selected above: the run takes the platform's connection #}
-        {% if uc.platform and not missing and connections | length > 1 %}{% set warn = "Runs on your " ~ uc.platform ~ " connection – the other platform does not support it yet" %}
-        <span class="platform-warn" data-platform="{{ uc.platform }}" data-tip="{{ warn }}" tabindex="0" aria-label="{{ warn }}"
-          {% if (connections | selectattr("id", "equalto", selected) | map(attribute="host") | first) == uc.platform %}hidden{% endif %}>{{ icon("alert") }}</span>{% endif %}</div>
+        <h3>{{ uc.title }}</h3></div>
       <ul class="tags">{% for tag in uc.tags %}<li>{{ tag }}</li>{% endfor %}</ul>
       <div class="tile-foot"><span {% if missing %}data-tip="{{ missing }}"{% endif %}><button type="submit" formaction="/runs/new/{{ key }}" class="btn-sm btn-icon"
         aria-label="Start {{ uc.title }}" {% if missing %}disabled{% endif %}>{{ icon("play") }}Start</button></span></div>

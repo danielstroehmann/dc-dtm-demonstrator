@@ -438,7 +438,11 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(404, "Unknown use case")
         conn = selected_connection(connection)
         if (platform := evergreen.CATALOG[use_case].platform) and conn["host"] != platform:
-            # e.g. UC-8: the default connection is NL – take the first one on the use case's platform
+            # e.g. UC-8: a connection to another platform picked explicitly is refused (the tile is greyed out);
+            # without a pick (old links, default NL) the first one on the use case's platform is taken
+            if connection:
+                return render(request, "error.html", 400,
+                              message=f"This use case needs a connection to {platform} – select it on Use-Case Central.")
             conn = next((c for c in store.connections() if c["host"] == platform), None)
             if not conn:
                 return render(request, "error.html", 400, message=f"This use case needs a connection to {platform}.")

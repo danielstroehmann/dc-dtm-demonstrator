@@ -252,8 +252,8 @@ def test_several_connections_on_the_same_host_can_be_saved(two, store, fakes):
     assert response.status_code == 400 and "already exists" in response.text and len(store.connections()) == 4
 
 
-def test_platform_bound_tile_warns_while_another_platform_is_selected(store, auth, fakes, data_dir, monkeypatch):
-    """UC-8 runs on US only: with an NL connection selected its tile shows the warning, with US it is hidden."""
+def test_platform_bound_tile_is_greyed_while_another_platform_is_selected(store, auth, fakes, data_dir, monkeypatch):
+    """UC-8 runs on US only: with an NL connection selected its tile is greyed out and its start refused."""
     from tests.component.test_web_uc08 import FakeDocker
     FakeDocker().install(monkeypatch)
     us = store.save_connection(None, "US", HOST, ACCOUNT_ID, API_KEY)
@@ -263,11 +263,19 @@ def test_platform_bound_tile_warns_while_another_platform_is_selected(store, aut
     with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as client:
         client.post("/login", data={"password": PASSWORD})
 
-        def warning(connection):
+        def uc08_tile(connection):
             html = client.get(f"/runs/new?connection={connection}").text
-            found = re.findall(r'<span class="platform-warn" data-platform="([^"]+)"[^>]*?(hidden)?>', html)
             hosts = re.search(r'data-hosts="([^"]*)"', html).group(1).split()  # the select tells the script
             assert sorted(hosts) == sorted([f"{us}={HOST}", f"{nl}=one.nl.digicert.com"])
-            return found
+            return re.search(r'<article class="tile([^"]*)" data-platform="([^"]+)">(.*?)</article>', html, re.S)
 
-        assert warning(nl) == [(HOST, "")] and warning(us) == [(HOST, "hidden")]
+        tile = uc08_tile(nl)
+        assert tile.group(1) == " unavailable" and tile.group(2) == HOST
+        assert 'formaction="/runs/new/uc08"' in tile.group(3) and "disabled" in tile.group(3)
+        assert f'data-tip="Select a connection to {HOST} above"' in tile.group(3)
+        tile = uc08_tile(us)
+        assert tile.group(1) == "" and "disabled" not in tile.group(3)
+        # an explicit NL pick is refused – no silent switch to US; without a pick the US connection is taken
+        refused = client.get(f"/runs/new/uc08?connection={nl}")
+        assert refused.status_code == 400 and f"needs a connection to {HOST}" in refused.text
+        assert client.get("/runs/new/uc08").status_code == 200
