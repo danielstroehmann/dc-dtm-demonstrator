@@ -4,7 +4,7 @@ automatic rollback, login recording, the runs list's clock and access control. F
 
 import asyncio
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -425,16 +425,20 @@ def test_the_clock_is_shown_for_a_failed_run_and_due_is_utc(configured_user, sto
     from tests.component.test_web_runs import finished, form
     configured_user.post("/runs", data=form())
     finished(store, "r1")
-    started = datetime(2026, 10, 27, 23, 10, tzinfo=timezone.utc)
+    started = datetime.now(timezone.utc) - timedelta(minutes=10)  # the page uses the real clock
     store.update_run("r1", status="failed", created_at=started.isoformat())
     html = configured_user.get("/").text
-    assert 'data-tip="Rolled back automatically at 02:10 UTC"' in html  # across midnight, in UTC
+    assert f'data-tip="Rolled back automatically at {(started + timedelta(hours=3)):%H:%M} UTC"' in html
+    # across midnight, in UTC
+    midnight = {"created_at": datetime(2026, 10, 27, 23, 10, tzinfo=timezone.utc).isoformat(), "status": "failed"}
+    at = datetime(2026, 10, 28, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert watchdog.lifetime(midnight, at)["tip"] == "Rolled back automatically at 02:10 UTC"
 
 
 # --- OWASP: the app has no new unauthenticated endpoint -----------------------------------------
 
 def test_every_route_but_login_setup_and_health_needs_a_login(web):
-    public = {"/login", "/setup", "/healthz"}
+    public = {"/login", "/setup", "/healthz", "/version"}  # build identity: no secrets, for every build
     checked = 0
     for route in web.app.routes:
         if not isinstance(route, APIRoute) or route.path in public:
