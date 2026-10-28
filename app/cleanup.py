@@ -58,8 +58,13 @@ class Heartbeat:
                 + (f", {self.retry} to retry" if self.retry else ""))
 
     async def _beat(self) -> None:
+        # Fixed beats, not "sleep, then write": the log and database writes must not stretch the interval. After a
+        # stall the next beat comes at once – one, not a burst catching up.
+        loop = asyncio.get_running_loop()
+        due = loop.time()
         while True:
-            await asyncio.sleep(HEARTBEAT_S)
+            due = max(due + HEARTBEAT_S, loop.time())
+            await asyncio.sleep(due - loop.time())
             self.log(self.message(), "wait")
             self.store.update_run(self.run_id, progress={
                 "label": self.phase, "short": self.short, "started": self.started, "total": self.total or None,

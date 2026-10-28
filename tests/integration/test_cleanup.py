@@ -394,6 +394,19 @@ async def test_heartbeat_during_slow_revoke_pass(store, fake, tmp_path, monkeypa
     assert seen[-1] is None and store.get_run("h1")["progress"] is None
 
 
+async def test_heartbeat_interval_does_not_include_its_own_writes(store, monkeypatch):
+    """Slow database writes (a busy host) must not stretch the interval: 'sleep, then write' gave a beat every
+    HEARTBEAT_S + write time – 6 instead of 10 beats here."""
+    import asyncio
+    import time as clock
+    monkeypatch.setattr(cleanup, "HEARTBEAT_S", 0.05)
+    monkeypatch.setattr(store, "update_run", lambda *_a, **_k: clock.sleep(0.03))  # blocks the loop, like SQLite
+    beats = []
+    with cleanup.Heartbeat(store, "x", lambda message, _kind: beats.append(message)):
+        await asyncio.get_running_loop().run_in_executor(None, clock.sleep, 0.5)  # asyncio.sleep is instant here
+    assert 8 <= len(beats) <= 11, len(beats)
+
+
 async def test_heartbeat_phases_and_counts_are_exact(store, fake, tmp_path, monkeypatch):
     beat = cleanup.Heartbeat(store, "x", lambda *_: None)
     beat.set("Revoking certificates (pass 2)", 5)

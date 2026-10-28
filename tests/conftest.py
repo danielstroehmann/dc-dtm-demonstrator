@@ -69,7 +69,8 @@ def fast_timing(request, monkeypatch):
     sleeps: list[float] = []
 
     async def instant_sleep(delay, result=None):
-        if delay == cleanup.HEARTBEAT_S:
+        task = asyncio.current_task()
+        if task and task.get_coro().__qualname__ == "Heartbeat._beat":  # its waits are what is under test
             return await real_sleep(delay, result)
         sleeps.append(delay)
         return await real_sleep(0, result)
