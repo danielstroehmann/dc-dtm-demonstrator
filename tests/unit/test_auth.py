@@ -334,3 +334,32 @@ def test_rehash_never_revives_a_password_reset_in_between(tmp_path, monkeypatch)
     monkeypatch.setattr(a, "_hasher", ResetBeforeRehash())
     a.check_password(NEW)
     assert store.get_setting(PASSWORD_KEY) is None and not a.has_password()
+
+
+# --- the hasher seam: production cost unless a test injects a cheaper Argon2 -----------------------------
+
+# Floors from RFC 9106 / OWASP for Argon2id; argon2-cffi's defaults (t=3, m=64 MiB, p=4) are above them.
+MIN_TIME_COST, MIN_MEMORY_KIB = 2, 19 * 1024
+
+
+def test_production_auth_without_a_hasher_uses_argon2_defaults(tmp_path):
+    """A release must not ship the tests' cheap parameters: Auth() without hasher= hashes at argon2's default cost."""
+    from argon2 import extract_parameters
+    store = Store(tmp_path / "db")
+    Auth(NEW, SECRET, store=store)
+    params = extract_parameters(store.get_setting(PASSWORD_KEY))
+    default = PasswordHasher()
+    assert (params.time_cost, params.memory_cost, params.parallelism) == (
+        default.time_cost, default.memory_cost, default.parallelism)
+    assert params.time_cost >= MIN_TIME_COST and params.memory_cost >= MIN_MEMORY_KIB
+    assert not default.check_needs_rehash(store.get_setting(PASSWORD_KEY))
+
+
+def test_an_injected_hasher_is_used_and_still_refuses_a_wrong_password(tmp_path):
+    from argon2 import extract_parameters
+    cheap = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+    store = Store(tmp_path / "db")
+    a = Auth(NEW, SECRET, store=store, hasher=cheap)
+    params = extract_parameters(store.get_setting(PASSWORD_KEY))
+    assert (params.time_cost, params.memory_cost, params.parallelism) == (1, 8, 1)
+    assert a.check_password(NEW) and not a.check_password(NEW + "x")

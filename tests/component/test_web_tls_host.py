@@ -135,3 +135,33 @@ def test_cross_origin_post_is_refused(user, caddy, started, host):  # noqa: F811
     response = send(user, headers={"Origin": "https://evil.example"}, host_certificate=f"{host}/c.pem",
                     host_private_key=f"{host}/k.pem")
     assert response.status_code == 403 and not (caddy.live / tls_settings.REQUEST).exists()
+
+
+def test_an_applied_path_with_markup_is_shown_escaped(user, caddy, watcher, host):  # noqa: F811
+    """A file name may contain < > " – the Host path line and a later renewal error must still render as text."""
+    from tests.unit.test_tls_setup import key_pem, make_cert, pem
+    from cryptography.hazmat.primitives.asymmetric import ec
+    folder = host / XSS
+    folder.mkdir()
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = make_cert(NAME, key)
+    (folder / "fullchain.pem").write_bytes(pem(cert))
+    (folder / "privkey.pem").write_bytes(key_pem(key))
+    response = send(user, host_certificate=f"{folder}/fullchain.pem", host_private_key=f"{folder}/privkey.pem")
+    assert response.status_code == 303 and caddy.served == cert
+    escaped = f"{host}/&lt;img src=x onerror=&#34;alert(1)&#34;&gt;"
+    html = user.get("/settings").text
+    assert XSS not in html
+    assert f'<dd class="mono">{escaped}/fullchain.pem · {escaped}/privkey.pem</dd>' in html
+    (folder / "fullchain.pem").unlink()  # the renewal check now fails with the path in its message
+    tls_watch.check()
+    html = user.get("/settings").text
+    assert XSS not in html
+    assert f"The certificate file {escaped}/fullchain.pem does not exist – the current certificate stays" in html
+
+
+def test_the_password_entered_is_not_echoed_back_on_a_refusal(user, caddy, started, host):  # noqa: F811
+    response = send(user, "pkcs12", host_keystore="/etc/shadow", host_password="Echo-Pw-9")
+    assert response.status_code == 400 and "The path of the PKCS#12 file must be inside " in response.text
+    assert "Echo-Pw-9" not in response.text
+    assert '<input id="tls-host-password" type="password" name="host_password" autocomplete="off">' in response.text
