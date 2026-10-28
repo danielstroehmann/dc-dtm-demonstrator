@@ -199,6 +199,9 @@ function openDevice(cell) {
 
 function openCertificates(box) {
   const inPanel = box.closest("#side-panel") !== null;
+  // A second click on the device already shown changes nothing – reloading would flicker and lose the pick
+  const panel = document.getElementById("side-panel");
+  if (panel && !panel.hidden && panel.dataset.certs === box.dataset.certs && panel.querySelector("#cert-detail")) return;
   if (!inPanel) document.querySelector(".wall use.selected")?.classList.remove("selected");
   openPanel(box.dataset.certs, inPanel ? undefined : null);
 }

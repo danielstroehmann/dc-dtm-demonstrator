@@ -17,8 +17,10 @@
     {% set installed = d.firmware or 1 %}
     {# A window into the minion: only what the device itself reports – a running one is watched for updates #}
     {% set watched = minion and d.container and not busy and open %}
+    {# DTM's list under the device lags a moment behind an issuance – the tile (and an open detail view) catches up #}
+    {% set settling = advanced and not minion and not busy and d.issued and (d.certificates or []) | length < d.issued %}
     <section class="device-tile{% if current %} enrolled{% endif %}" id="tile-{{ loop_index }}"{% if tile_oob %} hx-swap-oob="true"{% endif %}
-      {% if busy or watched %}hx-get="/runs/{{ run.id }}/devices/{{ d.name }}/tile?i={{ loop_index }}" hx-trigger="every {{ '2s' if busy else '5s' }}" hx-swap="outerHTML"{% endif %}>
+      {% if busy or watched or settling %}hx-get="/runs/{{ run.id }}/devices/{{ d.name }}/tile?i={{ loop_index }}" hx-trigger="every {{ '5s' if watched else '2s' }}" hx-swap="outerHTML"{% endif %}>
       <div class="device-head">
         <span class="device-icon">{{ icon("chip") }}</span>
         <h3 data-tip="{{ d.name }}">{{ d.name }}</h3>

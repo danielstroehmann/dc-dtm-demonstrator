@@ -292,6 +292,13 @@ def test_uc07_enroll_then_renew_per_device(configured_user, store, enroll_net):
     assert devices.device_of(run["result"], name)["issued"] == 2 and enroll_net.violations == []
     html = configured_user.get("/runs/u1").text
     assert f'action="/runs/u1/devices/{name}/renew"' in html and "PRIVATE KEY" not in html
+    tile = configured_user.get(f"/runs/u1/devices/{name}/tile?i=1").text
+    assert "hx-trigger" not in tile  # DTM lists both certificates – nothing to wait for
+    # DTM's list under the device lags behind the renewal: the tile polls until it lists both
+    store.update_run("u1", result=run["result"] | {"devices": [
+        d | {"certificates": d["certificates"][:1]} for d in run["result"]["devices"]]})
+    tile = configured_user.get(f"/runs/u1/devices/{name}/tile?i=1").text
+    assert 'hx-trigger="every 2s"' in tile
 
 
 def test_uc08_needs_an_ecdsa_issuing_ca(configured_user, store, fake, docker):
