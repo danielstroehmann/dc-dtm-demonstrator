@@ -1,20 +1,28 @@
-"""The demonstrator's own HTTPS certificate, set in Settings: a PEM pair or a PKCS#12 file, applied live; "Reset to
-default" goes back to what .env configures. Validation is tls_setup's – this module only stores, swaps and reloads.
+"""The demonstrator's own HTTPS certificate, set in Settings: a PEM pair or a PKCS#12 file, applied live, or paths
+of such files on the Docker host, which the root `tls-watch` service reads (app/tls_watch.py); "Reset to
+default" goes back to what .env configures. Whatever the admin chose last wins: an upload clears the host paths and
+the other way round. Validation is tls_setup's – this module only stores, swaps and reloads.
 
 The files live in the directory Caddy serves from (host ./tls-live), shared with the `tls` service: cert.pem/key.pem
 is what Caddy serves, settings-*.pem the uploaded pair (the admin's choice, which the `tls` service prefers at every
 start) and default-*.pem what .env resolves to. A PKCS#12 upload is stored as the checked PEM pair – its password is
-never stored.
+never stored. Host paths are handed to the watcher as a request (REQUEST, with a fresh id) and answered in STATUS.
 
 Caddy does not watch certificate files. After swapping them, the app re-posts Caddy's running config to its admin API
 with "Cache-Control: must-revalidate", which forces a reload that re-reads the files (what `caddy reload --force`
-does). The admin API listens only on a unix socket in a volume that just the proxy and the app mount – no TCP port,
-nothing reachable from the host network or the other containers. A config Caddy refuses leaves it running unchanged;
+does). The admin API listens only on a unix socket in a volume that just the proxy, the app and tls-watch mount – no
+TCP port, nothing reachable from the host network or the other containers. A config Caddy refuses leaves it running unchanged;
 the previous files are then put back."""
 
+import fcntl
+import json
 import logging
 import os
+import posixpath
+import secrets
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,12 +30,16 @@ import httpx
 from cryptography.x509.oid import NameOID
 
 from . import certinfo, tls_setup
-from .tls_setup import ACTIVE, DEFAULT, EXPIRY_WARNING, MAX_SIZE, SETTINGS, TLSError
+from .tls_setup import ACTIVE, DEFAULT, EXPIRY_WARNING, HOST_PATHS, MAX_SIZE, SETTINGS, TLSError
 
 log = logging.getLogger("demonstrator")
 LIVE = Path(os.environ.get("TLS_LIVE_DIR", "/tls-live"))
 ADMIN_SOCKET = os.environ.get("CADDY_ADMIN_SOCKET", "/run/caddy-admin/admin.sock")
 SELF_SIGNED = "DTM Demonstrator self-signed"  # the organisation the installer puts in its default certificate
+REQUEST = "settings-paths.request.json"  # host paths to apply, written by the app (holds a PKCS#12 password: 0640)
+STATUS = "settings-paths.status.json"  # the watcher's answer to a request, and its last renewal check
+ANSWER_TIMEOUT = 10  # seconds; the watcher looks for a request every second
+MAX_PATH = 1024
 _swapping = threading.Lock()
 
 
@@ -49,12 +61,38 @@ def parse(mode: str, certificate: bytes, private_key: bytes, keystore: bytes, pa
         chain, key = tls_setup.from_pkcs12(keystore, password, "the PKCS#12 file", "password")
     else:
         raise TLSError("choose PEM or PKCS#12")
-    leaf = tls_setup.check(chain, key)
-    if tls_setup.remaining(leaf).total_seconds() <= 0:
-        raise TLSError("the certificate has expired")
-    if leaf.not_valid_before_utc > datetime.now(timezone.utc):
-        raise TLSError("the certificate is not valid yet")
+    tls_setup.usable(chain, key)
     return chain, key
+
+
+def host_config(mode: str, certificate: str, private_key: str, keystore: str, password: str) -> dict:
+    """The host paths as entered, checked as text: absolute and inside TLS_HOST_DIR. Whether the files exist and
+    where their links lead only the watcher can check – the app cannot read them."""
+    root = tls_setup.HOST_DIR
+    if not root:
+        raise TLSError("set TLS_HOST_DIR in .env first (or run install.sh --tls-dir PATH)")
+
+    def path(value: str, what: str) -> str:
+        value = value.strip()
+        if not value:
+            raise TLSError(f"enter the path of {what}")
+        if len(value) > MAX_PATH or not value.isprintable():
+            raise TLSError(f"the path of {what} is not valid")
+        if not value.startswith("/"):
+            raise TLSError(f"the path of {what} must be absolute")
+        value = posixpath.normpath(value)
+        if not value.startswith(root.rstrip("/") + "/"):
+            raise TLSError(f"the path of {what} must be inside {root}")
+        return value
+
+    if mode == "pem":
+        return {"mode": "pem", "certificate": path(certificate, "the certificate file"),
+                "private_key": path(private_key, "the private key file")}
+    if mode == "pkcs12":
+        if len(password) > MAX_PATH:
+            raise TLSError("the password is too long")
+        return {"mode": "pkcs12", "keystore": path(keystore, "the PKCS#12 file"), "password": password}
+    raise TLSError("choose PEM or PKCS#12")
 
 
 def admin_client() -> httpx.Client:
@@ -77,43 +115,62 @@ def reload() -> None:
         raise ApplyError("The proxy could not be reached – the previous certificate stays active.") from exc
 
 
-def _swap(files: dict[str, bytes | None]) -> None:
-    """Writes (or, for None, removes) the files, reloads Caddy and on any failure puts the previous files back."""
+@contextmanager
+def locked():
+    """One change of the files at a time: across the app's threads, and – flock on the shared directory – with the
+    tls-watch service. Not reentrant."""
     with _swapping:
-        backups, touched = {}, []
-        reloading = False
         try:
-            for name, data in files.items():
-                path = LIVE / name
-                touched.append(name)
-                if path.exists():
-                    backups[name] = path.with_name(f".{name}.bak")
-                    path.replace(backups[name])
-                if data is not None:
-                    tls_setup.write_file(path, data, private=name.endswith("key.pem"))
-            reloading = True
-            reload()
-        except (OSError, ApplyError) as exc:
-            for name in touched:
-                (LIVE / name).unlink(missing_ok=True)
-                if name in backups:
-                    backups[name].replace(LIVE / name)
-            if reloading:  # a lost answer may hide a reload that happened – serve the restored files for sure
-                try:
-                    reload()
-                except ApplyError:
-                    pass
-            if isinstance(exc, ApplyError):
-                raise
-            log.error("TLS: the certificate files cannot be written: %s", exc)
+            fd = os.open(LIVE, os.O_RDONLY)
+        except OSError as exc:
+            log.error("TLS: the certificate directory cannot be opened: %s", exc)
             raise ApplyError("The certificate could not be stored – the previous one stays active.") from exc
-        for backup in backups.values():
-            backup.unlink(missing_ok=True)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # releases the lock
+
+
+def _swap(files: dict[str, bytes | None]) -> None:
+    """Writes (or, for None, removes) the files, reloads Caddy and on any failure puts the previous files back.
+    Call it within locked()."""
+    backups, touched = {}, []
+    reloading = False
+    try:
+        for name, data in files.items():
+            path = LIVE / name
+            touched.append(name)
+            if path.exists():
+                backups[name] = path.with_name(f".{name}.bak")
+                path.replace(backups[name])
+            if data is not None:
+                tls_setup.write_file(path, data, private=not name.endswith("cert.pem"))
+        reloading = True
+        reload()
+    except (OSError, ApplyError) as exc:
+        for name in touched:
+            (LIVE / name).unlink(missing_ok=True)
+            if name in backups:
+                backups[name].replace(LIVE / name)
+        if reloading:  # a lost answer may hide a reload that happened – serve the restored files for sure
+            try:
+                reload()
+            except ApplyError:
+                pass
+        if isinstance(exc, ApplyError):
+            raise
+        log.error("TLS: the certificate files cannot be written: %s", exc)
+        raise ApplyError("The certificate could not be stored – the previous one stays active.") from exc
+    for backup in backups.values():
+        backup.unlink(missing_ok=True)
 
 
 def upload(chain, key) -> None:
     cert_pem, key_pem = tls_setup.pem_pair(chain, key)
-    _swap({ACTIVE[0]: cert_pem, ACTIVE[1]: key_pem, SETTINGS[0]: cert_pem, SETTINGS[1]: key_pem})
+    with locked():
+        _swap({ACTIVE[0]: cert_pem, ACTIVE[1]: key_pem, SETTINGS[0]: cert_pem, SETTINGS[1]: key_pem,
+               HOST_PATHS: None, STATUS: None})
     log.info("TLS: certificate from Settings applied: %s", chain[0].subject.rfc4514_string())
 
 
@@ -122,8 +179,48 @@ def reset() -> None:
         cert_pem, key_pem = ((LIVE / name).read_bytes() for name in DEFAULT)
     except OSError as exc:
         raise ApplyError("No default certificate – check the TLS settings in .env and restart.") from exc
-    _swap({ACTIVE[0]: cert_pem, ACTIVE[1]: key_pem, SETTINGS[0]: None, SETTINGS[1]: None})
+    with locked():
+        _swap({ACTIVE[0]: cert_pem, ACTIVE[1]: key_pem, SETTINGS[0]: None, SETTINGS[1]: None, HOST_PATHS: None,
+               STATUS: None})
     log.info("TLS: back to the default certificate")
+
+
+def apply_host(chain, key, config: dict) -> None:
+    """The watcher's side: the pair read from the host paths becomes the Settings pair. Call it within locked()."""
+    cert_pem, key_pem = tls_setup.pem_pair(chain, key)
+    _swap({ACTIVE[0]: cert_pem, ACTIVE[1]: key_pem, SETTINGS[0]: cert_pem, SETTINGS[1]: key_pem,
+           HOST_PATHS: json.dumps(config).encode()})
+
+
+def _json(name: str) -> dict:
+    try:
+        data = json.loads((LIVE / name).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def request_host(config: dict) -> None:
+    """Hands the host paths to the watcher and waits for its answer: applied, or why not."""
+    request_id = secrets.token_hex(8)
+    try:
+        tls_setup.write_file(LIVE / REQUEST, json.dumps({"id": request_id} | config).encode(), private=True)
+    except OSError as exc:
+        log.error("TLS: the host path request cannot be written: %s", exc)
+        raise ApplyError("The request could not be stored – the previous certificate stays active.") from exc
+    deadline = time.monotonic() + ANSWER_TIMEOUT
+    while time.monotonic() < deadline:
+        status = _json(STATUS)
+        if status.get("request") == request_id:
+            if status.get("request_error"):
+                raise TLSError(str(status["request_error"]))
+            log.info("TLS: certificate from the host path applied")
+            return
+        time.sleep(0.2)
+    (LIVE / REQUEST).unlink(missing_ok=True)  # withdrawn: a watcher starting later must not apply it unasked
+    log.warning("TLS: the tls-watch service did not answer within %s s", ANSWER_TIMEOUT)
+    raise ApplyError("The tls-watch service did not answer – the request was withdrawn. Check that the service "
+                     "runs, then try again.")
 
 
 def status() -> dict | None:
@@ -141,10 +238,13 @@ def status() -> dict | None:
         chosen = settings.read_bytes() == active
     except OSError:
         chosen = False
+    host = _json(HOST_PATHS) if chosen else {}
+    watch = _json(STATUS) if host else {}
     organisation = [a.value for a in leaf.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)]
     left = tls_setup.remaining(leaf)
     return {
-        "source": "Settings" if chosen else "Self-signed default" if SELF_SIGNED in organisation else ".env",
+        "source": "From host path" if host else "Settings" if chosen
+        else "Self-signed default" if SELF_SIGNED in organisation else ".env",
         "common_name": details["common_name"],
         "sans": details["sans"],
         "issuer": details["chain"][1] if len(details["chain"]) > 1 else details["common_name"],
@@ -152,5 +252,17 @@ def status() -> dict | None:
         "days_left": left.days,
         "state": "expired" if left.total_seconds() <= 0 else "soon" if left < EXPIRY_WARNING else "ok",
         "sha256": details["sha256"],
-        "can_reset": settings.exists(),  # also after a restart fell back from a broken Settings pair
+        # the password of a PKCS#12 file is never shown
+        "host_paths": [host[k] for k in ("certificate", "private_key", "keystore") if isinstance(host.get(k), str)],
+        "checked": _when(watch.get("checked")),
+        "check_error": watch.get("error"),
+        # also after a restart fell back from a broken Settings pair
+        "can_reset": settings.exists() or (LIVE / HOST_PATHS).exists(),
     }
+
+
+def _when(stamp) -> str | None:
+    try:
+        return datetime.fromisoformat(stamp).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return None

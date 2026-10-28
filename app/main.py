@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (certinfo, cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles,
-               tls_settings, trustedge, watchdog)
+               tls_settings, tls_setup, trustedge, watchdog)
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, BUILD, DATA_DIR, DEV_MODE, build_label
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -302,7 +302,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
         used = {c["id"]: in_use(c["id"]) for c in connections}
         return render(request, "settings.html", status_code, nav="settings", connections=connections, in_use=used,
                       form=form or {"host": "one.digicert.com"}, tls=tls_settings.status(),
-                      tls_form=tls_form or {"mode": "pem"})
+                      tls_form=tls_form or {"mode": "pem"}, tls_host_dir=tls_setup.HOST_DIR)
 
     @app.get("/settings")
     async def settings_page(request: Request, edit: int | None = None):
@@ -426,15 +426,31 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
 
     @app.post("/settings/tls")
     async def upload_tls(request: Request):
-        """The demonstrator's own HTTPS certificate: checked, then applied live (see app/tls_settings.py)."""
-        def refused(status_code: int, mode: str, message: str):
-            return settings_view(request, status_code, tls_form={"mode": mode, "error": message[:1].upper() + message[1:]})
+        """The demonstrator's own HTTPS certificate: checked, then applied live (see app/tls_settings.py) – or paths on
+        the Docker host, which the tls-watch service reads and applies (app/tls_watch.py)."""
+        def refused(status_code: int, mode: str, message: str, **entered):
+            return settings_view(request, status_code, tls_form={"mode": mode, **entered,
+                                                                 "error": message[:1].upper() + message[1:]})
         # Bounded before the body is parsed: two files of at most 1 MB plus the form's overhead.
         length = request.headers.get("content-length", "")
         if not length.isdigit() or int(length) > 2 * TLS_MAX_SIZE + 65536:
             return refused(413, "pem", "The files are larger than 1 MB – not a certificate or key.")
-        form = await request.form(max_files=3, max_fields=5)
+        form = await request.form(max_files=3, max_fields=9)
         mode = str(form.get("mode", ""))
+        if mode == "host":  # no files: the paths are checked as text, the watcher reads them
+            entered = {k: str(form.get(k, "")) for k in ("host_format", "host_certificate", "host_private_key",
+                                                          "host_keystore")}
+            await form.close()
+            try:
+                config = tls_settings.host_config(entered["host_format"], entered["host_certificate"],
+                                                  entered["host_private_key"], entered["host_keystore"],
+                                                  str(form.get("host_password", "")))
+                await run_in_threadpool(tls_settings.request_host, config)
+            except TLSError as exc:
+                return refused(400, mode, str(exc), **entered)
+            except tls_settings.ApplyError as exc:
+                return refused(503, mode, str(exc), **entered)
+            return RedirectResponse("/settings#tls", status_code=303)
 
         async def content(name: str) -> bytes:
             upload = form.get(name)

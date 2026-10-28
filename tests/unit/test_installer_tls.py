@@ -1,5 +1,5 @@
-"""install.sh TLS handling: the self-signed default, its renewal, the migration of older installs and
---tls-cert/--tls-key. The TLS block is extracted from install.sh (with the script's own .env helpers)
+"""install.sh TLS handling: the self-signed default, its renewal, the migration of older installs,
+--tls-cert/--tls-key and --tls-dir (TLS_HOST_DIR). The TLS block is extracted from install.sh (with the script's own .env helpers)
 and run with bash and the real openssl in a temporary install directory – not re-implemented. The
 pair it writes is then fed to app/tls_setup.py, the code the `tls` service runs at every start."""
 
@@ -38,7 +38,7 @@ needs_openssl = pytest.mark.skipif(not (BASH and _openssl3()), reason="needs bas
 def _snippet() -> str:
     source = INSTALLER.read_text()
     helpers = re.search(r"^env_tmp=\"\"\n.*?^env_set\(\) \{ env_rewrite \"\$1\" \"\$2\"; \}$", source, re.M | re.S)
-    block = re.search(r'^SELF_CERT=.*?^grep -q \'\^TLS_PKCS12_PASSWORD=\' "\$env_file" \|\| env_set TLS_PKCS12_PASSWORD ""$',
+    block = re.search(r'^SELF_CERT=.*?^grep -q \'\^TLS_HOST_DIR=\' "\$env_file" \|\| env_set TLS_HOST_DIR ""$',
                       source, re.M | re.S)
     assert helpers and block, "install.sh changed – update the extraction"
     return (f'set -euo pipefail\ndie() {{ echo "ERROR: $*" >&2; exit 1; }}\n{helpers.group(0)}\n'
@@ -52,11 +52,12 @@ def tls(tmp_path):
     env_file = install / ".env"
 
     def run(env_lines: str = "", hosts: str = "demo.local 192.0.2.10", default_sni: str = "192.0.2.10",
-            tls_mode: str = "", tls_cert: str = "", tls_key: str = "", keep_env: bool = False):
+            tls_mode: str = "", tls_cert: str = "", tls_key: str = "", tls_dir: str = "", keep_env: bool = False):
         if not keep_env:
             env_file.write_text(env_lines)
         env = {"PATH": os.environ["PATH"], "INSTALL_DIR": str(install), "env_file": str(env_file), "hosts": hosts,
-               "default_sni": default_sni, "tls_mode": tls_mode, "tls_cert": tls_cert, "tls_key": tls_key}
+               "default_sni": default_sni, "tls_mode": tls_mode, "tls_cert": tls_cert, "tls_key": tls_key,
+               "tls_dir": tls_dir}
         result = subprocess.run([BASH, "-c", _snippet()], capture_output=True, text=True, timeout=60, env=env,
                                 cwd=tmp_path)
         return result, dict(re.findall(r"^([A-Z_0-9]+)='(.*)'$", env_file.read_text(), re.M))
@@ -110,7 +111,7 @@ def test_fresh_install_gets_a_self_signed_pair(tls, tmp_path):
     result, env = tls()
     assert result.returncode == 0, result.stderr
     assert env == {"TLS_CERT_FILE": "./tls/cert.pem", "TLS_KEY_FILE": "./tls/key.pem", "TLS_PKCS12_FILE": "",
-                   "TLS_PKCS12_PASSWORD": ""}
+                   "TLS_PKCS12_PASSWORD": "", "TLS_HOST_DIR": ""}
     cert_path, key_path = tls.install / "tls" / "cert.pem", tls.install / "tls" / "key.pem"
     cert = cert_of(cert_path)
     assert cert.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)[0].value == "DTM Demonstrator self-signed"
@@ -238,8 +239,54 @@ def test_pkcs12_settings_are_kept(tls):
     result, env = tls(lines)
     assert result.returncode == 0
     assert env == {"TLS_CERT_FILE": "", "TLS_KEY_FILE": "", "TLS_PKCS12_FILE": "/etc/ssl/demo.p12",
-                   "TLS_PKCS12_PASSWORD": "s3cret"}
+                   "TLS_PKCS12_PASSWORD": "s3cret", "TLS_HOST_DIR": ""}
     assert not (tls.install / "tls" / "cert.pem").exists()
+
+
+# --- --tls-dir (TLS_HOST_DIR) ------------------------------------------------------------------------------
+
+@needs_openssl
+def test_tls_dir_is_written_and_kept_on_updates(tls, tmp_path):
+    result, env = tls(tls_dir="/etc/digicert")
+    assert result.returncode == 0, result.stderr
+    assert env["TLS_HOST_DIR"] == "/etc/digicert"
+    result, env = tls(keep_env=True)  # an update without the option keeps it
+    assert result.returncode == 0 and env["TLS_HOST_DIR"] == "/etc/digicert"
+    result, env = tls(keep_env=True, tls_dir="/srv-certs/acme")  # given again: replaced
+    assert env["TLS_HOST_DIR"] == "/srv-certs/acme" and tls.env_file.read_text().count("TLS_HOST_DIR=") == 1
+
+
+@needs_openssl
+def test_hand_edited_tls_dir_is_never_overwritten(tls):
+    result, env = tls("TLS_CERT_FILE='./tls/cert.pem'\nTLS_KEY_FILE='./tls/key.pem'\nTLS_HOST_DIR='/opt/acme'\n")
+    assert result.returncode == 0 and env["TLS_HOST_DIR"] == "/opt/acme"
+
+
+@pytest.mark.parametrize("value,message", [
+    ("relative/dir", "--tls-dir needs an existing absolute directory: relative/dir"),
+    ("/nonexistent-demo-dir/x", "--tls-dir needs an existing absolute directory: /nonexistent-demo-dir/x"),
+    ("FILE", "--tls-dir needs an existing absolute directory"),
+    ("/", "--tls-dir must be a directory like /etc/digicert"),
+    ("/usr", "--tls-dir must be a directory like /etc/digicert"),
+    ("/usr/bin", "--tls-dir must be a directory like /etc/digicert"),  # would cover the container's own files
+    ("SPACE", "--tls-dir must be a directory like /etc/digicert"),
+])
+def test_tls_dir_is_validated_first(installer, tmp_path, value, message):  # noqa: F811
+    if value == "FILE":
+        value = str(tmp_path / "a-file")
+        Path(value).write_text("x")
+    if value == "SPACE":
+        value = str(tmp_path / "with space")
+        Path(value).mkdir()
+    result, calls = installer("--version", "v0.1.0", "--tls-dir", value)
+    assert result.returncode == 1 and f"ERROR: {message}" in result.stderr and calls == []
+
+
+def test_valid_tls_dir_passes_validation(installer, tmp_path):  # noqa: F811
+    (tmp_path / "acme" / "live").mkdir(parents=True)
+    result, calls = installer("--version", "v0.1.0", "--tls-dir", str(tmp_path / "acme" / "live" / ".."))
+    assert "ERROR" not in result.stderr
+    assert calls[:1] == ["mkdir -p /opt/dtm-demonstrator"]  # reached the first system change
 
 
 # --- option validation (before any system change) -------------------------------------------------------
@@ -257,6 +304,7 @@ def test_help_documents_the_tls_options():
     text = subprocess.run([BASH, str(INSTALLER), "--help"], capture_output=True, text=True, timeout=10).stdout
     assert re.search(r"^\s+--tls-cert PATH\s", text, re.M) and re.search(r"^\s+--tls-key PATH\s", text, re.M)
     assert re.search(r"^\s+--tls selfsigned\s", text, re.M) and "TLS_PKCS12_FILE" in text
+    assert re.search(r"^\s+--tls-dir PATH\s+.*", text, re.M) and "TLS_HOST_DIR" in text
 
 
 def test_installer_fetches_one_caddyfile_and_reapplies_tls_at_start():
@@ -264,6 +312,6 @@ def test_installer_fetches_one_caddyfile_and_reapplies_tls_at_start():
     assert 'fetch deploy/Caddyfile "$INSTALL_DIR/Caddyfile"' in text
     assert "Caddyfile.selfsigned" not in text and "Caddyfile.custom" not in text
     assert re.search(r"^ExecStart=.* up -d --force-recreate tls proxy$", text, re.M)
-    assert 'chmod 700 "$INSTALL_DIR/tls"\n' in text  # the .env sources: root only
+    assert 'chmod 700 "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-host"' in text  # the .env sources: root only
     # the live directory is shared with the app's group, which swaps the certificate set in Settings
     assert 'chown "0:$APP_UID" "$INSTALL_DIR/tls-live" && chmod 770 "$INSTALL_DIR/tls-live"' in text

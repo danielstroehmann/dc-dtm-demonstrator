@@ -14,7 +14,7 @@ IMAGE_REPO="ghcr.io/danielstroehmann/dc-dtm-demonstrator"
 INSTALL_DIR="/opt/dtm-demonstrator"
 APP_UID=10001
 
-version="" branch="" tls_mode="" tls_cert="" tls_key="" hosts="" port="" http_port="" local_image="" local_files=""
+version="" branch="" tls_mode="" tls_cert="" tls_key="" tls_dir="" hosts="" port="" http_port="" local_image="" local_files=""
 uninstall=false purge=false assume_yes=false reset_password=false
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -28,6 +28,8 @@ Options:
   --tls-cert PATH       use this certificate (PEM, with chain) – written to TLS_CERT_FILE in .env
   --tls-key PATH        use this private key (PEM) – written to TLS_KEY_FILE in .env
   --tls selfsigned      back to the generated self-signed certificate
+  --tls-dir PATH        host directory (e.g. /etc/digicert) whose certificate files Settings may use by path,
+                        renewals included – written to TLS_HOST_DIR in .env
                         (TLS is configured in .env: TLS_CERT_FILE/TLS_KEY_FILE or TLS_PKCS12_FILE)
   --host NAME           host name or IP the UI is reached by (repeatable; default: host name + IPs)
   --port N              HTTPS port (default 443)
@@ -48,6 +50,7 @@ while [ $# -gt 0 ]; do
 		--tls) tls_mode="${2:?}"; shift 2 ;;
 		--tls-cert) tls_cert="${2:?}"; shift 2 ;;
 		--tls-key) tls_key="${2:?}"; shift 2 ;;
+		--tls-dir) tls_dir="${2:?}"; shift 2 ;;
 		--host) hosts="${hosts:+$hosts }${2:?}"; shift 2 ;;
 		--port) port="${2:?}"; shift 2 ;;
 		--http-port) http_port="${2:?}"; shift 2 ;;
@@ -73,6 +76,13 @@ VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
 # "custom" is kept for older command lines: it means --tls-cert/--tls-key
 [ -z "$tls_mode" ] || [[ "$tls_mode" =~ ^(selfsigned|custom)$ ]] || die "--tls must be selfsigned or custom"
 [ "$tls_mode" != custom ] || [ -n "$tls_cert$tls_key" ] || die "--tls custom needs --tls-cert and --tls-key"
+if [ -n "$tls_dir" ]; then
+	# Mounted at the same path in the tls services' containers: it must not cover one of their system directories.
+	{ [[ "$tls_dir" == /* ]] && [ -d "$tls_dir" ]; } || die "--tls-dir needs an existing absolute directory: $tls_dir"
+	tls_dir=$(realpath "$tls_dir")
+	{ [[ "$tls_dir" =~ ^(/[A-Za-z0-9._-]+){2,}$ ]] && ! [[ "$tls_dir" =~ ^/(bin|dev|lib[^/]*|proc|run|sbin|srv|sys|tmp|usr|tls[^/]*)/ ]]; } \
+		|| die "--tls-dir must be a directory like /etc/digicert (two levels or more, no system directory, plain characters): $tls_dir"
+fi
 
 compose() { docker compose --project-directory "$INSTALL_DIR" -p dtm-demonstrator "$@"; }
 
@@ -218,6 +228,12 @@ if ! grep -q '^# TLS:' "$env_file"; then
 #   Applied at every start: systemctl restart dtm-demonstrator
 EOF
 fi
+if ! grep -q '^# TLS_HOST_DIR:' "$env_file"; then
+	cat >>"$env_file" <<'EOF'
+# TLS_HOST_DIR: a host directory (e.g. /etc/digicert) whose certificate files Settings → HTTPS certificate may use
+#   by path – read-only, renewals applied within a minute. Set with: install.sh --tls-dir PATH
+EOF
+fi
 chmod 600 "$env_file"
 
 
@@ -281,8 +297,8 @@ env_set SITE_HOSTS "$hosts"
 env_rewrite SITE_ADDRESSES  # derived from SITE_HOSTS when the proxy starts (older installs stored it)
 env_set DEFAULT_SNI "$default_sni"
 
-mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-live" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
-chmod 700 "$INSTALL_DIR/tls"
+mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-host" "$INSTALL_DIR/tls-live" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
+chmod 700 "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-host"  # tls-host: mounted in place of an unset TLS_HOST_DIR
 # tls-live: the proxy serves from it; the app's group (gid = uid) swaps the certificate set in Settings live.
 chown "0:$APP_UID" "$INSTALL_DIR/tls-live" && chmod 770 "$INSTALL_DIR/tls-live"
 chown "$APP_UID" "$INSTALL_DIR/data" && chmod 700 "$INSTALL_DIR/data"
@@ -328,6 +344,8 @@ fi
 env_rewrite TLS_MODE
 grep -q '^TLS_PKCS12_FILE=' "$env_file" || env_set TLS_PKCS12_FILE ""
 grep -q '^TLS_PKCS12_PASSWORD=' "$env_file" || env_set TLS_PKCS12_PASSWORD ""
+[ -z "$tls_dir" ] || env_set TLS_HOST_DIR "$tls_dir"  # checked with the options above
+grep -q '^TLS_HOST_DIR=' "$env_file" || env_set TLS_HOST_DIR ""
 
 fetch deploy/docker-compose.yml "$INSTALL_DIR/docker-compose.yml"
 fetch deploy/Caddyfile "$INSTALL_DIR/Caddyfile"

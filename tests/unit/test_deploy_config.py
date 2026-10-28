@@ -70,11 +70,11 @@ def test_compose_tls_service_contract():
     tls = services["tls"]
     assert tls["image"] == "${DEMONSTRATOR_IMAGE}" and tls["restart"] == "no" and tls["user"] == "0"
     assert tls["command"] == ["python", "-m", "app.tls_setup"]
-    assert tls["environment"] == {"TLS_PKCS12_PASSWORD": "${TLS_PKCS12_PASSWORD:-}"}
+    assert tls["environment"] == {"TLS_PKCS12_PASSWORD": "${TLS_PKCS12_PASSWORD:-}", "TLS_HOST_DIR": "${TLS_HOST_DIR:-}"}
     binds = [v for v in tls["volumes"] if isinstance(v, dict)]
     assert [(b["source"], b["target"]) for b in binds] == [
         ("${TLS_CERT_FILE:-/dev/null}", "/tls-in/cert.pem"), ("${TLS_KEY_FILE:-/dev/null}", "/tls-in/key.pem"),
-        ("${TLS_PKCS12_FILE:-/dev/null}", "/tls-in/keystore.p12")]
+        ("${TLS_PKCS12_FILE:-/dev/null}", "/tls-in/keystore.p12"), HOST_DIR_MOUNT]
     for b in binds:  # read-only, and a missing path is an error instead of a created directory
         assert b["type"] == "bind" and b["read_only"] is True and b["bind"] == {"create_host_path": False}
     assert "./tls-live:/tls" in tls["volumes"]
@@ -85,6 +85,28 @@ def test_compose_tls_service_contract():
                                    "tls": {"condition": "service_completed_successfully"}}
     assert "./tls-live:/tls:ro" in proxy["volumes"] and "./Caddyfile:/etc/caddy/Caddyfile:ro" in proxy["volumes"]
     assert not any(str(v).startswith("./tls:") for v in proxy["volumes"])  # the proxy never reads the sources
+
+
+HOST_DIR_MOUNT = ("${TLS_HOST_DIR:-./tls-host}", "${TLS_HOST_DIR:-/tls-host}")
+
+
+def test_tls_watch_service_contract():
+    """Root reads root-only keys below TLS_HOST_DIR – read-only, at the same path (symlinks), nothing else."""
+    services = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text())["services"]
+    watch = services["tls-watch"]
+    assert watch["image"] == "${DEMONSTRATOR_IMAGE}" and watch["restart"] == "unless-stopped" and watch["user"] == "0"
+    assert watch["command"] == ["python", "-m", "app.tls_watch"] and watch["group_add"] == ["10001"]
+    assert watch["environment"] == {"TLS_HOST_DIR": "${TLS_HOST_DIR:-}"}  # no other secret
+    assert watch["network_mode"] == "none" and watch["read_only"] is True and watch["cap_drop"] == ["ALL"]
+    assert watch["security_opt"] == ["no-new-privileges:true"] and "ports" not in watch and "cap_add" not in watch
+    assert watch["healthcheck"] == {"disable": True}
+    host = [v for v in watch["volumes"] if isinstance(v, dict)]
+    assert [(b["source"], b["target"]) for b in host] == [HOST_DIR_MOUNT]
+    assert host[0]["read_only"] is True and host[0]["bind"] == {"create_host_path": False}
+    assert sorted(v for v in watch["volumes"] if isinstance(v, str)) == ["./tls-live:/tls-live",
+                                                                         "caddy-admin:/run/caddy-admin"]
+    # the one-shot service keeps gating the proxy at start
+    assert services["proxy"]["depends_on"]["tls"] == {"condition": "service_completed_successfully"}
 
 
 def test_settings_certificate_wiring():
@@ -100,7 +122,10 @@ def test_settings_certificate_wiring():
     assert "groupadd --system --gid 10001 app" in (DEPLOY.parent / "Dockerfile").read_text()
     assert "caddy-admin" in compose["volumes"]
     users = [name for name, s in services.items() if any(str(v).startswith("caddy-admin:") for v in s.get("volumes", []))]
-    assert sorted(users) == ["app", "proxy"]
+    assert sorted(users) == ["app", "proxy", "tls-watch"]
+    # the app checks host paths against TLS_HOST_DIR as text but never mounts it
+    assert app["environment"]["TLS_HOST_DIR"] == "${TLS_HOST_DIR:-}"
+    assert not any(isinstance(v, dict) or "TLS_HOST_DIR" in str(v) or "tls-host" in str(v) for v in app["volumes"])
     # no TCP admin listener: not in the Caddyfile, not as a port
     globals_ = re.search(r"^\{\n(.*?)^\}", CADDYFILE.read_text(), re.M | re.S).group(1)
     assert "\tadmin unix//run/caddy-admin/admin.sock|0666\n" in globals_

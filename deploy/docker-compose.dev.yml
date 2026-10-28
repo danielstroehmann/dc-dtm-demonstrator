@@ -13,6 +13,9 @@ services:
   tls:
     volumes:
       - ${DEV_REPO:?run scripts/dev-up}/app:/srv/app:ro
+  tls-watch:  # no reload: restart it after a change to its code
+    volumes:
+      - ${DEV_REPO:?run scripts/dev-up}/app:/srv/app:ro
   launcher:
     volumes:
       - ${DEV_REPO:?run scripts/dev-up}/app:/srv/app:ro

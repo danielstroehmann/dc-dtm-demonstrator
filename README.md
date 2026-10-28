@@ -45,6 +45,7 @@ curl -fsSL https://github.com/danielstroehmann/dc-dtm-demonstrator/releases/late
 
 Then open one of the printed URLs – **the first visit sets the login password**. Options (`… | sudo bash -s -- <options>`): `--version vX.Y.Z` or
 `--branch dev` (development preview), `--host NAME` (repeatable), `--tls-cert … --tls-key …` (own PEM pair),
+`--tls-dir PATH` (host directory whose certificate files Settings may use by path),
 `--port N`, `--http-port N` (plain HTTP, redirects to HTTPS; default 80), `--yes` (no questions), `--reset-password` (forgotten password, or someone else was first: the next visitor
 sets a new one, all sessions end), `--uninstall [--purge]`. Running it again updates the installation and keeps data,
 password and settings.
@@ -74,6 +75,9 @@ Let's Encrypt. Alternatively clear both and set `TLS_PKCS12_FILE` and `TLS_PKCS1
 are set). The files are checked at every start; if something is wrong,
 `docker compose -p dtm-demonstrator logs tls` says what. Without editing files: **Settings → HTTPS certificate**
 takes a PEM pair or a PKCS#12 file and applies it at once; it wins over `.env` until you choose *Reset to default*.
+It also takes *paths on the host* – e.g. `/etc/digicert/live/<name>/fullchain.pem` and `privkey.pem` of an ACME
+client – below `TLS_HOST_DIR` (`install.sh --tls-dir /etc/digicert`): the `tls-watch` service reads them as root,
+read-only, and applies renewals within a minute. Whatever was chosen last in Settings wins.
 
 The DTM connection (host, account, API key) is entered in the web UI after the first login.
 

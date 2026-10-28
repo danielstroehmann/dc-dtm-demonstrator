@@ -7,10 +7,14 @@ is mounted as /dev/null, i.e. read as empty. The result is written as PEM for Ca
 stops here with a clear message, so the proxy never starts with a broken or mismatched pair.
 
 A certificate uploaded in Settings (app/tls_settings.py, kept in TARGET as settings-*.pem) wins over .env, so a
-restart keeps the admin's choice. The .env pair is always written as default-*.pem too: that is what "Reset to
+restart keeps the admin's choice. Host paths chosen in Settings (app/tls_watch.py) are read again here – the
+certificate may have been renewed while the demonstrator was down; if they are not usable, the last pair applied
+from them serves. The .env pair is always written as default-*.pem too: that is what "Reset to
 default" in Settings goes back to – the app itself cannot read the files .env points to."""
 
+import json
 import os
+import stat
 import sys
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -27,7 +31,10 @@ DEV_NULL = os.stat(os.devnull).st_rdev  # 1:3 in every Linux container
 MAX_SIZE = 1 << 20  # a certificate chain or keystore is a few KB
 ACTIVE = ("cert.pem", "key.pem")  # what Caddy serves
 DEFAULT = ("default-cert.pem", "default-key.pem")  # from .env (or the installer's self-signed pair)
-SETTINGS = ("settings-cert.pem", "settings-key.pem")  # uploaded in Settings
+SETTINGS = ("settings-cert.pem", "settings-key.pem")  # uploaded in Settings, or read from the host paths
+HOST_PATHS = "settings-paths.json"  # the host paths applied from Settings (holds a PKCS#12 password: 0640)
+# A host directory (.env TLS_HOST_DIR) mounted read-only at the same path, so its symlinks resolve as on the host.
+HOST_DIR = os.environ.get("TLS_HOST_DIR", "")
 # The app's group (see Dockerfile): the app replaces the live files and reads the default pair, the proxy reads
 # the keys through it (both have no CAP_DAC_OVERRIDE) – so keys are 0640 and the directory 0770 for this group.
 GROUP = int(os.environ.get("TLS_GROUP", "10001"))
@@ -91,6 +98,60 @@ def check(chain: list[x509.Certificate], key) -> x509.Certificate:
     return leaf
 
 
+def usable(chain: list[x509.Certificate], key) -> x509.Certificate:
+    """What Settings accepts: a matching pair that is valid now."""
+    leaf = check(chain, key)
+    if remaining(leaf).total_seconds() <= 0:
+        raise TLSError("the certificate has expired")
+    if leaf.not_valid_before_utc > datetime.now(timezone.utc):
+        raise TLSError("the certificate is not valid yet")
+    return leaf
+
+
+def read_host(path: str, what: str) -> bytes:
+    """A file below HOST_DIR – also after following its links, so Settings cannot read any other file."""
+    if not HOST_DIR:
+        raise TLSError("no host directory is configured – set TLS_HOST_DIR in .env")
+    real = Path(os.path.realpath(path))
+    if not real.is_relative_to(Path(HOST_DIR).resolve()):
+        raise TLSError(f"{what} {path} is outside {HOST_DIR} (links followed)")
+    try:
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)  # non-blocking: a FIFO must not hang the service
+    except FileNotFoundError as exc:
+        raise TLSError(f"{what} {path} does not exist") from exc
+    except IsADirectoryError as exc:
+        raise TLSError(f"{what} {path} is not a file") from exc
+    except OSError as exc:  # e.g. not root's: the service has no CAP_DAC_OVERRIDE
+        raise TLSError(f"{what} {path} cannot be read – it must be readable by root") from exc
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+        if regular:
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read(MAX_SIZE + 1)
+    except OSError as exc:
+        raise TLSError(f"{what} {path} cannot be read") from exc
+    finally:
+        os.close(fd)
+    if not regular:
+        raise TLSError(f"{what} {path} is not a file")
+    if len(data) > MAX_SIZE:
+        raise TLSError(f"{what} {path} is larger than 1 MB – not a certificate or key")
+    return data
+
+
+def load_host(config: dict) -> tuple[list[x509.Certificate], object]:
+    """The pair the host paths of Settings point to, checked like an upload."""
+    if config.get("mode") == "pkcs12":
+        chain, key = from_pkcs12(read_host(config["keystore"], "the PKCS#12 file"), config.get("password", ""),
+                                 "the PKCS#12 file", "password")
+    else:
+        chain, key = from_pem(read_host(config["certificate"], "the certificate file"),
+                              read_host(config["private_key"], "the private key file"),
+                              "the certificate file", "the private key file")
+    usable(chain, key)
+    return chain, key
+
+
 def resolve() -> tuple[str, list[x509.Certificate], object]:
     cert_pem, key_pem, p12 = _read("cert.pem"), _read("key.pem"), _read("keystore.p12")
     if cert_pem.strip() or key_pem.strip():
@@ -152,8 +213,24 @@ def from_settings() -> tuple[list[x509.Certificate], object] | None:
     return chain, private
 
 
+def from_host() -> tuple[list[x509.Certificate], object] | None:
+    """Host paths chosen in Settings, read again; on success they are the Settings pair from now on."""
+    try:
+        config = json.loads((TARGET / HOST_PATHS).read_bytes())
+        chain, key = load_host(config)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, TLSError) as exc:
+        reason = exc if isinstance(exc, TLSError) else "unreadable configuration"
+        print(f"TLS: WARNING – the certificate from the host path is not usable ({reason}) – keeping the last one "
+              "applied", file=sys.stderr, flush=True)
+        return None
+    write(chain, key, SETTINGS)
+    return chain, key
+
+
 def main() -> int:
-    settings = from_settings()
+    settings = from_host() or from_settings()
     try:
         kind, chain, key = resolve()
         check(chain, key)
