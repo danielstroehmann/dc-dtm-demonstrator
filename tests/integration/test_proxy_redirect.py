@@ -84,6 +84,7 @@ def proxy(request, tmp_path_factory):
                # --mount, not -v: a missing source fails instead of Docker creating a directory in the repo
                "--mount", f"type=bind,source={DEPLOY / 'Caddyfile'},target=/etc/caddy/Caddyfile,readonly",
                "--mount", f"type=bind,source={tls_dir},target=/tls,readonly",
+               "--tmpfs", "/run/caddy-admin",  # compose: the caddy-admin volume holding the admin socket
                "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges:true",
                "--entrypoint", "/bin/sh", proxy_service["image"],
                "-c", proxy_service["entrypoint"][2].replace("$$", "$")]

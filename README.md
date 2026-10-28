@@ -72,7 +72,8 @@ Settings live in `/opt/dtm-demonstrator/.env` (on Windows inside the distro: `ws
 key – by default a self-signed pair the installer created in `./tls`; point them to your own files, e.g. from
 Let's Encrypt. Alternatively clear both and set `TLS_PKCS12_FILE` and `TLS_PKCS12_PASSWORD` (PEM wins when both
 are set). The files are checked at every start; if something is wrong,
-`docker compose -p dtm-demonstrator logs tls` says what.
+`docker compose -p dtm-demonstrator logs tls` says what. Without editing files: **Settings → HTTPS certificate**
+takes a PEM pair or a PKCS#12 file and applies it at once; it wins over `.env` until you choose *Reset to default*.
 
 The DTM connection (host, account, API key) is entered in the web UI after the first login.
 

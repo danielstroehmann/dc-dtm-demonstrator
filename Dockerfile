@@ -6,8 +6,10 @@ WORKDIR /srv
 RUN apt-get update && apt-get install -y --no-install-recommends scep && rm -rf /var/lib/apt/lists/* \
  && rm -f /usr/bin/scepserver
 COPY requirements.txt .
+# gid 10001 is fixed: the proxy and the tls service join it (compose group_add) to read the TLS files the app writes.
 RUN pip install --no-cache-dir -r requirements.txt \
- && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin app \
+ && groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid app --home-dir /nonexistent --shell /usr/sbin/nologin app \
  && mkdir -p /data && chown app /data
 COPY app ./app
 

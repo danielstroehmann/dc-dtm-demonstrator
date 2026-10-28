@@ -9,6 +9,10 @@ services:
       MINION_LAUNCHER: http://launcher:8080  # UC-8: minions only through the launcher below
     volumes:
       - ./data:/data
+      # The HTTPS certificate set in Settings: written next to what the proxy serves, applied by a reload
+      # through Caddy's admin socket (app/tls_settings.py).
+      - ./tls-live:/tls-live
+      - caddy-admin:/run/caddy-admin:ro
     networks: [internal, launcher]
     read_only: true
     tmpfs: [/tmp]
@@ -19,10 +23,12 @@ services:
   # Resolves the TLS settings of .env at every start (PEM pair, else PKCS#12) and hands Caddy a checked
   # PEM pair in ./tls-live; on a problem it stops with a clear message and the proxy does not start.
   # An unset path is mounted as /dev/null (read as empty); a set one must exist (no directory is created).
+  # A certificate set in Settings (kept in ./tls-live) wins over .env.
   tls:
     image: ${DEMONSTRATOR_IMAGE}
     restart: "no"
     user: "0"  # writes files the proxy (root, without CAP_DAC_OVERRIDE) can read; reads root-owned keys
+    group_add: ["10001"]  # the app's group: reads the Settings pair, hands ./tls-live and the keys to the app
     command: ["python", "-m", "app.tls_setup"]
     environment:
       TLS_PKCS12_PASSWORD: ${TLS_PKCS12_PASSWORD:-}
@@ -62,6 +68,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./tls-live:/tls:ro
       - ./caddy-data:/data
+      - caddy-admin:/run/caddy-admin  # the admin API's unix socket (Caddyfile), shared with the app only
+    group_add: ["10001"]  # reads the keys the app writes (0640, the app's group) without CAP_DAC_OVERRIDE
     networks: [internal]
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
@@ -107,6 +115,9 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 64m
+
+volumes:
+  caddy-admin:
 
 networks:
   internal:

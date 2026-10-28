@@ -745,3 +745,8 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .tip-card progress::-webkit-progress-value { background: #f57c00; }
 .tip-card progress::-moz-progress-bar { background: #f57c00; }
 
+
+/* ---- Settings: HTTPS certificate ---- */
+.tls-cert { margin: 0 0 var(--s3); }
+.tls-cert dd.soon { color: var(--dc-orange); }
+.tls-cert dd.expired { color: var(--bad); }

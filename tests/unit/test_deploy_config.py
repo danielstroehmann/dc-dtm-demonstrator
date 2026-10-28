@@ -87,6 +87,26 @@ def test_compose_tls_service_contract():
     assert not any(str(v).startswith("./tls:") for v in proxy["volumes"])  # the proxy never reads the sources
 
 
+def test_settings_certificate_wiring():
+    """Settings → HTTPS certificate: the app writes into ./tls-live and reloads Caddy over a unix socket only."""
+    compose = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text())
+    services = compose["services"]
+    app, proxy, tls = services["app"], services["proxy"], services["tls"]
+    assert "./tls-live:/tls-live" in app["volumes"] and "caddy-admin:/run/caddy-admin:ro" in app["volumes"]
+    assert app["read_only"] is True and app["cap_drop"] == ["ALL"]  # unchanged hardening
+    assert "caddy-admin:/run/caddy-admin" in proxy["volumes"] and "./tls-live:/tls:ro" in proxy["volumes"]
+    # the app's fixed gid (Dockerfile) – keys are 0640 for it, the directory 0770
+    assert proxy["group_add"] == ["10001"] and tls["group_add"] == ["10001"]
+    assert "groupadd --system --gid 10001 app" in (DEPLOY.parent / "Dockerfile").read_text()
+    assert "caddy-admin" in compose["volumes"]
+    users = [name for name, s in services.items() if any(str(v).startswith("caddy-admin:") for v in s.get("volumes", []))]
+    assert sorted(users) == ["app", "proxy"]
+    # no TCP admin listener: not in the Caddyfile, not as a port
+    globals_ = re.search(r"^\{\n(.*?)^\}", CADDYFILE.read_text(), re.M | re.S).group(1)
+    assert "\tadmin unix//run/caddy-admin/admin.sock|0666\n" in globals_
+    assert not any("2019" in str(p) for s in services.values() for p in s.get("ports", []))
+
+
 def test_compose_publishes_http_and_https_ports():
     proxy = proxy_service()
     assert "${HTTP_PORT:-80}:80" in proxy["ports"]

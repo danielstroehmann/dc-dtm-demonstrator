@@ -111,7 +111,7 @@ if $uninstall; then
 	fi
 	if [ -f "$INSTALL_DIR/docker-compose.yml" ] && command -v docker >/dev/null; then
 		info "Stopping the demonstrator"
-		if $purge; then compose down --remove-orphans --rmi all || true; else compose down --remove-orphans || true; fi
+		if $purge; then compose down --remove-orphans --volumes --rmi all || true; else compose down --remove-orphans || true; fi
 	fi
 	if command -v docker >/dev/null; then  # minions of runs that were not rolled back
 		docker ps -aq --filter label=dtm-demonstrator.run | xargs -r docker rm -f >/dev/null || true
@@ -282,7 +282,9 @@ env_rewrite SITE_ADDRESSES  # derived from SITE_HOSTS when the proxy starts (old
 env_set DEFAULT_SNI "$default_sni"
 
 mkdir -p "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-live" "$INSTALL_DIR/caddy-data" "$INSTALL_DIR/data"
-chmod 700 "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-live"
+chmod 700 "$INSTALL_DIR/tls"
+# tls-live: the proxy serves from it; the app's group (gid = uid) swaps the certificate set in Settings live.
+chown "0:$APP_UID" "$INSTALL_DIR/tls-live" && chmod 770 "$INSTALL_DIR/tls-live"
 chown "$APP_UID" "$INSTALL_DIR/data" && chmod 700 "$INSTALL_DIR/data"
 
 # --- TLS: .env names the certificate files; the `tls` service checks and applies them at every start

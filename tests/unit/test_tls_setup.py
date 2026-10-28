@@ -101,7 +101,7 @@ def test_pem_pair_with_chain(dirs, pki, capsys):
     assert chain == [pki["leaf"], pki["ca"]] and same_key(key, pki["key"])  # chain order kept
     assert (target / "key.pem").read_bytes().startswith(b"-----BEGIN PRIVATE KEY-----")  # PKCS#8
     assert stat.S_IMODE((target / "cert.pem").stat().st_mode) == 0o644
-    assert stat.S_IMODE((target / "key.pem").stat().st_mode) == 0o600
+    assert stat.S_IMODE((target / "key.pem").stat().st_mode) == 0o640  # the app's group (proxy via group_add)
     assert not list(target.glob(".*.tmp"))  # atomic writes leave nothing behind
     valid = pki["leaf"].not_valid_after_utc.strftime("%Y-%m-%d")
     assert out.strip() == f"TLS: PEM certificate for demo.local, 192.0.2.10, valid until {valid}"
@@ -372,3 +372,69 @@ def test_another_character_device_is_not_empty(dirs, pki, capsys):
     (source / "keystore.p12").symlink_to("/dev/zero")
     with pytest.raises(tls_setup.TLSError, match="keystore.p12 is not a file"):
         tls_setup._read("keystore.p12")
+
+
+# --- the certificate set in Settings (settings-*.pem in the target, see app/tls_settings.py) ---------------
+
+def settings_pair(target: Path, cn: str = "settings.demo"):
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = make_cert(cn, key, sans=(cn,))
+    target.mkdir(exist_ok=True)
+    (target / "settings-cert.pem").write_bytes(pem(cert))
+    (target / "settings-key.pem").write_bytes(key_pem(key))
+    return cert, key
+
+
+def test_settings_certificate_wins_over_env_and_env_stays_the_default(dirs, pki, capsys):
+    source, target = dirs
+    put(source, "cert.pem", pem(pki["leaf"]))
+    put(source, "key.pem", key_pem(pki["key"]))
+    cert, key = settings_pair(target)
+    code, out, err = run(capsys)
+    assert code == 0, err
+    chain, served = written(target)
+    assert chain == [cert] and same_key(served, key)
+    assert out.startswith("TLS: Settings certificate for settings.demo, valid until ")
+    assert x509.load_pem_x509_certificates((target / "default-cert.pem").read_bytes()) == [pki["leaf"]]
+    assert same_key(serialization.load_pem_private_key((target / "default-key.pem").read_bytes(), None), pki["key"])
+    assert stat.S_IMODE((target / "default-key.pem").stat().st_mode) == 0o640
+
+
+def test_without_settings_the_env_pair_is_served_and_kept_as_default(dirs, pki, capsys):
+    source, target = dirs
+    put(source, "cert.pem", pem(pki["leaf"]))
+    put(source, "key.pem", key_pem(pki["key"]))
+    assert run(capsys)[0] == 0
+    assert (target / "cert.pem").read_bytes() == (target / "default-cert.pem").read_bytes()
+    assert not (target / "settings-cert.pem").exists()
+
+
+def test_settings_certificate_serves_even_when_env_is_broken(dirs, pki, capsys):
+    source, target = dirs
+    put(source, "cert.pem", pem(pki["leaf"]))  # half a pair
+    cert, _ = settings_pair(target)
+    (target / "default-cert.pem").write_bytes(b"stale")
+    (target / "default-key.pem").write_bytes(b"stale")
+    code, out, err = run(capsys)
+    assert code == 0 and written(target)[0] == [cert]
+    assert "TLS: WARNING – set both TLS_CERT_FILE and TLS_KEY_FILE" in err and "serving the certificate from Settings" in err
+    assert not (target / "default-cert.pem").exists() and not (target / "default-key.pem").exists()  # nothing to reset to
+
+
+def test_broken_settings_pair_falls_back_to_env(dirs, pki, capsys):
+    source, target = dirs
+    put(source, "cert.pem", pem(pki["leaf"]))
+    put(source, "key.pem", key_pem(pki["key"]))
+    settings_pair(target)
+    (target / "settings-key.pem").write_bytes(key_pem(ec.generate_private_key(ec.SECP256R1())))  # not its key
+    code, out, err = run(capsys)
+    assert code == 0 and written(target)[0] == [pki["leaf"]]
+    assert "TLS: WARNING – the certificate from Settings is not usable" in err and out.startswith("TLS: PEM certificate")
+
+
+def test_broken_settings_pair_and_broken_env_fail(dirs, capsys):
+    _, target = dirs
+    settings_pair(target)
+    (target / "settings-cert.pem").write_bytes(b"garbage")
+    code, _, err = run(capsys)
+    assert code == 1 and "no certificate configured" in err and not (target / "cert.pem").exists()

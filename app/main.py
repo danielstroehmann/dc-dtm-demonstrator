@@ -28,11 +28,12 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (certinfo, cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles,
-               trustedge, watchdog)
+               tls_settings, trustedge, watchdog)
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, BUILD, DATA_DIR, DEV_MODE, build_label
 from .dtm import DTMClient, DTMConfig, DTMError
 from .store import Store, active, rolled_back
+from .tls_setup import MAX_SIZE as TLS_MAX_SIZE, TLSError
 
 log = logging.getLogger("demonstrator")
 HERE = Path(__file__).parent
@@ -296,11 +297,12 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                       connections=[_public(c) for c in connections], minions_ready=await minions.available(),
                       selected=store.connection(None)["id"] if connections else None)
 
-    def settings_view(request: Request, status_code: int = 200, **form):
+    def settings_view(request: Request, status_code: int = 200, tls_form: dict | None = None, **form):
         connections = [_public(c) for c in store.connections()]
         used = {c["id"]: in_use(c["id"]) for c in connections}
         return render(request, "settings.html", status_code, nav="settings", connections=connections, in_use=used,
-                      form=form or {"host": "one.digicert.com"})
+                      form=form or {"host": "one.digicert.com"}, tls=tls_settings.status(),
+                      tls_form=tls_form or {"mode": "pem"})
 
     @app.get("/settings")
     async def settings_page(request: Request, edit: int | None = None):
@@ -421,6 +423,39 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(409, f"Connection {conn['name']!r} still has runs that are not rolled back")
         store.delete_connection(connection_id)
         return RedirectResponse("/settings", status_code=303)
+
+    @app.post("/settings/tls")
+    async def upload_tls(request: Request):
+        """The demonstrator's own HTTPS certificate: checked, then applied live (see app/tls_settings.py)."""
+        def refused(status_code: int, mode: str, message: str):
+            return settings_view(request, status_code, tls_form={"mode": mode, "error": message[:1].upper() + message[1:]})
+        # Bounded before the body is parsed: two files of at most 1 MB plus the form's overhead.
+        length = request.headers.get("content-length", "")
+        if not length.isdigit() or int(length) > 2 * TLS_MAX_SIZE + 65536:
+            return refused(413, "pem", "The files are larger than 1 MB – not a certificate or key.")
+        form = await request.form(max_files=3, max_fields=5)
+        mode = str(form.get("mode", ""))
+
+        async def content(name: str) -> bytes:
+            upload = form.get(name)
+            return await upload.read(TLS_MAX_SIZE + 1) if hasattr(upload, "read") else b""
+        try:
+            chain, key = tls_settings.parse(mode, await content("certificate"), await content("private_key"),
+                                            await content("keystore"), str(form.get("password", "")))
+            await run_in_threadpool(tls_settings.upload, chain, key)
+        except (TLSError, tls_settings.ApplyError) as exc:
+            return refused(400, mode, str(exc))
+        finally:
+            await form.close()
+        return RedirectResponse("/settings#tls", status_code=303)
+
+    @app.post("/settings/tls/reset")
+    async def reset_tls(request: Request):
+        try:
+            await run_in_threadpool(tls_settings.reset)
+        except tls_settings.ApplyError as exc:
+            return settings_view(request, 400, tls_form={"mode": "pem", "error": str(exc)})
+        return RedirectResponse("/settings#tls", status_code=303)
 
     @app.get("/runs/new")
     async def use_case_catalog(request: Request, connection: str | None = None):

@@ -1,0 +1,53 @@
+{# The demonstrator's own HTTPS certificate (app/tls_settings.py): what is served, and an upload that applies live. #}
+<section class="block" id="tls">
+  <article class="card">
+    <div class="card-head"><h2>HTTPS certificate {% if tls %}<span class="badge">{{ tls.source }}</span>{% endif %}</h2>
+      {% if tls and tls.can_reset %}
+      <form method="post" action="/settings/tls/reset" class="inline" hx-boost="true"
+            hx-confirm="Go back to the default certificate?" data-confirm-label="Reset">
+        <button type="submit" class="outline secondary btn-sm">Reset to default</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if tls %}
+    <dl class="kv tls-cert">
+      <dt>Common name</dt><dd>{{ tls.common_name }}</dd>
+      <dt>Names</dt><dd>{{ tls.sans | join(", ") or "–" }}</dd>
+      <dt>Issuer</dt><dd>{{ tls.issuer }}</dd>
+      <dt>Valid until</dt><dd class="{{ tls.state }}">{{ tls.not_after }}{% if tls.state == "expired" %} · expired{% elif tls.state == "soon" %} · {{ tls.days_left }} days left{% endif %}</dd>
+      <dt>SHA-256</dt><dd class="mono">{{ tls.sha256 }}</dd>
+    </dl>
+    {% else %}
+    <p class="muted">The active certificate cannot be read.</p>
+    {% endif %}
+    {% if tls_form.error %}<p class="error" role="alert">{{ tls_form.error }}</p>{% endif %}
+    {# data-guide: app.js shows the fields of the chosen format only and disables the others #}
+    <form method="post" action="/settings/tls" enctype="multipart/form-data" data-guide class="tls-form">
+      <div class="fields q-grid">
+        <div class="seg-group"><span class="seg-label" id="l-tls-mode">Format</span>
+          <div role="radiogroup" aria-labelledby="l-tls-mode" class="segmented">
+            {% for value, text in [("pem", "PEM pair"), ("pkcs12", "PKCS#12")] %}<label><input type="radio" name="mode" value="{{ value }}" {% if tls_form.mode == value or (value == "pem" and tls_form.mode != "pkcs12") %}checked{% endif %}> {{ text }}</label>{% endfor %}
+          </div></div>
+        <div class="field" data-when="mode=pem">
+          <label for="tls-certificate" class="field-label">Certificate with chain</label>
+          <input id="tls-certificate" type="file" name="certificate" accept=".pem,.crt,.cer">
+        </div>
+        <div class="field" data-when="mode=pem">
+          <label for="tls-key" class="field-label">Private key</label>
+          <input id="tls-key" type="file" name="private_key" accept=".pem,.key">
+        </div>
+        <div class="field" data-when="mode=pkcs12">
+          <label for="tls-keystore" class="field-label">PKCS#12 file</label>
+          <input id="tls-keystore" type="file" name="keystore" accept=".p12,.pfx">
+        </div>
+        <div class="field" data-when="mode=pkcs12">
+          <label for="tls-password" class="field-label">Password</label>
+          <input id="tls-password" type="password" name="password" autocomplete="off">
+        </div>
+      </div>
+      <div class="action-bar">
+        <button type="submit">Upload and apply</button>
+      </div>
+    </form>
+  </article>
+</section>

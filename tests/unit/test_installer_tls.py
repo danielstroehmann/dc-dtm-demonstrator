@@ -264,4 +264,6 @@ def test_installer_fetches_one_caddyfile_and_reapplies_tls_at_start():
     assert 'fetch deploy/Caddyfile "$INSTALL_DIR/Caddyfile"' in text
     assert "Caddyfile.selfsigned" not in text and "Caddyfile.custom" not in text
     assert re.search(r"^ExecStart=.* up -d --force-recreate tls proxy$", text, re.M)
-    assert 'chmod 700 "$INSTALL_DIR/tls" "$INSTALL_DIR/tls-live"' in text
+    assert 'chmod 700 "$INSTALL_DIR/tls"\n' in text  # the .env sources: root only
+    # the live directory is shared with the app's group, which swaps the certificate set in Settings
+    assert 'chown "0:$APP_UID" "$INSTALL_DIR/tls-live" && chmod 770 "$INSTALL_DIR/tls-live"' in text
