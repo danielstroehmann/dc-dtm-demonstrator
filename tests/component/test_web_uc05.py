@@ -11,6 +11,13 @@ from tests.component.test_web_runs import assert_phase_titles, finished
 from tests.fakedtm import ECDSA_CA_ID
 
 
+def assert_title_without_subtitle(html):
+    """The run is headed by the use case's title + status pill – and nothing under it (no subtitle line)."""
+    assert re.search(r'<div class="page-head">\s*<div><h1>Passcode-bound device certificates <span class="pill [a-z]+">[a-z]+</span></h1></div>\s*</div>',
+                     html), "page head is not just the use-case title"
+    assert html.count("Passcode-bound device certificates") == 1  # only in the heading
+
+
 def uc05_form(**overrides) -> dict:
     return {"run_id": "p5", "use_case": "uc05", "protocol": "est", "mode": "single", "count": "1",
             "ca_id": ECDSA_CA_ID, "checks": "true"} | overrides
@@ -130,7 +137,8 @@ def test_uc05_overview_phase_pair(configured_user, store, enroll_net, count):
     assert results[0].endswith(" Passcode has reached its usage limit")
     assert results[1].endswith(" Invalid registered value provided in attribute: subject.common_name")
     assert '{"errors"' not in html and "{&#34;errors" not in "".join(results)
-    assert "Passcode-bound device certificates" not in html and not re.search(r"UC-?\d", html)  # no subtitle
+    assert_title_without_subtitle(html)
+    assert not re.search(r"UC-?\d", html)
 
 
 def test_uc05_steps_and_rollback_from_the_web(configured_user, store, enroll_net):
@@ -407,6 +415,9 @@ def test_wall_offers_enroll_all_for_the_waiting_devices(configured_user, store):
                              "certificates": [{"common_name": "robot-e5-uc05-est-0001", "serial": "1A", "status": "issued"}]})
     html = configured_user.get("/runs/e5").text
     assert '<svg class="wall' in html and enroll_all(html) == ["10"]  # 12 minus one enrolled, one in progress
+    card_head = re.search(r'<div class="card-head"><h2>Devices</h2>.*?</form>\s*</div>', html, re.S).group(0)
+    assert enroll_all(card_head) == ["10"]  # the action sits in the card head, the filter bar follows below it
+    assert html.index(card_head) < html.index('<div class="wall-bar"')
     response = configured_user.post("/runs/e5/enroll", follow_redirects=False)
     assert response.status_code == 303 and store.get_run("e5")["status"] == "running"
     assert enroll_all(configured_user.get("/runs/e5").text) == []

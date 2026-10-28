@@ -2,23 +2,25 @@
 {# Devices of every use case: up to tiles.WALL_FROM - 1 as large tiles, each with its own enroll / renew button – from
    there on the minion wall: one cell per device, coloured by state; a click opens the device's tile in the side panel.
    A click on a tile's certificates opens their detail view in the same panel.
-   Devices act independently; the page reloads when one finishes (HX-Refresh). Polled while a batch issues. #}
+   Devices act independently; the page reloads when one finishes (HX-Refresh). Polled while the run works – a batch
+   issues, or UC-5's field step enrolls one device after the other – so each cell turns green as its device does. #}
 {% set found = found if found is defined else tiles.devices(run) %}
-{% set filling = run.status == "running" and found and found[-1].name is none %}
+{% set filling = run.status == "running" and found %}
 <article class="card" id="devices" {% if filling %}hx-get="/runs/{{ run.id }}/devices" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   {% if found | length >= tiles.WALL_FROM %}
   {% set w = tiles.wall(run, found) %}
+  {# The action sits in the card head like every card's action; the counters below filter the wall – no buttons #}
   <div class="card-head"><h2>Devices</h2>
-    <div class="wall-bar">
-      {% for s, n in w.counts.items() %}<button type="button" class="wall-chip {{ s }}" data-filter="{{ s }}" aria-pressed="false">{{ "{:,}".format(n) | replace(",", " ") }} {{ {"busy": "in progress", "revoked": "rolled back"}.get(s, s) }}</button>{% endfor %}
-      {# UC-5 only: the field step for every device not enrolled yet – one click instead of one per cell #}
-      {% set waiting = found | rejectattr("issued") | rejectattr("busy") | list %}
-      {% if run.use_case == "uc05" and run.status == "paused" and not run.cleanup_status and waiting %}
-      <form method="post" action="/runs/{{ run.id }}/enroll" class="inline">
-        <button type="submit" class="btn-sm btn-icon field-action">{{ icon("key") }}Enroll all {{ waiting | length }}</button>
-      </form>
-      {% endif %}
-    </div>
+    {# UC-5 only: the field step for every device not enrolled yet – one click instead of one per cell #}
+    {% set waiting = found | rejectattr("issued") | rejectattr("busy") | list %}
+    {% if run.use_case == "uc05" and run.status == "paused" and not run.cleanup_status and waiting %}
+    <form method="post" action="/runs/{{ run.id }}/enroll" class="inline">
+      <button type="submit" class="btn-sm btn-icon field-action">{{ icon("key") }}Enroll all {{ waiting | length }}</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="wall-bar" role="group" aria-label="Filter devices">
+    {% for s, n in w.counts.items() %}<button type="button" class="wall-chip {{ s }}" data-filter="{{ s }}" aria-pressed="false">{{ "{:,}".format(n) | replace(",", " ") }} {{ {"busy": "in progress", "revoked": "rolled back"}.get(s, s) }}</button>{% endfor %}
   </div>
   <svg class="wall{% if w.size < 14 %} small{% endif %}" data-run="{{ run.id }}" viewBox="0 0 {{ w.width }} {{ w.height }}" width="{{ w.width }}" height="{{ w.height }}"
        role="img" aria-label="{{ found | length }} devices">

@@ -8,6 +8,8 @@ import zipfile
 import httpx
 import pytest
 
+from app.evergreen import USE_CASES
+
 from app import evergreen
 from app.main import create_app
 from app.store import Store
@@ -676,6 +678,29 @@ def test_running_batch_fills_the_wall(configured_store, user, store):
     assert "<h2>Devices</h2>" not in user.get("/runs/c1").text  # a few devices: tiles once they are issued
 
 
+@pytest.mark.parametrize("n", [3, 12])  # tiles and the minion wall
+def test_devices_card_polls_while_the_run_is_running(configured_store, user, store, n):
+    poll = 'hx-get="/runs/c1/devices" hx-trigger="every 2s" hx-swap="outerHTML"'
+    cert_run(store, n, status="running")  # every device known and named – e.g. UC-5's field step still enrolling
+    html = user.get("/runs/c1/devices").text
+    assert poll in html and len(re.findall(r'id="devices"', html)) == 1
+    if n >= 11:
+        assert all("data-n=" in c for c in cells(html))  # named cells keep polling while the run runs
+    for status in ("completed", "paused", "failed"):
+        store.update_run("c1", status=status)
+        assert "every 2s" not in user.get("/runs/c1/devices").text, status
+
+
+def test_wall_filters_sit_in_their_own_bar_below_the_card_head(configured_store, user, store):
+    cert_run(store, 12)
+    html = user.get("/runs/c1").text
+    head = re.search(r'<div class="card-head"><h2>Devices</h2>.*?</div>', html, re.S).group(0)
+    assert "wall-chip" not in head  # no filter chips in the card head
+    bar = re.search(r'<div class="wall-bar" role="group" aria-label="Filter devices">(.*?)</div>', html, re.S)
+    assert bar and html.index(head) < bar.start() < html.index('<svg class="wall')
+    assert re.findall(r'class="wall-chip (\w+)" data-filter="\1" aria-pressed="false">', bar.group(1)) == ["issued"]
+
+
 def test_devices_card_requires_login(web, configured_store, store):
     cert_run(store, 11)
     assert web.get("/runs/c1/devices", follow_redirects=False).status_code == 303
@@ -751,8 +776,8 @@ def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store)
     store.create_run("x1", "uc99", {"mode": "single", "variant": "api", "ca_name": "x", "key_type": "P_256"})
     store.update_run("x1", status="failed")
     page = user.get("/runs/x1")
-    # the run page renders an unknown use case (no subtitle that would look its title up)
-    assert page.status_code == 200 and '<h1>Run x1 <span class="pill bad">failed</span></h1>' in page.text
+    # the run page renders an unknown use case: its raw ID as the heading, no subtitle
+    assert page.status_code == 200 and '<h1>uc99 <span class="pill bad">failed</span></h1>' in page.text
     assert "<p>uc99" not in page.text
     index = user.get("/")
     # an unknown use case shows its raw ID – no internal "UC-n" numbering, no tooltip attribute
@@ -764,7 +789,7 @@ def test_unknown_use_case_id_falls_back_to_raw_id(configured_store, user, store)
     index = user.get("/").text
     assert re.search(r"<td>legacy</td>", index) and "UC-legacy" not in index
     legacy = user.get("/runs/x2")
-    assert legacy.status_code == 200 and "<h1>Run x2 " in legacy.text and "UC-legacy" not in legacy.text
+    assert legacy.status_code == 200 and "<h1>legacy " in legacy.text and "UC-legacy" not in legacy.text
 
 
 def test_progress_card_during_cleanup(configured_store, user, store):
@@ -879,7 +904,7 @@ def test_run_page_order_and_removed_texts(configured_user, store):
     configured_user.post("/runs", data=form(mode="batch", count="2"))
     finished(store, "r1")
     html = configured_user.get("/runs/r1").text
-    marks = ['<h1>Run r1 <span class="pill ok">completed</span></h1>', '<ol class="stepper" aria-label="Run phases">',
+    marks = [f'<h1>{store.get_run("r1") and USE_CASES[store.get_run("r1")["use_case"]].title} <span class="pill ok">completed</span></h1>', '<ol class="stepper" aria-label="Run phases">',
              '<div id="live"', "<h2>Overview</h2>", "<h2>Devices</h2>", "<h2>Timeline", "<h2>Payload</h2>",
              "<h2>Reproducible steps</h2>"]
     assert "<h2>Delete run</h2>" not in html and "<h2>Clean up</h2>" not in html
@@ -1001,7 +1026,8 @@ def test_status_line_only_when_informative(configured_store, user, store, status
         assert 'class="status-line"' in live and expected in live
     assert "Status:" not in live
     page = user.get("/runs/s1").text
-    assert re.search(rf'<h1>Run s1 <span class="pill[^"]*">{status}</span></h1>', page)
+    title = USE_CASES[store.get_run("s1")["use_case"]].title
+    assert re.search(rf'<h1>{re.escape(title)} <span class="pill[^"]*">{status}</span></h1>', page)
 
 
 def test_progress_card_markup(configured_store, user, store):
@@ -1161,7 +1187,9 @@ def test_every_confirm_has_a_label(configured_user, store):
             label = re.search(r'data-confirm-label="([^"]+)"', tag)
             assert label, (path, tag)
             seen[re.search(r'hx-confirm="([^"]+)"', tag).group(1)] = label.group(1)
-    assert seen == {"Roll back run r1? Revokes its certificates and removes everything it created.": "Roll back"}
+    assert seen == {}  # the full rollback runs on one click – no confirm dialog on any of these pages
+    rollback = re.findall(r'<form[^>]*action="/runs/r1/cleanup"[^>]*>', configured_user.get("/").text)
+    assert len(rollback) == 1 and "hx-confirm" not in rollback[0] and "data-confirm-label" not in rollback[0]
     # deleting a rolled-back run (index row only) needs no confirmation
     forms = re.findall(r'<form[^>]*action="/runs/r2/delete"[^>]*>', configured_user.get("/").text)
     assert len(forms) == 1 and "hx-confirm" not in forms[0]

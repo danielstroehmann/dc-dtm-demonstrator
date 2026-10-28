@@ -191,10 +191,12 @@ def test_renew_through_the_web(configured_user, store, fake):
     assert [d["issued"] for d in run["result"]["devices"]] == [2, 1]
     html = configured_user.get("/runs/m1").text
     renewed_tile, other = tiles(html)
-    assert renewed_tile.count("<li>") == 2 and other.count("<li>") == 1
+    # a tile shows only the valid certificate – the renewed one is in the side panel's picker, not on the tile
+    assert renewed_tile.count("<li>") == 1 and other.count("<li>") == 1
     assert renewed_tile.count('<span class="cert-state ok">active</span>') == 1
-    assert renewed_tile.count('<span class="cert-state">renewed</span>') == 1
-    assert renewed_tile.index("active</span>") < renewed_tile.index("renewed</span>")  # the new one first
+    assert "renewed</span>" not in renewed_tile and "earlier" not in renewed_tile
+    picker = configured_user.get(f"/runs/m1/devices/{first}/certificates").text
+    assert picker.count("<option ") == 2  # both certificates of the renewed device
     assert re.search(r'<span class="muted">Renewed in \d+\.\d\d s</span>', renewed_tile)
     assert metrics(html, "Field renewal")[1:] == ["1", "1", "3"]  # devices renewed, renewals, certificates
     configured_user.post(f"/runs/m1/devices/{second}/renew")

@@ -10,6 +10,13 @@ from tests.conftest import wait_for
 from tests.fakedtm import ECDSA_CA_ID
 
 
+def assert_title_without_subtitle(html):
+    """The run is headed by the use case's title + status pill – and nothing under it (no subtitle line)."""
+    assert re.search(r'<div class="page-head">\s*<div><h1>Renewable device certificates <span class="pill [a-z]+">[a-z]+</span></h1></div>\s*</div>',
+                     html), "page head is not just the use-case title"
+    assert html.count("Renewable device certificates") == 1  # only in the heading
+
+
 def uc04_form(**overrides) -> dict:
     return {"run_id": "d1", "use_case": "uc04", "protocol": "est", "auth_method": "passcode", "count": "1",
             "variant": "api", "mode": "single", "ca_id": ECDSA_CA_ID} | overrides
@@ -48,7 +55,7 @@ def test_uc04_forces_est_and_one_device(configured_user, store, enroll_net):
     (tile,) = tiles(html)  # the one device carries its Renew button – no separate renewal card
     assert 'action="/runs/d1/renew"' in tile and ">Renew</button>" in tile and "<h2>Field renewal</h2>" not in html
     assert "EST · renewal 0 of 5" in tile and tile.count("<li>") == 1  # nothing renewed yet
-    assert "Renewable device certificates" not in html  # no subtitle under the run title
+    assert_title_without_subtitle(html)
     # the renewal block of the reproducible steps is there before the first renewal
     assert_phase_titles(configured_user.get("/runs/d1/api?dialect=curl").text,
                         [("Factory enrollment", "factory"), ("Field renewal", "refresh")])
@@ -64,7 +71,8 @@ def test_uc04_protocol_is_est_or_cmpv2(configured_user, store, enroll_net, cmp_o
     label = {"est": "EST", "cmpv2": "CMPv2"}[expected]
     html = configured_user.get("/runs/d1").text
     (tile,) = tiles(html)  # the protocol shows on the device tile – the run page has no subtitle
-    assert f"{label} · renewal 0 of 5" in tile and "Renewable device certificates" not in html
+    assert f"{label} · renewal 0 of 5" in tile
+    assert_title_without_subtitle(html)
 
 
 def test_uc04_cmp_renewal_through_the_web(configured_user, store, enroll_net, cmp_openssl):
@@ -100,11 +108,11 @@ def test_renew_through_the_web(configured_user, store, enroll_net):
     serial = store.get_run("d1")["result"]["renewals"][0]["serial"]
     assert "<small>Renewals</small>" in html and "<small" in html and "Last renewal" in html
     (tile,) = tiles(html)  # current and previous certificate, the new one first
-    assert tile.count("<li>") == 2 and "EST · renewal 1 of 5" in tile and re.search(r"Renewed in \d+\.\d\d s", tile)
-    # each row names the certificate's CN (not a short serial): the new one first, then the renewed one
+    assert tile.count("<li>") == 1 and "EST · renewal 1 of 5" in tile and re.search(r"Renewed in \d+\.\d\d s", tile)
+    # only the valid certificate (by its CN) – the renewed one is in the side panel's picker
     rows = re.findall(r'<li><span class="cert-state[^"]*">([^<]+)</span>\s*<span class="mono cn">([^<]+)</span>', tile)
     cn = store.get_run("d1")["result"]["certificates"][-1]["common_name"]
-    assert [state for state, _ in rows][1] == "renewed" and [name for _, name in rows] == [cn, cn]
+    assert rows == [("active", cn)]
     assert f"{serial[:3]}…{serial[-3:]}" not in tile
     assert "PRIVATE KEY" not in html
     api = configured_user.get("/runs/d1/api?dialect=curl").text
@@ -218,9 +226,9 @@ def test_at_most_five_renewals(configured_user, store, enroll_net):
         wait_for(lambda: renewals(store) == n and store.get_run("d1")["status"] == "completed", what=f"renewal {n}")
     html = configured_user.get("/runs/d1").text
     assert re.search(r'<button type="submit" class="btn-sm btn-icon" disabled\s+data-tip="At most 5 renewals per run">', html)
-    # six certificates: current and previous, the four before collapse into one muted row listing them
+    # six certificates: the tile shows only the valid one, no "earlier" row – the rest is in the picker
     (tile,) = tiles(html)
-    assert tile.count("<li>") == 2 and '<li class="earlier"><span class="muted">+ 4 earlier</span></li>' in tile
+    assert tile.count("<li>") == 1 and "earlier" not in tile
     # the detail view's picker lists all six, newest first – the current one selected
     run = store.get_run("d1")
     serials = [c["serial"] for c in run["result"]["certificates"]]

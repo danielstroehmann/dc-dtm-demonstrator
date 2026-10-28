@@ -51,7 +51,18 @@ def test_other_pages_show_use_case_central_and_the_page(configured_user, store):
         crumbs = re.findall(r"<li[^>]*>(.*?)</li>", nav)
         assert crumbs == [f'<a href="{home}">Use-Case Central</a>', label], path
         assert f'<li aria-current="page">{label}</li>' in nav, path
-    assert head(configured_user.get("/runs/r1").text)[1].startswith("Run r1 ")
+    # the run page is headed by its use case's title (+ status pill); the run ID stays in the breadcrumb
+    h1 = head(configured_user.get("/runs/r1").text)[1]
+    assert h1 == 'Evergreen Device IDs for Factory Provisioning <span class="pill ok">completed</span>', h1
+    assert "r1" not in h1
+
+
+def test_run_of_an_unknown_use_case_is_headed_by_its_raw_id(configured_user, store):
+    configured_user.post("/runs", data=form())
+    finished(store, "r1")
+    store.create_run("x1", "uc99", store.get_run("r1")["params"])
+    nav, h1 = head(configured_user.get("/runs/x1").text)
+    assert h1.startswith("uc99 <span class=\"pill") and '<li aria-current="page">x1</li>' in nav
 
 
 def test_welcome_page_has_a_breadcrumb_too(user):

@@ -221,7 +221,6 @@ def without_clock(slot: str) -> str:
     return CLOCK.sub("", slot)
 
 
-ROLLBACK_CONFIRM = "Roll back run r1? Revokes its certificates and removes everything it created."
 
 
 @pytest.mark.parametrize("status,cleanup", [("pending", None), ("running", None), ("renewing", None)])
@@ -244,7 +243,7 @@ def test_rollback_button_otherwise(configured_store, user, store, status, cleanu
     form = re.search(r"<form ([^>]*)>", slot).group(1)
     assert 'action="/runs/r1/cleanup"' in form and 'hx-post="/runs/r1/cleanup"' in form
     assert 'hx-target="closest tr"' in form and 'hx-swap="outerHTML"' in form
-    assert f'hx-confirm="{ROLLBACK_CONFIRM}"' in form and 'data-confirm-label="Roll back"' in form
+    assert "hx-confirm" not in slot and "data-confirm-label" not in slot  # one click – no confirm dialog
     assert '<input type="hidden" name="mode" value="full">' in slot
     assert re.search(r'<button type="submit" class="row-action outline\s*"\s*>Full rollback</button>', slot), slot
     assert "refused" not in slot and "data-tip" not in slot  # no refusal without a refused request

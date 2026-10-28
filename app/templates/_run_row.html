@@ -30,7 +30,7 @@
     <span data-tip="The run is still busy" tabindex="0"><button type="button" class="row-action outline" disabled>Full rollback</button></span>
     {% else -%}
     <form method="post" action="/runs/{{ run.id }}/cleanup" class="inline" hx-post="/runs/{{ run.id }}/cleanup"
-          hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Roll back run {{ run.id }}? Revokes its certificates and removes everything it created." data-confirm-label="Roll back">
+          hx-target="closest tr" hx-swap="outerHTML">  {# no confirmation: the author rolls back directly #}
       <input type="hidden" name="mode" value="full">
       <button type="submit" class="row-action outline {% if error %}refused{% endif %}" {% if error %}data-tip="{{ error }}"{% endif %}>Full rollback</button>
     </form>
