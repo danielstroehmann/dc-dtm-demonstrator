@@ -301,3 +301,23 @@ document.querySelectorAll(".conn-select select").forEach((select) => {
     });
   });
 });
+
+// A progress card marked .overlay covers the result's overview exactly (absolute, measured here – CSP allows no
+// inline styles from the server). Without an overview on the page it stays an ordinary card in the flow.
+function placeOverlay() {
+  const card = document.querySelector(".progress-card.overlay");
+  if (!card) return;
+  const overview = document.getElementById("overview");
+  if (!overview) { card.classList.remove("overlay"); return; }
+  const parent = card.offsetParent || document.body;
+  const box = overview.getBoundingClientRect();
+  const origin = parent.getBoundingClientRect();
+  Object.assign(card.style, { top: `${box.top - origin.top + parent.scrollTop}px`,
+    left: `${box.left - origin.left + parent.scrollLeft}px`, width: `${box.width}px`, height: `${box.height}px` });
+  card.classList.add("placed");
+}
+document.addEventListener("DOMContentLoaded", placeOverlay);
+// afterSwap: placed before the browser paints the polled card – no blink every second
+document.addEventListener("htmx:afterSwap", placeOverlay);
+document.addEventListener("htmx:afterSettle", placeOverlay);
+window.addEventListener("resize", placeOverlay);

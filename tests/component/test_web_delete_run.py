@@ -415,3 +415,16 @@ def test_meter_shows_the_short_phase_and_the_full_label_as_tooltip(configured_st
     assert f'aria-valuetext="{progress["label"]}"' in slot
     card = slot[slot.index('<template><div class="tip-card">'):]
     assert f"<p>{progress['label']}</p>" in card and "<progress" in card  # the hover card: full label + bar
+
+
+@pytest.mark.parametrize("status, result, overlay", [
+    ("renewing", {"duration_s": 0.7, "certificate_total": 1}, True),  # the overview stands: progress lies over it
+    ("running", None, False),  # no overview yet: an ordinary card in the flow
+])
+def test_progress_lies_over_the_overview_once_it_stands(configured_store, user, store, status, result, overlay):
+    store.create_run("r1", "uc01", BASE)
+    store.update_run("r1", status=status, result=result, progress={"label": "Field renewal", "started": 0})
+    html = user.get("/runs/r1").text
+    card = re.search(r'<article class="card progress-card( overlay)?">', html)
+    assert card and bool(card.group(1)) is overlay
+    assert ('id="overview"' in html) is overlay

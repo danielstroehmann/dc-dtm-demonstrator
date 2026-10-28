@@ -7,7 +7,8 @@
   {% endif %}
   {% if run.error %}<p class="error" role="alert">{{ run.error }}</p>{% endif %}
   {% if progress %}
-  <article class="card progress-card">
+  {# Once the result's overview stands, the progress lies over it at the same size (app.js) – nothing below moves #}
+  <article class="card progress-card{% if run.result and run.status not in ('pending', 'running', 'paused') %} overlay{% endif %}">
     <div class="card-head"><h2 aria-busy="true">{{ progress.label }}</h2></div>
     {% if progress.total and progress.done is not none %}
     <progress value="{{ progress.done }}" max="{{ progress.total }}"></progress>

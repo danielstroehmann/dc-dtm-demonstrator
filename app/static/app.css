@@ -750,3 +750,12 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .tls-cert { margin: 0 0 var(--s3); }
 .tls-cert dd.soon { color: var(--dc-orange); }
 .tls-cert dd.expired { color: var(--bad); }
+
+/* ---- Progress over the overview (a renewal, a rollback): same box, out of the flow – the page does not shift ---- */
+.progress-card.overlay { position: absolute; z-index: 5; margin: 0; visibility: hidden; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: center; background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(2px); box-shadow: var(--shadow-2); }
+.progress-card.overlay.placed { visibility: visible; }
+.progress-card.overlay .card-head { margin-bottom: 0; }
+.progress-card.overlay progress { margin: var(--s2) 0; }
+.progress-card.overlay .metrics { margin: 0; }
