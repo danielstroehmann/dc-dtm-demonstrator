@@ -134,3 +134,48 @@ def test_cross_origin_post_is_refused(user, caddy, started, pair):  # noqa: F811
     response = user.post("/settings/tls", data={"mode": "pem"}, headers={"Origin": "https://evil.example"},
                          files={"certificate": ("c.pem", pem(pair[0])), "private_key": ("k.pem", key_pem(pair[1]))})
     assert response.status_code == 403 and caddy.requests == []
+
+
+# --- release gate v1.1.0: OWASP cases the tests above leave out ------------------------------------------------------
+
+def test_values_of_an_uploaded_certificate_are_escaped_on_the_page(user, caddy, started):  # noqa: F811
+    """A valid certificate whose subject and SAN carry markup: applied, but shown as text only (stored XSS)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = make_cert(XSS, key, sans=(f"{XSS}.demo",))
+    assert send(user, certificate=pem(cert), private_key=key_pem(key)).status_code == 303
+    assert caddy.served == cert
+    html = user.get("/settings").text
+    assert XSS not in html and "&lt;img src=x onerror=" in html
+
+
+def test_cross_origin_reset_is_refused(user, caddy, started, pair):  # noqa: F811
+    cert, key = pair
+    assert send(user, certificate=pem(cert), private_key=key_pem(key)).status_code == 303
+    loads = caddy.loads
+    response = user.post("/settings/tls/reset", headers={"Origin": "https://evil.example"}, follow_redirects=False)
+    assert response.status_code == 403 and caddy.loads == loads and caddy.served == cert
+    assert (caddy.live / "settings-cert.pem").exists()
+
+
+@pytest.mark.parametrize("length", ["", "abc", "-1"])
+def test_upload_without_a_usable_content_length_is_refused(user, caddy, started, pair, length):  # noqa: F811
+    """Only a declared, bounded body is parsed – a missing or bogus Content-Length never reaches the parser."""
+    cert, key = pair
+    body = b"--b\r\nContent-Disposition: form-data; name=\"mode\"\r\n\r\npem\r\n--b--\r\n"
+    headers = {"Content-Type": "multipart/form-data; boundary=b"}
+    request = user.build_request("POST", "/settings/tls", content=body, headers=headers)
+    if length:
+        request.headers["content-length"] = length
+    else:
+        del request.headers["content-length"]
+    response = user.send(request, follow_redirects=False)
+    assert response.status_code == 413 and caddy.requests == []
+
+
+def test_too_many_files_are_refused_cleanly(user, caddy, started, pair):  # noqa: F811
+    cert, key = pair
+    files = [("certificate", ("a.pem", pem(cert))), ("private_key", ("b.pem", key_pem(key))),
+             ("keystore", ("c.p12", b"x")), ("extra", ("d.bin", b"x"))]
+    response = user.post("/settings/tls", data={"mode": "pem"}, files=files, follow_redirects=False)
+    assert response.status_code == 400 and caddy.requests == []
+    assert not (caddy.live / "settings-cert.pem").exists()

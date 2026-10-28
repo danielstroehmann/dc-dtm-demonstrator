@@ -438,3 +438,30 @@ def test_broken_settings_pair_and_broken_env_fail(dirs, capsys):
     (target / "settings-cert.pem").write_bytes(b"garbage")
     code, _, err = run(capsys)
     assert code == 1 and "no certificate configured" in err and not (target / "cert.pem").exists()
+
+
+def test_upgrade_from_a_v1_0_0_live_directory(dirs, capsys, monkeypatch):
+    """v1.0.0 left only cert.pem + key.pem (0600) in the live directory. The first start of v1.1.0 serves the .env pair
+    as before, keeps it as the default and offers no reset – nothing changes for an install without Settings."""
+    from app import tls_settings
+    from tests.unit.test_tls_settings import self_signed_default
+    source, target = dirs
+    cert, key = self_signed_default()
+    put(source, "cert.pem", pem(cert))
+    put(source, "key.pem", key_pem(key))
+    target.mkdir()
+    old_key = ec.generate_private_key(ec.SECP256R1())  # what the old tls service wrote at its last start
+    (target / "cert.pem").write_bytes(pem(make_cert("old.demo", old_key)))
+    (target / "key.pem").write_bytes(key_pem(old_key))
+    (target / "key.pem").chmod(0o600)
+
+    code, out, err = run(capsys)
+    assert code == 0, err
+    chain, served = written(target)
+    assert chain == [cert] and same_key(served, key)
+    assert sorted(p.name for p in target.iterdir()) == ["cert.pem", "default-cert.pem", "default-key.pem", "key.pem"]
+    assert stat.S_IMODE((target / "key.pem").stat().st_mode) == 0o640
+    monkeypatch.setattr(tls_settings, "LIVE", target)
+    status = tls_settings.status()
+    assert status["source"] == "Self-signed default" and status["can_reset"] is False
+    assert status["common_name"] == "192.0.2.10"
