@@ -226,7 +226,7 @@ def test_no_links_without_pem_files(configured_user, store, data_dir):
     assert pem_links(detail) == [] and c["common_name"] in html
     # without the PEM: what the run knows, "–" for the rest
     assert f'<dt>Serial</dt><dd class="mono wrap">{c["serial"]}</dd>' in detail
-    assert f'<dt>Issuer</dt><dd class="wrap">{c["issuer"]} → Fake ECDSA Root</dd>' in detail
+    assert f'<dt>Issuer</dt><dd class="wrap">Fake ECDSA Root<br>{c["issuer"]}</dd>' in detail
     assert '<dt>SHA-256</dt><dd class="mono wrap">–</dd>' in detail and '<dt>Key</dt><dd>ECDSA P-256</dd>' in detail
     serial = run["result"]["certificates"][0]["serial"]
     assert configured_user.get(f"/runs/r1/certificates/{serial}.pem").status_code == 404
