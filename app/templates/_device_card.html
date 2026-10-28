@@ -1,3 +1,4 @@
+{% from "_icons.html" import icon %}
 {# Devices of every use case: up to tiles.WALL_FROM - 1 as large tiles, each with its own enroll / renew button – from
    there on the minion wall: one cell per device, coloured by state; a click opens the device's tile in the side panel.
    Devices act independently; the page reloads when one finishes (HX-Refresh). Polled while a batch issues. #}
@@ -10,6 +11,13 @@
     <div class="wall-bar">
       {% for s, n in w.counts.items() %}<button type="button" class="wall-chip {{ s }}" data-filter="{{ s }}" aria-pressed="false">{{ "{:,}".format(n) | replace(",", " ") }} {{ {"busy": "in progress", "revoked": "rolled back"}.get(s, s) }}</button>{% endfor %}
       <input type="search" class="wall-search" placeholder="Name, CN or serial" aria-label="Search devices">
+      {# UC-5 only: the field step for every device not enrolled yet – one click instead of one per cell #}
+      {% set waiting = found | rejectattr("issued") | rejectattr("busy") | list %}
+      {% if run.use_case == "uc05" and run.status == "paused" and not run.cleanup_status and waiting %}
+      <form method="post" action="/runs/{{ run.id }}/enroll" class="inline">
+        <button type="submit" class="btn-sm btn-icon field-action">{{ icon("key") }}Enroll all {{ waiting | length }}</button>
+      </form>
+      {% endif %}
     </div>
   </div>
   <svg class="wall{% if w.size < 14 %} small{% endif %}" data-run="{{ run.id }}" viewBox="0 0 {{ w.width }} {{ w.height }}" width="{{ w.width }}" height="{{ w.height }}"

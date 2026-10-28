@@ -597,7 +597,9 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 .device-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); margin-top: auto; font-size: 0.85rem; }
 .device-foot form.inline { margin: 0; }
 .device-foot button { margin: 0; }
-.device-foot .field-action { background: var(--dc-orange); border-color: var(--dc-orange); }
+.device-foot .field-action, .wall-bar .field-action { background: var(--dc-orange); border-color: var(--dc-orange); }
+.wall-bar form.inline { margin: 0; }
+.wall-bar .field-action { width: auto; margin: 0; }
 .tile.unavailable { opacity: 0.55; }
 .tile.unavailable:hover { border-color: var(--dc-border); box-shadow: none; transform: none; }
 

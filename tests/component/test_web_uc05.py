@@ -394,3 +394,26 @@ def test_paused_run_page_and_list(configured_user, store):
     assert enroll_buttons(html) == ["robot-e5-uc05-est-0001"]
     assert '<span class="pill ">paused</span>' in html  # waiting for the presenter: no pulsing dot
     assert "<h2>Overview</h2>" not in html
+
+
+def enroll_all(html):
+    return re.findall(r'action="/runs/e5/enroll" class="inline">\s*<button[^>]*>.*?Enroll all (\d+)</button>', html, re.S)
+
+
+def test_wall_offers_enroll_all_for_the_waiting_devices(configured_user, store):
+    paused_run(store)
+    store.update_run("e5", params=store.get_run("e5")["params"] | {"count": 12, "mode": "batch"},
+                     result={"policy": "robot-e5-uc05-policy", "busy": ["robot-e5-uc05-est-0002"],
+                             "certificates": [{"common_name": "robot-e5-uc05-est-0001", "serial": "1A", "status": "issued"}]})
+    html = configured_user.get("/runs/e5").text
+    assert '<svg class="wall' in html and enroll_all(html) == ["10"]  # 12 minus one enrolled, one in progress
+    response = configured_user.post("/runs/e5/enroll", follow_redirects=False)
+    assert response.status_code == 303 and store.get_run("e5")["status"] == "running"
+    assert enroll_all(configured_user.get("/runs/e5").text) == []
+
+
+def test_no_enroll_all_on_tiles_or_after_a_rollback(configured_user, store):
+    paused_run(store)  # one device: a tile with its own button
+    assert enroll_all(configured_user.get("/runs/e5").text) == []
+    store.update_run("e5", params=store.get_run("e5")["params"] | {"count": 12, "mode": "batch"}, cleanup_status="done")
+    assert enroll_all(configured_user.get("/runs/e5").text) == []
