@@ -167,7 +167,27 @@ function openPanel(certs, tile) {
   if (tile) htmx.ajax("GET", tile, { target: tileBox });  // htmx swaps the inner content by default
   certsBox.replaceChildren();  // a device without certificates answers 404 – nothing of the previous one stays
   htmx.ajax("GET", certs, { target: certsBox });
+  panel.dataset.certs = certs;
+  panel.dataset.sig = certSig(certs);
 }
+
+// The tile showing these certificates (the panel's own first) – its data-sig lists the serials it knows
+function certSig(certs) {
+  const boxes = [...document.querySelectorAll("[data-certs]")].filter((b) => b.dataset.certs === certs);
+  const box = boxes.find((b) => b.closest("#side-panel")) || boxes[0];
+  return box ? box.dataset.sig || "" : "";
+}
+
+// The panel is kept across swaps (hx-preserve): once its device holds another certificate (a renewal), the
+// detail view is loaded again, so its picker lists the new one
+document.addEventListener("htmx:afterSettle", () => {
+  const panel = document.getElementById("side-panel");
+  if (!panel || panel.hidden || !panel.dataset.certs) return;
+  const sig = certSig(panel.dataset.certs);
+  if (!sig || sig === panel.dataset.sig) return;
+  panel.dataset.sig = sig;
+  htmx.ajax("GET", panel.dataset.certs, { target: panel.querySelector(".panel-certs") });
+});
 
 function openDevice(cell) {
   const wall = cell.closest(".wall");
@@ -189,6 +209,7 @@ function closePanel() {
   panel.hidden = true;
   panel.querySelector(".panel-tile").replaceChildren();  // its tile must not keep polling
   panel.querySelector(".panel-certs").replaceChildren();
+  delete panel.dataset.certs;
   document.querySelector(".wall use.selected")?.classList.remove("selected");
 }
 

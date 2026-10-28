@@ -28,7 +28,7 @@
         <p>{{ pg.label or "Rolling back" }}</p>
         {% if share is not none %}<progress value="{{ pg.done }}" max="{{ pg.total }}"></progress>
         <p class="tip-card-foot"><span>{{ pg.done }} of {{ pg.total }} done</span><span>{{ share }} %</span></p>
-        {% else %}<progress></progress>{% endif %}
+        {% else %}<progress></progress><p class="tip-card-foot"></p>{% endif %}
       </div></template></span>
     {% elif run.rolled_back -%}
     <form method="post" action="/runs/{{ run.id }}/delete" class="inline" hx-boost="true">

@@ -731,12 +731,17 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 
 /* ---- Rollback in the runs list: own cursor and a hover card with the progress ---- */
 .rollback-meter { cursor: url("cursor-rollback.svg") 14 14, progress; }
-.tooltip.card { max-width: 18rem; padding: var(--s2) var(--s3); }
-.tip-card { display: grid; gap: var(--s1); min-width: 14rem; }
-.tip-card p { margin: 0; }
+/* One fixed size, whatever the phase says – a card that grows and shrinks with its text flickers */
+.tooltip.card { width: 20rem; max-width: 20rem; padding: var(--s2) var(--s3); }
+.tip-card { display: grid; gap: var(--s1); }
+.tip-card p { margin: 0; color: #fff; }  /* Pico colours paragraphs dark – unreadable on the dark card */
+.tip-card > p:first-of-type { height: 2.8em; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; }
+.tip-card-foot { min-height: 1.4em; }
 .tip-card-head, .tip-card-foot { display: flex; justify-content: space-between; gap: var(--s3); }
 .tip-card .elapsed, .tip-card-foot { color: #b8c4d2; font-variant-numeric: tabular-nums; font-size: 0.75rem; }
-.tip-card progress { margin: var(--s1) 0 0; height: 0.4rem; background-color: #3a4757; }
+.tip-card progress { --pico-progress-background-color: #3a4757; --pico-progress-color: #f57c00;
+  margin: var(--s1) 0 0; height: 0.4rem; }
 .tip-card progress::-webkit-progress-value { background: #f57c00; }
 .tip-card progress::-moz-progress-bar { background: #f57c00; }
 

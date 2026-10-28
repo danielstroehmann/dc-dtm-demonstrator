@@ -119,6 +119,9 @@ def test_start_a_minion_from_its_tile(configured_user, store, fake, docker, mini
     assert [r[0] for r in rows] == ["bootstrap", "operational"] * 2
     assert all(cn != "–" for _, cn in rows[:2]) and [cn for _, cn in rows[2:]] == ["–", "–"]
     assert html.count("data-certs=") == 1  # only the enrolled minion opens a detail view
+    # the tile lists the serials it knows – the side panel reloads its detail view once they change (renewal)
+    serials = ",".join(c["serial"] for c in devices.device_of(run["result"], first)["certificates"])
+    assert f'data-sig="{serials}"' in html and serials
 
 
 def test_uc08_has_no_renewal_per_click(configured_user, store, fake, docker, minion):
