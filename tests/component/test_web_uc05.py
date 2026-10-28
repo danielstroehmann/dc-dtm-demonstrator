@@ -247,7 +247,12 @@ def test_paused_run_shows_enroll_buttons_and_continues_on_click(configured_user,
     assert enroll_buttons(html) == names  # one per device tile – no run-wide button
     assert 'action="/runs/p5/enroll"' not in html
     assert html.count("Passcode bound to CN") == count and html.count(">unused</span>") == count
-    assert "<h2>Overview</h2>" not in html and '<div class="phase-pair">' not in html  # no result yet
+    # the factory figures stand once the passcodes exist; the field ones wait for the devices
+    overview = html[html.index("<h2>Overview</h2>"):html.index("<h2>Devices</h2>")]
+    factory, field = overview.split('<section class="box accent field">')
+    assert "All passcodes" in factory and '<p class="metric">–</p>' not in factory.split("Per minute")[0]
+    assert field.count('<p class="metric">–</p>') == 4 and "Passcode enforced" not in overview
+    assert "progress-card" not in html
     assert '<li class="current" aria-current="step">Run</li>' in html
     # the live view of a paused run reloads into this page (it does not keep polling)
     live = configured_user.get("/runs/p5/live", headers={"hx-request": "true"})
@@ -277,6 +282,7 @@ def test_paused_devices_enroll_one_per_click(configured_user, store, enroll_net)
                    what="the second device to enroll")
     assert run["status"] == "paused" and [c["common_name"] for c in run["result"]["certificates"]] == [second]
     assert len(enroll_net.enroll_requests) == 1
+    assert run["progress"] is None  # no banner per click – the tile shows its device enrolling
     html = configured_user.get("/runs/p5").text
     assert enroll_buttons(html) == [first] and html.count(">used</span>") == 1
     serial = run["result"]["certificates"][0]["serial"]

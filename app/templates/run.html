@@ -18,7 +18,8 @@
   {% endfor %}
 </ol>
 {% include "_run_live.html" %}
-{% if finished %}{% include "_result_overview.html" %}{% endif %}
+{# UC-5: the factory figures stand as soon as the passcodes exist – the field ones follow #}
+{% if finished or (run.result or {}).provisioning %}{% include "_result_overview.html" %}{% endif %}
 {% if run.use_case == "uc08" and (run.result or {}).devices %}{% include "_firmware.html" %}{% endif %}
 {% set found = tiles.devices(run) %}
 {% if found | length >= tiles.WALL_FROM or found | selectattr("name") | list %}{% include "_device_card.html" %}{% endif %}

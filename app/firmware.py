@@ -244,9 +244,11 @@ async def _division(client: DTMClient, api: ApiCalls) -> str:
 def _upload_command() -> dict:
     url = '"https://${DTM_HOST}' + dtm.UPLOADS
     bash = ('ZIP=firmware.zip  # install.sh + version.txt + firmware.html\n'
+            'SIZE="$(wc -c < "$ZIP" | tr -d \' \')"\n'
+            'META="filename $(printf %s "$ZIP" | base64)"\n'
             f'LOCATION=$(curl -sS -D - -o /dev/null -X POST {url}?account_id=${{DTM_ACCOUNT_ID}}" '
-            '-H "x-api-key: ${DTM_API_KEY}" \\\n  -H "Tus-Resumable: 1.0.0" -H "Upload-Length: $(wc -c < "$ZIP" | tr -d \' \')" '
-            '-H "Upload-Metadata: filename $(printf %s "$ZIP" | base64)" | tr -d \'\\r\' | awk \'tolower($1)=="location:" {print $2}\')\n'
+            '-H "x-api-key: ${DTM_API_KEY}" \\\n  -H "Tus-Resumable: 1.0.0" -H "Upload-Length: ${SIZE}" '
+            '-H "Upload-Metadata: ${META}" | tr -d \'\\r\' | awk \'tolower($1)=="location:" {print $2}\')\n'
             'export PAYLOAD_ID="${LOCATION##*/}"\n'
             f'curl -sS -X PATCH {url}/${{PAYLOAD_ID}}?account_id=${{DTM_ACCOUNT_ID}}" -H "x-api-key: ${{DTM_API_KEY}}" '
             '-H "Tus-Resumable: 1.0.0" \\\n  -H "Upload-Offset: 0" -H "Content-Type: application/offset+octet-stream" --data-binary "@$ZIP"\n'

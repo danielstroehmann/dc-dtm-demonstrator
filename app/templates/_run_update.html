@@ -5,7 +5,7 @@
 {% include "_run_live.html" %}
 {{ pill(run.status, oob="outerHTML:.page-head h1 .pill") }}
 {% with oob = true %}
-{% if run.result and run.status not in ("pending", "running", "paused") %}{% include "_result_overview.html" %}{% endif %}
+{% if (run.result and run.status not in ("pending", "running", "paused")) or (run.result or {}).provisioning %}{% include "_result_overview.html" %}{% endif %}
 {% if run.use_case == "uc08" and (run.result or {}).devices %}{% include "_firmware.html" %}{% endif %}
 {% set found = tiles.devices(run) %}
 {% if found | length >= tiles.WALL_FROM or found | selectattr("name") | list %}{% include "_device_card.html" %}{% endif %}

@@ -112,6 +112,13 @@ def test_start_a_minion_from_its_tile(configured_user, store, fake, docker, mini
     response = configured_user.post(f"/runs/t1/devices/{first}/enroll", follow_redirects=False)
     assert response.status_code == 409 and "enrolled already" in response.text
     assert devices.device_of(run["result"], second)["issued"] == 0 and len(minion.started) == 1
+    # every tile keeps both certificate rows – a "–" until the minion holds that certificate
+    import re
+    html = configured_user.get("/runs/t1").text
+    rows = re.findall(r'<li><span class="cert-state[^"]*">(\w+)</span>\s*<span class="mono cn">([^<]*)</span>', html)
+    assert [r[0] for r in rows] == ["bootstrap", "operational"] * 2
+    assert all(cn != "–" for _, cn in rows[:2]) and [cn for _, cn in rows[2:]] == ["–", "–"]
+    assert html.count("data-certs=") == 1  # only the enrolled minion opens a detail view
 
 
 def test_uc08_has_no_renewal_per_click(configured_user, store, fake, docker, minion):

@@ -776,6 +776,9 @@ async def _enroll(station: Station, api: ApiCalls, store: Store, run_id: str, p:
             per_device.append(time.monotonic() - start)
             if len(names) > 1:  # one device: the summary line below says it
                 log(f"{cn} enrolled in {seconds[-1]:.2f}s")
+            # UC-5 per click: the tile shows its device enrolling – a banner coming and going would shift the page
+            if clicks and (store.get_run(run_id) or {}).get("status") == "paused":
+                continue
             store.update_run(run_id, progress={"label": "Enrolling the device" if len(names) == 1 else
                                                f"Field enrollment of {len(names)} devices",
                                                "started": started_wall, "total": len(names), "done": done})
@@ -866,20 +869,22 @@ def enroll_steps(protocol: str, auth: str, cn: str, key_type: str, group: bool =
     elif protocol == "est":
         path_b = est_path("${POLICY_ID}", "${GROUP_ID}" if group else None)
         path_p = est_path("$env:POLICY_ID", "$env:GROUP_ID" if group else None)
-        tls = ("--cert factory.crt --key factory.key" if clientauth else
-               '-H "Authorization: Basic $(printf %s "${PASSCODE}" | openssl base64 -A)"')
-        ps_tls = ("--cert-type P12 --cert factory.p12" if clientauth else
-                  '-H "Authorization: Basic $([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:PASSCODE)))"')
+        # The header value is built on a line of its own – the request line stays readable
+        tls = ("--cert factory.crt --key factory.key" if clientauth else '-H "Authorization: Basic ${EST_AUTH}"')
+        ps_tls = ("--cert-type P12 --cert factory.p12" if clientauth else '-H "Authorization: Basic $env:EST_AUTH"')
+        auth_b = "" if clientauth else 'export EST_AUTH="$(printf %s "${PASSCODE}" | openssl base64 -A)"\n'
+        auth_p = ("" if clientauth else
+                  "$env:EST_AUTH = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:PASSCODE))\n")
         step("keygen", "Generate the device key and CSR", "LOCAL", "openssl",
              f"{req} -outform DER -out device.der\nopenssl base64 -A -in device.der -out device.b64",
              f"{req} -outform DER -out device.der\n"
              '[Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/device.der")) | Set-Content device.b64')
         step("call", "Request the certificate via EST simpleenroll", "POST",
              est_path("{POLICY_ID}", "{GROUP_ID}" if group else None),
-             f'curl -sS --fail -X POST "https://{host_b}{path_b}" {tls} \\\n'
+             f'{auth_b}curl -sS --fail -X POST "https://{host_b}{path_b}" {tls} \\\n'
              '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" \\\n'
              "  --data-binary @device.b64 -o device.b64.out",
-             f'curl.exe -sS --fail -X POST "https://{host_p}{path_p}" {ps_tls} `\n'
+             f'{auth_p}curl.exe -sS --fail -X POST "https://{host_p}{path_p}" {ps_tls} `\n'
              '  -H "Content-Type: application/pkcs10" -H "Content-Transfer-Encoding: base64" `\n'
              '  --data-binary "@device.b64" -o device.b64.out')
         step("convert", "Convert the answer to a PEM certificate", "LOCAL", "openssl",
