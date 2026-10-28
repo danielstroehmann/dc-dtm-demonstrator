@@ -1,5 +1,6 @@
 {# Devices of every use case: up to tiles.WALL_FROM - 1 as large tiles, each with its own enroll / renew button – from
    there on the minion wall: one cell per device, coloured by state; a click opens the device's tile in the side panel.
+   A click on a tile's certificates opens their detail view in the same panel.
    Devices act independently; the page reloads when one finishes (HX-Refresh). Polled while a batch issues. #}
 {% set found = found if found is defined else tiles.devices(run) %}
 {% set filling = run.status == "running" and found and found[-1].name is none %}
@@ -17,10 +18,6 @@
     <defs><symbol id="minion-head" viewBox="0 0 7 7"><path d="M3 0h1v1H3zM1 1h5v5H1z" fill="currentColor"/><path d="M2 3h1v1H2zM4 3h1v1H4z" fill="#fff"/></symbol></defs>
     {% for c in w.cells %}<use href="#minion-head" x="{{ (loop.index0 % w.columns) * w.pitch }}" y="{{ (loop.index0 // w.columns) * w.pitch }}" width="{{ w.size }}" height="{{ w.size }}" class="{{ c.state }}"{% if c.name %} data-i="{{ loop.index }}" data-n="{{ c.name }}" data-s="{{ c.serial }}" data-tip="{{ c.tip }}"{% endif %}/>{% endfor %}
   </svg>
-  <aside id="side-panel" class="side-panel" hidden aria-label="Device">
-    <button type="button" class="panel-close outline btn-sm" data-panel-close aria-label="Close">×</button>
-    <div class="panel-body"></div>
-  </aside>
   {% else %}
   <div class="card-head"><h2>Devices</h2></div>
   <div class="device-tiles">
@@ -29,4 +26,11 @@
     {% endfor %}
   </div>
   {% endif %}
+  {# Wall: the clicked device's tile and its certificate detail; large tiles: the certificate detail only. Kept while
+     the card is polled (hx-preserve), so an open panel stays open. #}
+  <aside id="side-panel" class="side-panel" hidden aria-label="Device" hx-preserve>
+    <button type="button" class="panel-close outline btn-sm" data-panel-close aria-label="Close">×</button>
+    <div class="panel-tile"></div>
+    <div class="panel-certs"></div>
+  </aside>
 </article>

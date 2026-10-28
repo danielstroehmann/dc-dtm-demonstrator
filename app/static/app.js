@@ -131,6 +131,7 @@ document.addEventListener("DOMContentLoaded", tickCountdowns);
 
 // Minion wall (from 11 devices): counter chips filter, the search highlights by name / CN / serial, a click on a cell
 // opens that device's tile in the side panel (same actions as a tile). Cells stay plain <use> elements – classes only.
+// A tile's certificates (wall panel or large tile) open their detail view in the same panel.
 function wallSearch(input) {
   const wall = input.closest(".card").querySelector(".wall");
   const query = input.value.trim().toLowerCase();
@@ -141,27 +142,46 @@ function wallSearch(input) {
   return wall.querySelector("use.hit");
 }
 
+// tile: URL of the tile to show above the detail, null to show none, undefined to keep the one shown
+function openPanel(certs, tile) {
+  const panel = document.getElementById("side-panel");
+  const tileBox = panel.querySelector(".panel-tile");
+  const certsBox = panel.querySelector(".panel-certs");
+  panel.hidden = false;
+  if (tile !== undefined) tileBox.replaceChildren();  // the old tile must not keep polling
+  if (tile) htmx.ajax("GET", tile, { target: tileBox });  // htmx swaps the inner content by default
+  certsBox.replaceChildren();  // a device without certificates answers 404 – nothing of the previous one stays
+  htmx.ajax("GET", certs, { target: certsBox });
+}
+
 function openDevice(cell) {
   const wall = cell.closest(".wall");
-  const panel = document.getElementById("side-panel");
   wall.querySelector("use.selected")?.classList.remove("selected");
   cell.classList.add("selected");
-  panel.hidden = false;
-  htmx.ajax("GET", `/runs/${wall.dataset.run}/devices/${encodeURIComponent(cell.dataset.n)}/tile?i=${cell.dataset.i}`,
-            { target: panel.querySelector(".panel-body") });  // htmx swaps the inner content by default
+  const device = `/runs/${wall.dataset.run}/devices/${encodeURIComponent(cell.dataset.n)}`;
+  openPanel(`${device}/certificates`, `${device}/tile?i=${cell.dataset.i}`);
+}
+
+function openCertificates(box) {
+  const inPanel = box.closest("#side-panel") !== null;
+  if (!inPanel) document.querySelector(".wall use.selected")?.classList.remove("selected");
+  openPanel(box.dataset.certs, inPanel ? undefined : null);
 }
 
 function closePanel() {
   const panel = document.getElementById("side-panel");
   if (!panel || panel.hidden) return;
   panel.hidden = true;
-  panel.querySelector(".panel-body").replaceChildren();  // its tile must not keep polling
+  panel.querySelector(".panel-tile").replaceChildren();  // its tile must not keep polling
+  panel.querySelector(".panel-certs").replaceChildren();
   document.querySelector(".wall use.selected")?.classList.remove("selected");
 }
 
 document.addEventListener("click", (event) => {
   const cell = event.target.closest(".wall use[data-n]");
   if (cell) return openDevice(cell);
+  const certs = event.target.closest("[data-certs]");
+  if (certs) return openCertificates(certs);
   if (event.target.closest("[data-panel-close]")) return closePanel();
   const chip = event.target.closest(".wall-chip");
   if (!chip) return;
@@ -176,6 +196,7 @@ document.addEventListener("input", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closePanel();
+  if (event.key === "Enter" && event.target.matches("[data-certs]")) openCertificates(event.target);
   if (event.key === "Enter" && event.target.matches(".wall-search")) {
     event.preventDefault();
     const hit = wallSearch(event.target);

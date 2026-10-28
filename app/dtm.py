@@ -785,6 +785,17 @@ class DTMClient:
         return [r for r in records if r.get("common_name") == common_name
                 and r.get("account_id") == self.config.account_id]
 
+    async def certificate_pem(self, serial: str) -> str:
+        """One certificate of this account as PEM text, by its serial number (the detail view of a certificate the
+        app never received itself). The caller checks that the answer is that certificate."""
+        if not re.fullmatch(r"[0-9A-Fa-f]{1,64}", serial):
+            raise DTMError(f"unexpected serial number {serial[:40]!r}")
+        response = await self._request("GET", f"{CERTIFICATES}/serial-number/{serial}/download/pem")
+        if not response.text.lstrip().startswith("{"):
+            return response.text
+        data = _json(response)  # the PEM wrapped in JSON
+        return next((v for k in ("pem", "certificate") if isinstance(v := data.get(k), str)), "")
+
     async def count_certificates(self, policy_id: str, status: str) -> int:
         data = _json(await self._request(
             "GET", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate", quiet=True,

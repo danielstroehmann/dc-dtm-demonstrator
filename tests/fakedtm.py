@@ -223,6 +223,7 @@ class FakeDTM:
         self.divisions: dict[str, dict] = {}
         self.policies: dict[str, dict] = {}
         self.certificates: dict[str, dict] = {}
+        self.pems: dict[str, str] = {}  # serial number (as DTM lists it) -> PEM, for the download by serial
         self.jobs: dict[str, dict] = {}
 
         # behaviour knobs
@@ -332,6 +333,7 @@ class FakeDTM:
             ("policy_delete", "DELETE", rf"{POLICY_DELETE_PATH}/(?P<oid>[^/]+)", self._delete_policy),
             ("issue", "POST", rf"{CERT_PATH}", self._issue),
             ("renew", "PUT", rf"{CERT_PATH}/(?P<oid>[^/]+)/renew", self._renew),
+            ("cert_download", "GET", rf"{CERT_PATH}/serial-number/(?P<oid>[^/]+)/download/pem", self._download_pem),
             ("device_group_create", "POST", rf"{DEVICE_GROUP_PATH}", self._create_device_group),
             ("device_group_list", "GET", rf"{DEVICE_GROUP_PATH}", self._list_device_groups),
             ("device_group_disable", "PATCH", rf"{DEVICE_GROUP_PATH}/(?P<oid>[^/]+)/disable",
@@ -741,6 +743,7 @@ class FakeDTM:
                   "serial_number": format(cert.serial_number, "x"),
                   "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         self.certificates[record["id"]] = record
+        self.pems[record["serial_number"]] = cert_pem(cert)
         return record
 
     def _est(self, request, oid, gid=None):
@@ -870,7 +873,15 @@ class FakeDTM:
                   "serial_number": format(cert.serial_number, "x"),
                   "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}  # live format
         self.certificates[cert_id] = record
+        self.pems[record["serial_number"]] = cert_pem(cert)
         return record, cert, key
+
+    def _download_pem(self, request, oid):
+        """Format of the live answer not verified yet – served as the PEM text itself."""
+        pem = self.pems.get(oid.lower())
+        if pem is None:
+            return _error(404, "entity_not_found")
+        return httpx.Response(200, text=pem, headers={"content-type": "application/x-pem-file"})
 
     async def _issue(self, request):
         if self.issue_delay:

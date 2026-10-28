@@ -706,6 +706,19 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
 @media (prefers-reduced-motion: reduce) { .wall use { animation: none !important; } }
 .side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 900; width: 34rem; padding: var(--s6) var(--s5) var(--s5);
   overflow-y: auto; background: var(--dc-grey-bg); border-left: 1px solid var(--dc-border); box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12); }
+/* The panel shows a wall cell's tile above its certificate detail, or – from a large tile – the detail alone */
+.side-panel .panel-tile:not(:empty) { margin-bottom: var(--s4); }
+/* Certificates of a tile: a click opens their detail view */
+.certs[data-certs], .device-empty[data-certs] { cursor: pointer; }
+.tstack > .certs[data-certs]:hover, .tstack > .device-empty[data-certs]:hover { background: var(--dc-blue-tint); }
+.certs svg { width: 1rem; height: 1rem; display: block; margin-left: auto; }
+/* Certificate detail: picker and PEM download share one row, the values one label column */
+.cert-detail { --tile-label: 9rem; display: flex; flex-direction: column; gap: var(--s3); }
+.cert-pick { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s2); align-items: stretch; }
+.cert-pick select { margin: 0; height: var(--control-h); padding-top: 0; padding-bottom: 0; font-size: 0.85rem; }
+.cert-pick a[role="button"] { display: inline-flex; align-items: center; height: var(--control-h); margin: 0; }
+.cert-detail .tbox { background: #fff; }
+.cert-detail .tbox > dd.wrap { white-space: normal; overflow-wrap: anywhere; }
 .panel-close { position: absolute; top: var(--s2); right: var(--s3); width: auto; margin: 0; padding: 0 var(--s2); line-height: 1.6; }
 
 /* Timeline: milestones only and half the height – Debug shows every event at full height */

@@ -99,7 +99,8 @@ def test_renew_through_the_web(configured_user, store, enroll_net):
     assert "<small>Renewals</small>" in html and "<small" in html and "Last renewal" in html
     (tile,) = tiles(html)  # current and previous certificate, the new one first
     assert tile.count("<li>") == 2 and "EST · renewal 1 of 5" in tile and re.search(r"Renewed in \d+\.\d\d s", tile)
-    assert tile.index(f'data-tip="Serial {serial} · valid until') < tile.index('data-tip="renewed">renewed</span>')
+    short = f"{serial[:3]}…{serial[-3:]}"
+    assert tile.index(f'<span class="mono muted">{short}</span>') < tile.index('<span class="cert-state">renewed</span>')
     assert "PRIVATE KEY" not in html
     api = configured_user.get("/runs/d1/api?dialect=curl").text
     assert_phase_titles(api, [("Factory enrollment", "factory"), ("Field renewal", "refresh")])
@@ -214,10 +215,13 @@ def test_at_most_five_renewals(configured_user, store, enroll_net):
     assert re.search(r'<button type="submit" class="btn-sm btn-icon" disabled\s+data-tip="At most 5 renewals per run">', html)
     # six certificates: current and previous, the four before collapse into one muted row listing them
     (tile,) = tiles(html)
-    assert tile.count("<li>") == 2 and "+ 4 earlier</span>" in tile
-    earlier = re.search(r'<li class="earlier"><span class="muted" data-tip="([^"]*)">', tile).group(1)
-    serials = [c["serial"] for c in store.get_run("d1")["result"]["certificates"]]
-    assert [s for s in serials if s in earlier] == serials[:4] and earlier.count(" | ") == 3
+    assert tile.count("<li>") == 2 and '<li class="earlier"><span class="muted">+ 4 earlier</span></li>' in tile
+    # the detail view's picker lists all six, newest first – the current one selected
+    run = store.get_run("d1")
+    serials = [c["serial"] for c in run["result"]["certificates"]]
+    detail = configured_user.get(f'/runs/d1/devices/{run["result"]["certificates"][0]["common_name"]}/certificates').text
+    assert re.findall(r'<option value="([0-9A-F]+)"', detail) == serials[::-1]
+    assert f'<option value="{serials[-1]}" selected>' in detail and detail.count(" selected>") == 1
     assert configured_user.post("/runs/d1/renew", follow_redirects=False).status_code == 409
     assert renewals(store) == 5 and len(enroll_net.issued()) == 6
     assert len([r for r in enroll_net.enroll_requests if r.url.path.endswith("/simplereenroll")]) == 5

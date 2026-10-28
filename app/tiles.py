@@ -78,12 +78,36 @@ def wall(run: dict, found: list[dict]) -> dict:
             "columns": columns, "width": columns * pitch - gap, "height": rows * pitch - gap}
 
 
+def short(serial: str | None) -> str:
+    """First and last three hex digits – enough to tell a device's certificates apart."""
+    serial = (serial or "").upper()  # DTM lists hex serials in either case
+    return f"{serial[:3]}…{serial[-3:]}" if len(serial) > 8 else serial
+
+
+def cert_state(c: dict) -> str:
+    if c.get("status") != "issued":
+        return c.get("status") or "unknown"
+    return "renewed" if c.get("renewed") else "active"
+
+
+def certificates(run: dict, d: dict) -> list[dict]:
+    """The device's certificates as tile and detail view list them: newest first (UC-8: bootstrap, operational),
+    each with its state and a compact label for the detail view's picker."""
+    listed = d.get("certificates") or []
+    listed = sorted(listed, key=lambda c: c.get("role") or "") if run["use_case"] == "uc08" else listed[::-1]
+    out = []
+    for c in listed:
+        state = cert_state(c)
+        parts = [c["role"].capitalize() if c.get("role") else None, short(c.get("serial")), state]
+        out.append(c | {"state": state, "short": short(c.get("serial")), "label": " · ".join(p for p in parts if p)})
+    return out
+
+
 def _identity(d: dict) -> dict:
     """What a wall cell tells on hover (name, CN, short serial, validity) and is searched by (full serial)."""
     certificates = d.get("certificates") or []
     current = [c for c in certificates if c.get("status") == "issued" and not c.get("renewed")]
     cert = (current or certificates or [{}])[-1]
     serial, cn = cert.get("serial") or "", cert.get("common_name")
-    short = f"{serial[:3]}…{serial[-3:]}" if len(serial) > 8 else serial
-    parts = [d["name"], cn if cn != d["name"] else None, short, f"until {cert['valid_to']}" if cert.get("valid_to") else None]
+    parts = [d["name"], cn if cn != d["name"] else None, short(serial), f"until {cert['valid_to']}" if cert.get("valid_to") else None]
     return {"serial": serial, "tip": " · ".join(p for p in parts if p)}

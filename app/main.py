@@ -15,6 +15,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -26,8 +27,8 @@ from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import (cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles, trustedge,
-               watchdog)
+from . import (certinfo, cleanup, devices, dtm, enrollment, evergreen, firmware, minions, retrofit, snippets, tiles,
+               trustedge, watchdog)
 from .auth import COOKIE, MAX_PASSWORD, MIN_PASSWORD, Auth
 from .config import APP_VERSION, BUILD, DATA_DIR, DEV_MODE, build_label
 from .dtm import DTMClient, DTMConfig, DTMError
@@ -55,6 +56,7 @@ ClientFactory = Callable[[DTMConfig, Callable[[str], None]], DTMClient]
 USE_CASES = evergreen.USE_CASES
 DEVICE_CASES = ("uc06", "uc07", "uc08")  # Advanced: one tile per device, enrolled/renewed per click
 FIELD_START = ("uc07", "uc08")  # devices that go into the field per click from their tile
+REMOTE_PEM = ("uc08",)  # the TrustEdge agent fetches these certificates – the app never receives their PEM
 
 
 def max_renewals(run: dict) -> int:
@@ -92,8 +94,6 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     templates.env.globals["device_cases"] = DEVICE_CASES
     templates.env.globals["firmware"] = firmware
     templates.env.globals["tiles"] = tiles
-    # Runs from before the PEM downloads – and fully rolled back ones – have no certificate files to link
-    templates.env.globals["pem_available"] = lambda run: (data_dir / "runs" / run["id"] / "certificates").is_dir()
     templates.env.globals["max_minions"] = trustedge.MAX_DEVICES
     templates.env.globals["store_catalog"] = store  # the firmware card reads the cached catalogue
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -660,6 +660,85 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                     device = device_or_404(run, name)
         return render(request, "_device_tile.html", run=run, d=device, loop_index=max(1, min(i, evergreen.MAX_BATCH)))
 
+    def device_certificates(run: dict, device: dict) -> list[dict]:
+        """What the detail view's picker lists: the device's certificates – UC-7 also its device-ID certificate from
+        the manufacturer (outside DTM, kept in the device's folder)."""
+        found = tiles.certificates(run, device)
+        file = devices.device_dir(data_dir / "runs" / run["id"], device["name"]) / "device-id.crt"
+        if run["use_case"] == "uc07" and file.is_file():
+            leaf = certinfo.load(file.read_text())[:1]
+            if leaf:
+                serial = format(leaf[0].serial_number, "X")
+                found.append({"serial": serial, "common_name": device.get("serial"), "state": "", "file": file,
+                              "label": f"Device ID · {tiles.short(serial)}"})
+        return found
+
+    def ca_certificates(run_dir: Path, name: str) -> str:
+        """CA certificates the run keeps (the policy's chain, UC-7 the manufacturer's PKI) – names the chain."""
+        files = (run_dir / "ca-chain.pem", run_dir / "device" / "ca-chain.pem",
+                 devices.device_dir(run_dir, name) / "ca-chain.pem",
+                 run_dir / "manufacturer" / "ica.pem", run_dir / "manufacturer" / "root.pem")
+        return "".join(f.read_text() for f in files if f.is_file())
+
+    async def certificate_pem(run: dict, chosen: dict, serial: str) -> str:
+        """The certificate's PEM: saved at issuance, or – where the app never received it (UC-8: the TrustEdge agent
+        fetches it) – read once from DTM and kept in the run directory, so each certificate costs one call at most."""
+        if chosen.get("file"):
+            return chosen["file"].read_text()
+        run_dir = data_dir / "runs" / run["id"]
+        path = run_dir / "certificates" / f"{serial}.pem"
+        if path.is_file():
+            return path.read_text()
+        if run["use_case"] not in REMOTE_PEM or not run_dir.is_dir() or run.get("cleanup_status") == "running":
+            return ""
+        client = None
+        try:
+            client = client_for(run["id"])
+            found = certinfo.load(await client.certificate_pem(chosen["serial"]))
+        except (DTMError, HTTPException) as exc:
+            log.warning("certificate %s of run %s not readable from DTM: %s", serial, run["id"], exc)
+            return ""
+        finally:
+            if client:
+                await client.aclose()
+        # Only that certificate is kept – whatever else the answer holds is not stored
+        if not found or format(found[0].serial_number, "X") != serial:
+            return ""
+        pem = "".join(c.public_bytes(serialization.Encoding.PEM).decode() for c in found)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(pem)
+        return pem
+
+    @app.get("/runs/{run_id}/devices/{name}/certificates")
+    async def device_certificate(request: Request, run_id: str, name: str, serial: str = ""):
+        """The detail view of one of the device's certificates (default: the current one) – a picker of all of them
+        plus what the certificate holds. The serial only selects among the device's own certificates."""
+        run = get_run_or_404(run_id)
+        device = device_or_404(run, name)
+        options = device_certificates(run, device)
+        if serial:
+            chosen = next((o for o in options if (o.get("serial") or "").upper() == serial.upper()), None)
+        else:
+            # the current one – UC-8: the operational certificate, the bootstrap one stays active beside it
+            current = [o for o in options if o["state"] == "active"] or options[:1]
+            chosen = next((o for o in current if o.get("role") == "operational"), current[0] if current else None)
+        upper = ((chosen or {}).get("serial") or "").upper()
+        if chosen is None or not SERIAL.fullmatch(upper):
+            raise HTTPException(404, "Certificate not found")
+        run_dir = data_dir / "runs" / run_id
+        info = certinfo.details(await certificate_pem(run, chosen, upper), ca_certificates(run_dir, name))
+        if info and info["serial"] != upper:  # never show another certificate than the one picked
+            info = None
+        issued = next((c for c in (run.get("result") or {}).get("certificates") or []
+                       if (c.get("serial") or "").upper() == upper), {})
+        if issued.get("key_type"):  # stored as "ECDSA secp256r1" – the view names curves like the parsed PEM
+            curve = issued["key_type"].rsplit(" ", 1)[-1]
+            issued = issued | {"key_type": issued["key_type"].replace(curve, certinfo.CURVES.get(curve, curve))}
+        downloadable = not chosen.get("file") and (run_dir / "certificates" / f"{upper}.pem").is_file()
+        return render(request, "_cert_detail.html", run=run, d=device, options=options,
+                      chosen=chosen | {"serial": upper}, info=info, issued=issued,
+                      pem_url=f"/runs/{run_id}/certificates/{upper}.pem" if downloadable else None)
+
     @app.post("/runs/{run_id}/devices/add")
     async def add_device(run_id: str):
         """UC-8 per click: one more IoT minion from the factory."""
@@ -765,9 +844,13 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
     @app.get("/runs/{run_id}/certificates/{serial}.pem")
     async def run_certificate_pem(run_id: str, serial: str):
         run = get_run_or_404(run_id)
-        info = next((c for c in (run.get("result") or {}).get("certificates") or [] if c.get("serial") == serial), None)
+        # The serial must be one of the run's certificates (or one a device lists) – no path built from free input.
+        # DTM lists serials in lower case; the saved PEMs are named in upper case.
+        listed = [c | {"serial": (c.get("serial") or "").upper()} for d in tiles.devices(run)
+                  for c in d.get("certificates") or []]
+        info = next((c for c in ((run.get("result") or {}).get("certificates") or []) + listed
+                     if c.get("serial") == serial), None)
         path = data_dir / "runs" / run_id / "certificates" / f"{serial}.pem"
-        # The serial must be one of the run's certificates – no path built from free input.
         if not info or not SERIAL.fullmatch(serial) or not path.is_file():
             raise HTTPException(404, "Certificate not found")
         return FileResponse(path, media_type="application/x-pem-file", filename=f"{info['common_name'] or serial}.pem")

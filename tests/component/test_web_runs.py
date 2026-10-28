@@ -902,7 +902,7 @@ def test_payload_for_webui_batch_has_upload_hint_and_single_api_has_certificate(
     finished(store, "r2")
     html = configured_user.get("/runs/r2").text
     assert "<h2>Payload</h2>" not in html and 'href="/runs/r2/artifact"' not in html  # the certificate is on its tile
-    assert re.search(r'<section class="device-tile enrolled" id="tile-1"', html) and ".pem\" download>" in html
+    assert re.search(r'<section class="device-tile enrolled" id="tile-1"', html) and 'data-certs="/runs/r2/devices/' in html
 
 
 def test_webui_single_has_no_payload_section(configured_user, store):
@@ -1287,14 +1287,13 @@ def test_ui_stays_responsive_during_large_uc02_keygen(configured_user, store):
 
 def test_no_native_title_tooltips(configured_user, store):
     configured_user.post("/runs", data=form(use_case="uc02", mode="batch", count="2"))
-    finished(store, "r1")
+    name = finished(store, "r1")["result"]["certificates"][0]["common_name"]
     for path in ("/", "/runs/new", "/runs/new/uc01", "/settings", "/runs/r1", "/runs/r1/timeline",
-                 "/runs/r1/devices", "/runs/r1/api?dialect=powershell", "/nope"):
+                 "/runs/r1/devices", f"/runs/r1/devices/{name}/certificates", "/runs/r1/api?dialect=powershell", "/nope"):
         html = configured_user.get(path).text
         assert not re.search(r"<[a-z][^>]*\stitle=", html), path  # only the <title> element remains
     page = configured_user.get("/runs/r1").text
     assert re.search(r'<time class="t" datetime="[^"]+" data-tip="[^"]+">', page)
-    assert re.search(r'data-tip="Serial [0-9A-F]+ · valid until \d{4}-\d{2}-\d{2} · issued">', page)
     assert re.search(r'<small data-tip="[^"]+">Key generation</small>', page)
 
 

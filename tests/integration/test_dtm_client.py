@@ -427,3 +427,30 @@ async def test_empty_bodies_where_dtm_sends_none_are_fine(router, client):
     assert await client.create_division("n", "d") == "d-1"
     assert await client.revoke("c-1") == "revoked"
     await client.delete_policy("IOT_1")
+
+
+# --- certificate PEM by serial (detail view) -------------------------------------------------
+
+PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+
+
+@pytest.mark.parametrize("answer", [httpx.Response(200, text=PEM),
+                                    httpx.Response(200, text=json.dumps({"pem": PEM})),
+                                    # raw line breaks inside the JSON string, as DTM sends them
+                                    httpx.Response(200, text='{"certificate": "' + PEM + '"}')])
+async def test_certificate_pem_by_serial(router, client, answer):
+    route = router.get(f"{CERT}/serial-number/4F2a9A1/download/pem").mock(return_value=answer)
+    assert await client.certificate_pem("4F2a9A1") == PEM
+    assert route.calls.last.request.url.params["account_id"] == ACCOUNT_ID
+
+
+async def test_certificate_pem_refuses_odd_serials_and_errors(router, client):
+    for serial in ("", "../x", "4F 2A", "G1", "A" * 65):
+        with pytest.raises(DTMError):
+            await client.certificate_pem(serial)
+    assert client.calls == []  # refused before any request
+    router.get(f"{CERT}/serial-number/AB/download/pem").mock(return_value=httpx.Response(404, json={}))
+    with pytest.raises(DTMError):
+        await client.certificate_pem("AB")
+    router.get(f"{CERT}/serial-number/CD/download/pem").mock(return_value=httpx.Response(200, json={"other": 1}))
+    assert await client.certificate_pem("CD") == ""  # JSON without a PEM: nothing to show

@@ -10,8 +10,6 @@
 {% set stages = {"factory": "passcode only", "starting": "starting", "bootstrap_enrolling": "enrolling bootstrap",
                  "bootstrap_enrolled": "bootstrap enrolled", "configured": "configured", "agent_starting": "agent running",
                  "operational": "operational"} %}
-{# DTM lists hex serials in either case – the saved PEMs are named in upper case #}
-{% set local = (r.certificates or []) | map(attribute="serial") | map("upper") | list if pem_available(run) else [] %}
 {% set open = not run.cleanup_status and (run.status == "completed" or (uc == "uc04" and run.status == "renewing")) %}
     {% set current = (d.certificates or []) | selectattr("status", "equalto", "issued") | rejectattr("renewed") | list %}
     {% set busy = d.busy %}
@@ -32,7 +30,6 @@
         <dt data-tip="CN of the bootstrap certificate – the operational one carries the device name">Serial number</dt><dd class="mono">{{ d.serial }}</dd>
         {% elif retrofit %}
         <dt data-tip="Unmanaged device-ID certificate from the manufacturer's ICA">Device ID</dt><dd class="mono">{{ d.serial }}</dd>
-        <dt data-tip="The managed certificate carries the device name">Certificate CN</dt><dd class="mono" data-tip="{{ d.name }}">{{ d.name if d.issued else "–" }}</dd>
         {% elif advanced %}
         <dt data-tip="DTM files the certificate under the device by this attribute">{{ r.identity or "Identity" }}</dt><dd class="mono">{{ d.identity }}</dd>
         {% else %}
@@ -67,21 +64,19 @@
       </div>
       {% endif %}
       {% if d.certificates %}
-      {# At most two rows – current and previous; older ones collapse into one muted row (UC-8: bootstrap, operational) #}
-      {% set listed = d.certificates | sort(attribute="role") | list if minion else d.certificates | reverse | list %}
+      {# At most two rows – current and previous; older ones collapse into one muted row (UC-8: bootstrap, operational).
+         A click opens the certificate detail view in the side panel. #}
+      {% set listed = tiles.certificates(run, d) %}
       {% set shown = listed if minion else listed[:2] %}
-      <ul class="tbox certs">
+      <ul class="tbox certs" data-certs="/runs/{{ run.id }}/devices/{{ d.name | urlencode }}/certificates" tabindex="0" aria-label="Certificate details">
         {% for c in shown %}
-        {% set state = "active" if c.status == "issued" and not c.renewed else c.status if c.status != "issued" else "renewed" %}
-        {% set short = c.serial[:3] ~ "…" ~ c.serial[-3:] if c.serial and c.serial | length > 8 else c.serial %}
-        <li><span class="cert-state {{ 'ok' if state == 'active' else '' }}" data-tip="{{ state }}">{{ c.role if c.role is defined else state }}</span>
-          <span class="mono cn" data-tip="CN {{ c.common_name }}">{{ c.common_name or "–" }}</span>
-          <span class="mono muted right" data-tip="Serial {{ c.serial }} · valid until {{ c.valid_to }} · {{ 'renewal' if c.renewed_from else {'uc04': 'factory enrollment', 'uc05': 'field enrollment', 'uc06': 'registration', 'uc07': 'field enrollment'}.get(uc, 'issued') }}">{% if c.serial and c.serial | upper in local %}<a href="/runs/{{ run.id }}/certificates/{{ c.serial | upper }}.pem" download>{{ short }}</a>{% else %}{{ short }}{% endif %} · {{ c.valid_to }}</span></li>
+        <li><span class="cert-state{{ ' ok' if c.state == 'active' }}">{{ c.role if c.role is defined else c.state }}</span>
+          <span class="mono muted">{{ c.short }}</span>{% if loop.first %}<span class="muted right">{{ icon("chevron") }}</span>{% else %}<span></span>{% endif %}</li>
         {% endfor %}
         {% set earlier = listed[shown | length:] %}
-        {% if earlier %}<li class="earlier"><span class="muted" data-tip="{% for c in earlier %}{{ c.serial }} · {{ c.valid_to }}{{ ' · ' ~ c.status if c.status != 'issued' }}{% if not loop.last %} | {% endif %}{% endfor %}">+ {{ earlier | length }} earlier</span></li>{% endif %}
+        {% if earlier %}<li class="earlier"><span class="muted">+ {{ earlier | length }} earlier</span></li>{% endif %}
       </ul>
-      {% else %}<p class="tbox muted device-empty">{{ "Device-ID certificate only – no managed certificate yet" if retrofit else "One-time passcode only – no certificate yet" if minion or uc == "uc05" else "DTM lists no certificate yet" }}</p>{% endif %}
+      {% else %}<p class="tbox muted device-empty"{% if retrofit %} data-certs="/runs/{{ run.id }}/devices/{{ d.name | urlencode }}/certificates" tabindex="0"{% endif %}>{{ "Device-ID certificate only – no managed certificate yet" if retrofit else "One-time passcode only – no certificate yet" if minion or uc == "uc05" else "DTM lists no certificate yet" }}</p>{% endif %}
       </div>
       <div class="device-foot">
         <span class="muted">{% if busy and minion %}{{ stages.get(d.stage, d.stage) | capitalize }} …{% elif d.last %}{{ d.last.action }} in {{ "%.2f" | format(d.last.seconds) }} s{% endif %}</span>
