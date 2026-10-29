@@ -217,11 +217,12 @@ function closePanel() {
 }
 
 document.addEventListener("click", (event) => {
+  // Close first: the panel itself carries data-certs (the certificates it shows)
+  if (event.target.closest("[data-panel-close]")) return closePanel();
   const cell = event.target.closest(".wall use[data-n]");
   if (cell) return openDevice(cell);
   const certs = event.target.closest("[data-certs]");
   if (certs) return openCertificates(certs);
-  if (event.target.closest("[data-panel-close]")) return closePanel();
   const chip = event.target.closest(".wall-chip");
   if (!chip) return;
   const wall = chip.closest(".card").querySelector(".wall");
