@@ -221,6 +221,8 @@ async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
                ("policy", f"{base}-policy", client.policy_ids)]
     if PLATFORMS.get(client.config.host) == "per_run":  # never block a rollback on the host check
         lookups.append(("profile", f"{base}-profile", client.profile_ids))
+        if run["use_case"] == "uc08":  # its operational profile (evergreen.use_profile part)
+            lookups.append(("profile", f"{base}-op-profile", client.profile_ids))
     credential = run["use_case"] in ("uc03", "uc04", "uc05", "uc07", "uc08") or (
         run["use_case"] == "uc06" and run["params"].get("auth") in ("passcode", "certificate"))
     if credential:  # the credential lives in its own authentication policy

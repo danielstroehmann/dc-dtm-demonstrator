@@ -5,8 +5,8 @@ certificate via EST (CN = serial number), loads its bootstrap configuration via 
 agent, which fetches the operational certificate over MQTT (CN = device name) and renews it itself before it expires
 (TrustEdge has no command to renew on demand – so there is no renewal per click).
 
-Verified end to end on US 2026-10-27. On NL the agent's request for the operational certificate is not
-answered (reported to DTM) – the use case is offered for US connections only."""
+Verified end to end on US 2026-10-27. Offered on NL too, where the agent's request for the operational certificate
+was not answered when tested (reported to DTM)."""
 
 import asyncio
 import os
@@ -24,11 +24,6 @@ from .store import Store, now
 MAX_DEVICES = 10  # each device is a running container with an agent
 FIELD_TIMEOUT_S = 300  # bootstrap enrollment + configuration + agent connect + operational certificate
 POLL_S = 3.0
-PLATFORM = "one.digicert.com"
-
-
-def supported(host: str) -> bool:
-    return host == PLATFORM
 
 
 async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> None:
@@ -61,7 +56,8 @@ async def run(store: Store, client: DTMClient, run_id: str, run_dir: Path) -> No
                                                         auth_policy_id=auth_policy_id, protocol="est",
                                                         device_group=True), variables, log)
         # Operational: short-lived, the TrustEdge agent applies it over MQTT
-        profile_id = await use_profile(client, api, store, run_id, p["use_case"], dtm.PROFILE_RENEWAL, variables, log)
+        profile_id = await use_profile(client, api, store, run_id, p["use_case"], dtm.PROFILE_RENEWAL, variables, log,
+                                       part="op")
         operational = await _policy(client, api, store, run_id, f"{base}-op-policy", "OP_POLICY_ID",
                                     "Create the operational policy (TrustEdge agent, CN = device name)",
                                     dtm.trustedge_policy_body(name="{n}", division_id=division_id,

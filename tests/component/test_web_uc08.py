@@ -1,12 +1,13 @@
 """UC-7 and UC-8 through the web UI: use-case gating (platform, minion runtime), per-device enroll/renew routes,
 adding IoT minions, firmware routes with their limits, the polled tile and the rollback."""
 
+import dataclasses
 import json
 import re
 
 import pytest
 
-from app import devices, firmware, trustedge
+from app import devices, evergreen, firmware, trustedge
 from tests.component.test_web_runs import cleaned, finished
 from tests.conftest import PASSWORD, make_web, wait_for
 from tests.fakedocker import FakeDocker
@@ -57,7 +58,31 @@ def test_uc08_needs_the_minion_runtime(configured_user, monkeypatch, docker):
     assert response.status_code == 400 and "IoT minion runtime" in response.text
 
 
-def test_uc08_only_on_a_us_connection(store, auth, data_dir, docker):
+def test_uc08_runs_on_an_nl_connection(store, auth, data_dir, docker):
+    nl = FakeDTM(host=NL_HOST)
+    store.save_connection(None, "NL", NL_HOST, ACCOUNT_ID, API_KEY)
+    with make_web(store, auth, nl, data_dir) as user:
+        assert user.post("/login", data={"password": PASSWORD}, follow_redirects=False).status_code == 303
+        assert user.get("/runs/new/uc08").status_code == 200
+        assert not re.search(r'aria-label="Start TrustEdge managed devices" disabled', user.get("/runs/new").text)
+        started(user, store)
+        assert len(nl.devices) == 2
+        # NL: the run's own profiles – bootstrap and operational, under two names (DTM refuses one name twice)
+        own = sorted(p["name"] for p in nl.profiles if p["name"].startswith("robot-t1-"))
+        assert own == ["robot-t1-uc08-op-profile", "robot-t1-uc08-profile"]
+        user.post("/runs/t1/cleanup", data={"mode": "full"})
+        assert cleaned(store, "t1")["cleanup_status"] == "done"
+    assert nl.active_devices() == [] and all(p["status"] == "DELETED" for p in nl.profiles if p["name"].startswith("robot-t1-"))
+
+
+@pytest.fixture
+def us_only(monkeypatch):
+    """The platform binding of a use case (none is bound right now), tried on UC-8."""
+    monkeypatch.setitem(evergreen.CATALOG, "uc08", dataclasses.replace(evergreen.CATALOG["uc08"],
+                                                                      platform="one.digicert.com"))
+
+
+def test_a_platform_bound_use_case_is_refused_on_another_platform(store, auth, data_dir, docker, us_only):
     nl = FakeDTM(host=NL_HOST)
     store.save_connection(None, "NL", NL_HOST, ACCOUNT_ID, API_KEY)
     with make_web(store, auth, nl, data_dir) as user:
@@ -66,12 +91,9 @@ def test_uc08_only_on_a_us_connection(store, auth, data_dir, docker):
         assert response.status_code == 400 and "needs a connection to one.digicert.com" in response.text
         assert re.search(r'data-tip="Needs a connection to one.digicert.com"><button[^>]*disabled',
                          user.get("/runs/new").text)
-        response = user.post("/runs", data=form(), follow_redirects=False)
-        assert response.status_code == 400 and "a US connection" in response.text
-    assert store.list_runs() == [] and nl.devices == {} and nl.policies == {}
 
 
-def test_uc08_page_takes_the_us_connection_when_nl_is_the_default(user, store, docker):
+def test_a_platform_bound_use_case_takes_its_connection_when_another_is_the_default(user, store, docker, us_only):
     nl = store.save_connection(None, "NL", NL_HOST, ACCOUNT_ID, API_KEY)
     us = store.save_connection(None, "US", "one.digicert.com", ACCOUNT_ID, API_KEY)
     store.set_default_connection(nl)

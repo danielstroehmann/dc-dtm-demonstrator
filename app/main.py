@@ -490,7 +490,7 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             raise HTTPException(404, "Unknown use case")
         conn = selected_connection(connection)
         if (platform := evergreen.CATALOG[use_case].platform) and conn["host"] != platform:
-            # e.g. UC-8: a connection to another platform picked explicitly is refused (the tile is greyed out);
+            # a use case bound to a platform: a connection to another platform picked explicitly is refused (the tile is greyed out);
             # without a pick (old links, default NL) the first one on the use case's platform is taken
             if connection:
                 return render(request, "error.html", 400,
@@ -605,9 +605,8 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
             params |= {"variant": "api", "approval": False, "protocol": protocol, "auth": auth_method,
                        "field": field, "identity": identity}
         if use_case == "uc08":  # TrustEdge: EST bootstrap, the agent fetches the operational certificate
-            if (not trustedge.supported(conn["host"]) or count > trustedge.MAX_DEVICES
-                    or cas[ca_id]["key_type"] != "ecdsa" or not await minions.available()):
-                raise HTTPException(400, f"TrustEdge managed devices: a US connection, an ECDSA issuing CA, the IoT "
+            if count > trustedge.MAX_DEVICES or cas[ca_id]["key_type"] != "ecdsa" or not await minions.available():
+                raise HTTPException(400, f"TrustEdge managed devices: an ECDSA issuing CA, the IoT "
                                          f"minion runtime and 1–{trustedge.MAX_DEVICES} devices.")
             params |= {"variant": "api", "approval": False, "protocol": "trustedge", "auth": "passcode",
                        "pause": pause}

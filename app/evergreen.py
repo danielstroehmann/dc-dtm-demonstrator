@@ -83,8 +83,7 @@ USE_CASES = {
         "fetches its operational certificate (device name) over MQTT. Needs the Advanced license.",
         "client_side", ("Advanced license", "TrustEdge agent", "IoT minions"), license="advanced",
         tip="IoT minions – containers – run the real TrustEdge agent. With only a one-time passcode from the factory, each "
-            "IoT minion gets its bootstrap certificate and then its operational certificate from DTM. Advanced license, "
-            "US connections.", platform="one.digicert.com"),
+            "IoT minion gets its bootstrap certificate and then its operational certificate from DTM. Advanced license."),
 }
 # The home page offers UC-1..UC-3 as one guided entry; the answers resolve to one of them.
 GUIDE = UseCase(
@@ -282,12 +281,13 @@ async def create_division(client: DTMClient, api: ApiCalls, store: Store, run_id
 
 
 async def use_profile(client: DTMClient, api: ApiCalls, store: Store, run_id: str, use_case: str,
-                      spec: dtm.ProfileSpec, variables: dict, log) -> str:
+                      spec: dtm.ProfileSpec, variables: dict, log, part: str = "") -> str:
     """The run's certificate profile – per run on NL (the full rollback deletes it), shared on US (DTM
-    there refuses to delete a profile a deleted policy used). See dtm.PLATFORMS."""
+    there refuses to delete a profile a deleted policy used). See dtm.PLATFORMS. part names a run's second
+    profile (UC-8: -op-profile next to -profile) – DTM refuses two profiles of one name."""
     if dtm.profile_mode(client.config.host) == "shared":
         return await use_shared_profile(client, api, spec, variables, log)
-    name = f"{prefix(run_id, use_case)}-profile"
+    name = f"{prefix(run_id, use_case)}-{part + '-' if part else ''}profile"
     own = replace(spec, name=name)
     validity = f"{spec.value} {spec.unit}"
     log(f"Creating certificate profile {name} ({validity})")

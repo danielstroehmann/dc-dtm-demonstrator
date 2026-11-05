@@ -253,9 +253,14 @@ def test_several_connections_on_the_same_host_can_be_saved(two, store, fakes):
 
 
 def test_platform_bound_tile_is_greyed_while_another_platform_is_selected(store, auth, fakes, data_dir, monkeypatch):
-    """UC-8 runs on US only: with an NL connection selected its tile is greyed out and its start refused."""
+    """A use case bound to a platform (none is right now; tried on UC-8): with a connection to another platform
+    selected its tile is greyed out and its start refused."""
+    import dataclasses
+
+    from app import evergreen
     from tests.component.test_web_uc08 import FakeDocker
     FakeDocker().install(monkeypatch)
+    monkeypatch.setitem(evergreen.CATALOG, "uc08", dataclasses.replace(evergreen.CATALOG["uc08"], platform=HOST))
     us = store.save_connection(None, "US", HOST, ACCOUNT_ID, API_KEY)
     nl = store.save_connection(None, "NL", "one.nl.digicert.com", OTHER_ACCOUNT_ID, KEY_B)
     app = create_app(store, auth, client_factory=lambda c, o: DTMClient(c, o, transport=fakes[c.account_id].transport()),

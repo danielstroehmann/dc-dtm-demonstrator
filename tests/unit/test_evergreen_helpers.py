@@ -43,4 +43,4 @@ def test_catalog_uses_the_field_wording():
     assert "field renewal per click" in texts["uc04"].lower() and "Field enrollment via EST or CMPv2" in texts["uc05"]
     assert "common name is a serial number or MAC address" in texts["uc06"]
     assert "Field enrollment via EST or CMPv2" in texts["uc07"] and "Advanced license" in texts["uc08"]
-    assert evergreen.USE_CASES["uc08"].platform == "one.digicert.com"  # TrustEdge: US only so far
+    assert evergreen.USE_CASES["uc08"].platform == ""  # TrustEdge: offered on US and NL
