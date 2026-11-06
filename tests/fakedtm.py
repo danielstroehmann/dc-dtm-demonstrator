@@ -213,6 +213,20 @@ class FakeDTM:
             {"id": "profile-old", "name": "Old profile", "status": "INACTIVE", "account_id": account_id},
             _profile("profile-foreign", "Other account client profile", "tpl-foreign", "anytime", OTHER_ACCOUNT_ID),
         ]
+        # Certificate templates (verified live on NL, 2026-11-06): the account's own ones are limited to it, the
+        # system's are not; the list spans every account the key sees, like the profiles.
+        self.templates = [
+            {"id": "tpl-own-client", "name": "Basic client certificate template - Fake", "status": "ACTIVE",
+             "type": "custom", "certificate_type": "end_entity", "limit_by_accounts": True,
+             "accounts": [{"id": account_id}]},
+            {"id": "tpl-system-client", "name": "Basic Client Auth Certificate Template", "status": "ACTIVE",
+             "type": "system", "certificate_type": "end_entity", "limit_by_accounts": False, "accounts": []},
+            {"id": "tpl-system-tls", "name": "Basic TLS Certificate Template", "status": "ACTIVE",
+             "type": "system", "certificate_type": "end_entity", "limit_by_accounts": False, "accounts": []},
+            {"id": "tpl-foreign-client", "name": "Basic client certificate template - Other", "status": "ACTIVE",
+             "type": "custom", "certificate_type": "end_entity", "limit_by_accounts": True,
+             "accounts": [{"id": OTHER_ACCOUNT_ID}]},
+        ]
         self.template_validity_cap: dict[str, tuple[str, int]] = {}  # template id → what DTM applies instead
         self.zones = [
             {"id": "rz-b", "name": "b-zone", "status": "ENABLED"},
@@ -318,6 +332,8 @@ class FakeDTM:
             ("cas", "GET", r"/certificate-authority/api/v1/ca", self._list_cas),
             ("profiles", "GET", rf"{DTM}/certificate-configuration-service/api/v1/certificate-profile",
              self._list_profiles),
+            ("templates", "GET", rf"{DTM}/certificate-configuration-service/api/v1/certificate-template",
+             lambda request: self._page(request, self.templates)),
             ("zones", "GET", rf"{DTM}/api/v4/rendezvous-zone", self._list_zones),
             ("division_create", "POST", rf"{DIVISION_PATH}", self._create_division),
             ("division_list", "GET", rf"{DIVISION_PATH}", self._list_divisions),

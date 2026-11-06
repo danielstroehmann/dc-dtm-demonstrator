@@ -81,9 +81,34 @@ async def test_base_profile_falls_back_to_the_first_own_active_one(fake):
     assert fake.names("profile_get") == ["profile-server"]  # first own ACTIVE, INACTIVE "Old" skipped
 
 
-async def test_no_base_profile(fake):
+def no_profile_to_copy(fake):
     fake.profiles = [p for p in fake.profiles if p.get("account_id") != ACCOUNT_ID or p["status"] != "ACTIVE"]
-    with pytest.raises(DTMError, match="no active certificate profile to copy"):
+
+
+async def test_without_a_profile_to_copy_the_accounts_client_template_is_taken(fake):
+    """NL keeps no profiles (every run creates and deletes its own): the account's own basic client template, with
+    the basic client body and the purpose's validity."""
+    no_profile_to_copy(fake)
+    await call(fake, "shared_profile", EVERGREEN)
+    body = fake.created_profiles[0]
+    assert body["certificate_template_id"] == "tpl-own-client" and fake.names("profile_get") == []
+    values = {e["key"]: e.get("value") for e in body["body"]}
+    assert values["subject.common_name"] is None and values["allow_any_key_type"] == "yes"
+    assert (values["validity.duration_unit"], values["validity.duration_value"]) == (EVERGREEN.unit, EVERGREEN.value)
+
+
+async def test_template_choice_skips_foreign_and_non_client_templates(fake):
+    no_profile_to_copy(fake)
+    fake.templates = [t for t in fake.templates if t["id"] != "tpl-own-client"]
+    fake.templates.append({**fake.templates[0], "id": "tpl-disabled", "name": "Basic client x", "status": "DISABLED"})
+    await call(fake, "shared_profile", EVERGREEN)
+    assert fake.created_profiles[0]["certificate_template_id"] == "tpl-system-client"
+
+
+async def test_no_profile_and_no_client_template(fake):
+    no_profile_to_copy(fake)
+    fake.templates = [t for t in fake.templates if t["id"] in ("tpl-system-tls", "tpl-foreign-client")]
+    with pytest.raises(DTMError, match="neither a certificate profile to copy nor a client certificate template"):
         await call(fake, "shared_profile", EVERGREEN)
     assert fake.created_profiles == []
 

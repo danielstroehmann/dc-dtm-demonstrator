@@ -23,6 +23,7 @@ LOOKUP_RETRIES = 3
 DIVISIONS = "/devicetrustmanager/api/v4/division"
 POLICIES = "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"
 PROFILES = "/devicetrustmanager/certificate-configuration-service/api/v1/certificate-profile"
+TEMPLATES = "/devicetrustmanager/certificate-configuration-service/api/v1/certificate-template"
 AUTH = "/devicetrustmanager/authentication-service/api/v1"
 # UC-7: a CA as trust anchor of an authentication policy – the portal's endpoint (not in the public spec)
 AUTH_CA = "/devicetrustmanager/authentication-service/api/v2/authentication-ca"
@@ -223,6 +224,36 @@ PROFILE_EVERGREEN_CMP = ProfileSpec("robot-evergreen-cmp-5y-profile", "years", 5
 PROFILE_RENEWAL = ProfileSpec("robot-renewal-6m-profile", "months", 6, renew_anytime=True)
 PROFILE_RENEWAL_CMP = ProfileSpec("robot-renewal-cmp-6m-profile", "months", 6, bare_key=True, renew_anytime=True)
 SHARED_PROFILES = (PROFILE_EVERGREEN, PROFILE_EVERGREEN_CMP, PROFILE_RENEWAL, PROFILE_RENEWAL_CMP)
+
+
+# The body DTM gives a "Basic client certificate profile" (read from one, 2026-11-06) – for an account without any
+# profile to copy (NL keeps none: every run creates and deletes its own), next to a client certificate template.
+_ANY = "fixed_value"
+BASIC_CLIENT_BODY = [
+    {"key": "certificate_value", "optional": False, "sources": [_ANY], "value": "auto", "enabled": True},
+    {"key": "unique_certificate_value", "optional": False, "sources": [_ANY], "value": "no", "enabled": True},
+    {"key": "signature_algorithm", "optional": False, "sources": [_ANY], "value": "match_issuer", "enabled": True},
+    {"key": "allow_any_key_type", "optional": False, "sources": [_ANY], "value": "yes", "enabled": True},
+    {"key": "allowed_key_types", "optional": False, "sources": [_ANY], "enabled": True, "value": [
+        "rsa_1024", "rsa_2048", "rsa_3072", "rsa_4096", "p_256", "p_384", "p_521", "ed_25519", "MLDSA-44", "MLDSA-65",
+        "MLDSA-87", "SLHDSA-SHAKE-128f", "SLHDSA-SHA2-128s", "SLHDSA-SHAKE-128s", "SLHDSA-SHA2-128f", "SLHDSA-SHAKE-192s",
+        "SLHDSA-SHA2-192f", "SLHDSA-SHA2-192s", "SLHDSA-SHAKE-192f", "SLHDSA-SHAKE-256f", "SLHDSA-SHA2-256s",
+        "SLHDSA-SHAKE-256s", "SLHDSA-SHA2-256f"]},
+    {"key": "subject.common_name", "optional": False, "sources": ["user_supplied", "csr"], "enabled": True},
+    {"key": "subject.organization_name", "optional": True, "sources": ["user_supplied", "csr"], "enabled": True},
+    {"key": "subject.organization_unit", "optional": True, "sources": ["user_supplied", "csr"], "enabled": True},
+    *({"key": f"subject.{k}", "optional": True, "sources": [], "enabled": False}
+      for k in ("street_address", "postal_code", "locality", "state", "country", "email")),
+    {"key": "validity.duration_unit", "optional": False, "sources": [_ANY], "value": "years", "enabled": True},
+    {"key": "validity.duration_value", "optional": False, "sources": [_ANY], "value": 1, "enabled": True},
+    {"key": "key_usage.critical", "optional": True, "sources": [_ANY], "value": "yes", "enabled": False},
+    {"key": "extended_key_usage.critical", "optional": True, "sources": [_ANY], "value": "yes", "enabled": False},
+    {"key": "extended_key_usage.additional_values", "optional": True, "sources": [], "enabled": False},
+    {"key": "renewal_settings.renew_valid_cert", "optional": False, "sources": [_ANY], "value": "anytime", "enabled": True},
+    {"key": "renewal_settings.renew_expired_cert", "optional": False, "sources": [_ANY], "value": "anytime", "enabled": True},
+    {"key": "renewal_settings.renew_revoked_cert", "optional": False, "sources": [_ANY], "value": True, "enabled": True},
+    {"key": "renewal_settings.renewal_key_pair", "optional": False, "sources": [_ANY], "value": "optional", "enabled": True},
+]
 
 
 def shared_profile_body(base: dict, spec: ProfileSpec, account_id: str) -> dict:
@@ -553,12 +584,26 @@ class DTMClient:
         bases = [r for r in records if r.get("status") == "ACTIVE" and r.get("id") and r.get("account_id")
                  in (None, self.config.account_id) and not str(r.get("name", "")).startswith("robot-")]
         if not bases:
-            raise DTMError("the account has no active certificate profile to copy")
+            return await self._template_base()
         base = next((r for r in bases if "client" in str(r.get("name", "")).lower()), bases[0])
         detail = _json(await self._request("GET", f"{PROFILES}/{base['id']}"))
         if not isinstance(detail.get("certificate_template"), dict) or not isinstance(detail.get("body"), list):
             raise DTMError(f"profile {base.get('name')} cannot be copied (no template or body)")
         return detail
+
+    async def _template_base(self) -> dict:
+        """No profile to copy: a client certificate template the account may use – its own basic one (what DTM made
+        the US base profile from) before the system's – with the basic client body."""
+        def usable(t: dict) -> bool:
+            return (t.get("status") == "ACTIVE" and t.get("certificate_type") == "end_entity" and t.get("id")
+                    and "client" in str(t.get("name", "")).lower()
+                    and (not t.get("limit_by_accounts") or self.config.account_id in json.dumps(t.get("accounts"))))
+        templates = [t for t in await self._list(TEMPLATES) if isinstance(t, dict) and usable(t)]
+        if not templates:
+            raise DTMError("the account has neither a certificate profile to copy nor a client certificate template")
+        template = min(templates, key=lambda t: (not str(t["name"]).lower().startswith("basic client"),
+                                                 not t.get("limit_by_accounts")))
+        return {"certificate_template": {"id": template["id"]}, "body": BASIC_CLIENT_BODY}
 
     async def run_profile_body(self, spec: ProfileSpec) -> dict:
         """NL: the body of a profile for one run – a copy of the account's base profile."""
