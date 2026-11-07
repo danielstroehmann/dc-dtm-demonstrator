@@ -66,7 +66,7 @@ def test_profiles_part_for_an_unsupported_platform(user, legacy, fake):
     assert "One profile per run" not in html and fake.requests == []
 
 
-def test_profiles_part_texts_per_platform(user, store, fake):
+def test_profiles_part_texts_per_platform(nl_per_run, user, store, fake):
     store.save_connection(None, "NL", NL_HOST, ACCOUNT_ID, API_KEY)
     nl = next(c for c in store.connections() if c["host"] == NL_HOST)
     html = user.get(f"/settings/connections/{nl['id']}/profiles").text

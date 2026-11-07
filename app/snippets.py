@@ -207,5 +207,5 @@ def script(variables: dict, calls: list[dict], dialect: str, phase: str | None =
     blocks = ([] if dialect == "powershell" or phase else ["#!/usr/bin/env bash"])
     blocks.append(preamble(variables, dialect, keep=phase not in (None, "setup")))
     blocks += [f"# {c['purpose']}\n{render(c['spec'], dialect)}" for c in calls
-               if c.get("spec") and phase in (None, c.get("phase", "recurring"))]
+               if c.get("spec") and c["spec"].get("script", True) and phase in (None, c.get("phase", "recurring"))]
     return "\n\n".join(blocks) + "\n"

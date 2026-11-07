@@ -884,7 +884,7 @@ def test_steps_grouped_by_phase(configured_user, store):
     calls = run["result"]["api_calls"]
     # setup incl. the shared profile lookup; recurring: CSV, encryption key, upload, wait for approval,
     # approve, poll, download, decrypt + unpack
-    assert [c["phase"] for c in calls] == ["setup"] * 6 + ["recurring"] * 8
+    assert [c["phase"] for c in calls] == ["setup"] * 7 + ["recurring"] * 8
     html = configured_user.get("/runs/r1").text
     setup, recurring = section(html, "setup"), section(html, "recurring")
     setup_icon = SETUP_TITLE.findall(setup)  # the expander title carries the settings icon, like a phase box
@@ -904,7 +904,7 @@ def test_steps_grouped_by_phase(configured_user, store):
     assert positions == sorted(positions)  # order preserved
     assert all(purpose(p) not in recurring for p in setup_purposes)
     assert all(purpose(p) not in setup for p in recurring_purposes)
-    assert 'id="pre-setup-1"' in setup and 'id="pre-setup-6"' in setup and 'id="pre-setup-7"' not in html
+    assert 'id="pre-setup-1"' in setup and 'id="pre-setup-7"' in setup and 'id="pre-setup-8"' not in html
     assert 'id="pre-recurring-1"' in recurring and 'id="pre-recurring-8"' in recurring
     assert 'id="pre-recurring-9"' not in html
     assert 'data-copy="script-setup-curl"' in setup and 'data-copy="script-recurring-curl"' in recurring
@@ -913,9 +913,11 @@ def test_steps_grouped_by_phase(configured_user, store):
     # the whole script starts with a bash shebang block, the phase scripts directly with the preamble
     heads = lambda text: [block.split("\n", 1)[0].removeprefix("# ")  # noqa: E731
                           for block in text.removeprefix("#!/usr/bin/env bash\n\n").split("\n\n")[1:]]
-    assert heads(s_setup) == setup_purposes
-    assert heads(s_rec) == [c["purpose"] for c in calls if c["phase"] == "recurring" and c["spec"]]
-    assert heads(s_all) == [c["purpose"] for c in calls if c["spec"]]
+    scripted = lambda c: c["spec"] and c["spec"].get("script", True)  # noqa: E731 – the profile create is shown only
+    assert heads(s_setup) == [c["purpose"] for c in calls if c["phase"] == "setup" and scripted(c)]
+    assert len(heads(s_setup)) == len(setup_purposes) - 1  # the shared profile's create stays out of the script
+    assert heads(s_rec) == [c["purpose"] for c in calls if c["phase"] == "recurring" and scripted(c)]
+    assert heads(s_all) == [c["purpose"] for c in calls if scripted(c)]
     zsh = '[ -n "${ZSH_VERSION:-}" ] && setopt interactivecomments\n'  # "#" lines stay comments in zsh
     assert s_all.startswith(f"#!/usr/bin/env bash\n\n{zsh}export DTM_API_KEY='<your API key>'\n")
     assert s_setup.startswith(f"{zsh}export DTM_API_KEY='<your API key>'\n")  # setup: plain exports, no shebang

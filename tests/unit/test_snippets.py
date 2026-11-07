@@ -553,7 +553,7 @@ def profile_lookup():
 
     class Client:
         async def shared_profile(self, spec):
-            return "p", "used"
+            return "p", "used", None
 
     import asyncio
     asyncio.run(evergreen.use_shared_profile(Client(), api, dtm.PROFILE_EVERGREEN, variables, lambda *a: None))

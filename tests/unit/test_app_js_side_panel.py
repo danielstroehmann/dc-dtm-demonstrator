@@ -14,14 +14,29 @@ ROOT = Path(__file__).resolve().parents[2]
 NODE = shutil.which("node")
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed – app.js click handling not exercised")
-def test_close_button_closes_the_open_side_panel():
+def run_app_js() -> dict:
     out = subprocess.run([NODE, str(Path(__file__).with_name("app_js_dom.js")), str(ROOT / "app/static/app.js")],
                          capture_output=True, text=True, timeout=30, check=True).stdout
-    report = json.loads(out)
+    return json.loads(out)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed – app.js click handling not exercised")
+def test_close_button_closes_the_open_side_panel():
+    report = run_app_js()
 
     # A click on a tile's certificates opens the panel and loads them
-    assert report["afterOpen"] == {"hidden": False, "certs": "/runs/r1/devices/d1/certificates",
-                                   "ajax": ["/runs/r1/devices/d1/certificates"]}
+    loaded = ["/runs/r1/devices/d1/certificates"]
+    assert report["afterOpen"] == {"hidden": False, "certs": "/runs/r1/devices/d1/certificates", "ajax": loaded}
     # The × closes it: hidden again, its certificates forgotten, nothing loaded again
-    assert report["afterClose"] == {"hidden": True, "certs": None, "ajax": ["/runs/r1/devices/d1/certificates"]}
+    assert report["afterClose"] == {"hidden": True, "certs": None, "ajax": loaded}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed – app.js log polling not exercised")
+def test_device_log_keeps_refreshing_failsafe_while_the_panel_is_open():
+    report = run_app_js()
+    # first load, then background rounds: 204 (DTM silent) and a network error keep v1, the next answer shows v2
+    assert report["log"] == ["<p>v1</p>", "<p>v1</p>", "<p>v1</p>", "<p>v2</p>"]
+    log, refresh = "/runs/r1/devices/d1/log", "/runs/r1/devices/d1/log?refresh=1"
+    assert report["fetches"] == [log, refresh, refresh, refresh]  # nothing while the page was hidden
+    assert report["hiddenFetched"] == 0 and report["timersWhileOpen"] == 1  # still scheduled, one at a time
+    assert report["timersAfterClose"] == 0  # closing stops it

@@ -283,6 +283,7 @@ class FakeDTM:
         # the objects carry their account_id.
         self.device_groups: dict[str, dict] = {}
         self.devices: dict[str, dict] = {}
+        self.device_log: list[dict] = []  # life events of all devices (POST device/logs, verified live on US)
         self.device_group_list_lag = 0   # group lists that do not yet show a new group
         self.device_cert_list_lag = 0    # /device/certificates answers with total but no records yet
         self.device_answer_override: dict | None = None  # replaces "device" in a device certificate answer
@@ -361,6 +362,7 @@ class FakeDTM:
             ("device_group_get", "GET", rf"{DEVICE_GROUP_PATH}/(?P<oid>[^/]+)", self._get_object("device_groups")),
             ("device_enroll", "POST", rf"{DEVICE_PATH}/enroll", self._enroll_device),
             ("device_certificates", "GET", rf"{DEVICE_PATH}/certificates", self._device_certificates),
+            ("device_logs", "POST", rf"{DEVICE_PATH}/logs", self._device_logs),
             ("device_list", "GET", rf"{DEVICE_PATH}", self._list_devices),
             ("device_disable", "PATCH", rf"{DEVICE_PATH}/(?P<oid>[^/]+)/disable", self._disable("devices")),
             ("device_delete", "PATCH", rf"{DEVICE_PATH}/(?P<oid>[^/]+)/delete", self._soft_delete("devices", 23)),
@@ -444,6 +446,21 @@ class FakeDTM:
         offset = int(request.url.params.get("offset", 0))
         return _json_response(200, {key: items[offset:offset + limit], "total": len(items),
                                     "limit": limit, "offset": offset})
+
+    def _device_logs(self, request):
+        """Paged in the body; the query's limit/offset are ignored (DTM then repeats its first page of 10)."""
+        body = json.loads(request.content or b"{}")
+        if not body.get("account_id"):
+            return _json_response(400, {"error": {"code": "03", "verbose": "Account ID is required."}})
+        items = sorted((r for r in self.device_log if r["device_id"] == body.get("device_id")
+                        and r["account_id"] == body["account_id"]), key=lambda r: r["created_on"], reverse=True)
+        limit, offset = int(body.get("limit", 10)), int(body.get("offset", 0))
+        return _json_response(200, {"records": items[offset:offset + limit], "total": len(items), "limit": limit,
+                                    "offset": offset, "pagination": len(items) > limit, "next": offset + limit < len(items)})
+
+    def log_device_event(self, device_id: str, kind: str, activity: str, at: str, account_id: str | None = None) -> None:
+        self.device_log.append({"id": str(uuid.uuid4()), "created_on": at, "updated_on": at, "type": kind,
+                                "activity": activity, "device_id": device_id, "account_id": account_id or self.account_id})
 
     # account / lookups
     def _accounts(self, request):

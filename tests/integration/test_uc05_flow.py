@@ -104,7 +104,7 @@ async def test_uc05_provisions_bound_passcodes_and_enrolls_in_the_field(store, e
 
 
 @pytest.mark.parametrize("protocol", ["est", "cmpv2"])
-async def test_uc05_on_nl_has_its_own_profile(store, tmp_path, monkeypatch, protocol):
+async def test_uc05_on_nl_has_its_own_profile(nl_per_run, store, tmp_path, monkeypatch, protocol):
     from tests import conftest
     nl = FakeDTM(host=NL_HOST)
     enroll_net = conftest.enroll_net.__wrapped__(monkeypatch, nl)

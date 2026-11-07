@@ -28,7 +28,7 @@ def profile_reads(fake: FakeDTM) -> list[str]:
 
 
 @pytest.mark.parametrize("path", ["/runs/new/evergreen", "/runs/new/uc04"])
-def test_nl_form_shows_the_runs_own_profile_without_asking_dtm(nl_user, fake, path):
+def test_nl_form_shows_the_runs_own_profile_without_asking_dtm(nl_per_run, nl_user, fake, path):
     html = nl_user.get(path).text
     assert re.search(r'<div class="readonly-value" tabindex="0" data-tip="Deleted by the full rollback">Own profile '
                      r'for this run</div>\s*<small class="field-help">(5 years|6 months · renew any time)</small>', html)
@@ -38,7 +38,7 @@ def test_nl_form_shows_the_runs_own_profile_without_asking_dtm(nl_user, fake, pa
     assert profile_reads(fake) == []  # no shared_profile_status on NL
 
 
-def test_nl_settings_profiles(nl_user, store, fake):
+def test_nl_settings_profiles(nl_per_run, nl_user, store, fake):
     html = nl_user.get("/settings").text
     assert '<summary class="meta">Profiles: per run</summary>' in html and "Profiles: shared" not in html
     conn = store.connection(None)
@@ -48,7 +48,7 @@ def test_nl_settings_profiles(nl_user, store, fake):
     assert fake.requests == []  # rendered without calling DTM
 
 
-def test_nl_run_through_the_web_records_and_rolls_back_its_profile(nl_user, store, fake):
+def test_nl_run_through_the_web_records_and_rolls_back_its_profile(nl_per_run, nl_user, store, fake):
     nl_user.post("/runs", data=form())
     run = finished(store, "r1")
     assert run["status"] == "completed", run["error"]

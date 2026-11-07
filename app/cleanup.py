@@ -250,7 +250,17 @@ async def discover(store: Store, client: DTMClient, run_id: str, log) -> None:
         lookups.append(("deployment", f"{base}-firmware-", client.deployments_named))
     for kind, name, lookup in lookups:
         known = {o["dtm_id"] for o in store.objects(run_id, kind)}
-        for found in await lookup(name):
+        try:
+            founds = await lookup(name)
+        except DTMError as exc:
+            # DTM's release service can be unreachable while the rest works; a run that recorded no
+            # deployment rolls back without that lookup instead of blocking its whole cleanup
+            if kind != "deployment" or exc.status is not None or known:
+                raise
+            log(f"Firmware deployments could not be checked ({exc}) – the run recorded none, "
+                "continuing without that check")
+            continue
+        for found in founds:
             dtm_id, found_name = found if isinstance(found, tuple) else (found, name)  # prefix lookups name each
             if dtm_id not in known:
                 log(f"Found unrecorded {kind} {found_name} – adding it to the cleanup")
@@ -317,10 +327,24 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                     beat.set(f"Deleting certificate policy {policy['name']} and verifying it is gone", short="Deleting policy")
                     await client.delete_policy(policy["dtm_id"])
                     store.mark_removed(run_id, "policy", policy["dtm_id"])
+                kept = []  # profiles DTM refuses to delete: still referenced by the run's (deleted) policies
+                per_run = PLATFORMS.get(client.config.host) == "per_run"
                 for profile in store.objects(run_id, "profile"):
+                    if not per_run:  # shared profiles mode: DTM refuses deleting used profiles, none is tried
+                        log(f"Leaving certificate profile {profile['name']} in DTM – profiles are not deleted")
+                        store.mark_removed(run_id, "profile", profile["dtm_id"])
+                        continue
                     log(f"Deleting certificate profile {profile['name']}")
                     beat.set(f"Deleting certificate profile {profile['name']} and verifying it is gone", short="Deleting profile")
-                    await client.delete_profile(profile["dtm_id"])
+                    try:
+                        await client.delete_profile(profile["dtm_id"])
+                    except DTMError as exc:
+                        if "referenced by" not in str(exc):
+                            raise
+                        log(f"DTM refuses to delete certificate profile {profile['name']} ({exc}) – "
+                            "the rest of the rollback goes on")
+                        kept.append(profile["name"])
+                        continue
                     store.mark_removed(run_id, "profile", profile["dtm_id"])
                 for kind in AUTH_SHORT:  # trust anchor and credentials first, their authentication policy last
                     label = "authentication CA" if kind == "auth_ca" else kind.replace("_", " ")
@@ -337,6 +361,9 @@ async def cleanup(store: Store, client: DTMClient, run_id: str, mode: str, run_d
                     beat.set(f"Deleting division {division['name']} and verifying it is gone", short="Deleting division")
                     await client.delete_division(division["dtm_id"])
                     store.mark_removed(run_id, "division", division["dtm_id"])
+                if kept:  # everything else is gone; a later rollback tries the profiles again
+                    raise DTMError(f"DTM refused to delete certificate profile(s) {', '.join(kept)} – "
+                                   "everything else is removed; roll back again later")
                 shutil.rmtree(run_dir, ignore_errors=True)
             else:  # UC-4: the device's key belongs to a revoked certificate now – nothing to keep it for
                 shutil.rmtree(run_dir / "device", ignore_errors=True)

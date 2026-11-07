@@ -805,6 +805,30 @@ def create_app(store: Store, auth: Auth, client_factory: ClientFactory = DTMClie
                       chosen=chosen | {"serial": upper}, info=info, issued=issued,
                       pem_url=f"/runs/{run_id}/certificates/{upper}.pem" if downloadable else None)
 
+    @app.get("/runs/{run_id}/devices/{name}/log")
+    async def device_log(request: Request, run_id: str, name: str, refresh: bool = False):
+        """The device's life events from DTM as a vertical timeline (Advanced use cases, side panel). refresh: a
+        background reload – if DTM does not answer, 204 keeps the log already shown."""
+        run = get_run_or_404(run_id)
+        device = device_or_404(run, name)
+        # the ID comes from the run's own ledger – never from the request
+        dtm_id = next((o["dtm_id"] for o in store.objects(run_id, "device") if o["name"] == device["name"]), None)
+        if dtm_id is None or run.get("cleanup_status") == "running":
+            raise HTTPException(404, "No device log")
+        client = None
+        try:
+            client = client_for(run_id)
+            entries, failed = tiles.log_entries(await client.device_logs(dtm_id)), False
+        except (DTMError, HTTPException) as exc:
+            log.warning("device log of %s in run %s not readable from DTM: %s", name, run_id, exc)
+            if refresh:
+                return HTMLResponse(status_code=204)
+            entries, failed = [], True
+        finally:
+            if client:
+                await client.aclose()
+        return render(request, "_device_log.html", run=run, d=device, entries=entries, failed=failed)
+
     @app.post("/runs/{run_id}/devices/add")
     async def add_device(request: Request, run_id: str):
         """UC-8 per click: one more IoT minion from the factory."""

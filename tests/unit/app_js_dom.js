@@ -84,14 +84,27 @@ const document = {
   querySelector: (s) => body.querySelector(s),
 };
 const ajax = [];
+// fetch answers scripted per call: {status, body} or "error"; timers are run by hand
+const fetches = [];
+const answers = [];
+const timers = new Map();
+let timerId = 0;
 const context = {
   document,
   window: { addEventListener() {}, scrollX: 0, scrollY: 0 },
-  htmx: { ajax: (method, url, opts) => ajax.push(url) },
+  htmx: { config: { defaultSwapStyle: "innerHTML" }, ajax: (method, url, opts) => ajax.push(url), swap: (target, html) => { target.innerHTML = html; } },
   navigator: {},
   localStorage: { getItem: () => null, setItem() {} },
   setInterval: () => 0,  // the countdown ticker must not keep node alive
-  setTimeout: () => 0,
+  setTimeout: (fn) => { timers.set(++timerId, fn); return timerId; },
+  clearTimeout: (id) => timers.delete(id),
+  fetch: async (url) => {
+    fetches.push(url);
+    const a = answers.shift() || { status: 204, body: "" };
+    if (a === "error") throw new Error("network down");
+    return { status: a.status, text: async () => a.body };
+  },
+  AbortSignal: { timeout: () => undefined },
   console,
 };
 
@@ -101,16 +114,40 @@ const certsBox = new Element("div", { class: "tile-certs", "data-certs": "/runs/
 tile.append(certsBox);
 const panel = new Element("aside", { id: "side-panel", class: "side-panel", hidden: "" });
 const close = new Element("button", { class: "panel-close outline btn-sm", "data-panel-close": "" });
-panel.append(close, new Element("div", { class: "panel-tile" }), new Element("div", { class: "panel-certs" }));
+panel.append(close, new Element("div", { class: "panel-tile" }), new Element("div", { class: "panel-certs" }),
+  new Element("div", { class: "panel-log" }));
 body.append(tile, panel);
 
 vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: "app.js" });
 
 const click = (target) => { for (const fn of listeners.click || []) fn({ target }); };
 const state = () => ({ hidden: panel.hidden, certs: panel.dataset.certs ?? null, ajax: [...ajax] });
-const report = {};
-click(certsBox);
-report.afterOpen = state();
-click(close);
-report.afterClose = state();
-process.stdout.write(JSON.stringify(report));
+const settle = () => new Promise((r) => setImmediate(r));
+const logBox = panel.querySelector(".panel-log");
+const tick = async () => {  // run the pending timers once, like time passing
+  const due = [...timers.entries()];
+  timers.clear();
+  for (const [, fn] of due) fn();
+  await settle();
+};
+(async () => {
+  const report = {};
+  answers.push({ status: 200, body: "<p>v1</p>" });
+  click(certsBox);
+  await settle();
+  report.afterOpen = state();
+  report.log = [logBox.innerHTML];
+  answers.push({ status: 204, body: "" }, "error", { status: 200, body: "<p>v2</p>" });
+  for (let i = 0; i < 3; i++) { await tick(); report.log.push(logBox.innerHTML); }
+  document.hidden = true;  // a hidden page asks nothing
+  const before = fetches.length;
+  await tick();
+  report.hiddenFetched = fetches.length - before;
+  document.hidden = false;
+  report.timersWhileOpen = timers.size;
+  click(close);
+  report.afterClose = state();
+  report.timersAfterClose = timers.size;
+  report.fetches = [...fetches];
+  process.stdout.write(JSON.stringify(report));
+})();

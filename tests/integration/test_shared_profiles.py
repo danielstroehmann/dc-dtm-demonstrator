@@ -44,7 +44,7 @@ def writes(fake: FakeDTM) -> list[str]:
 
 @pytest.mark.parametrize("spec", [EVERGREEN, CMP, RENEWAL])
 async def test_created_once_then_used(fake, spec):
-    profile_id, how = await call(fake, "shared_profile", spec)
+    profile_id, how, _body = await call(fake, "shared_profile", spec)
     assert how == "created"
     created = fake.profile(spec.name)
     assert created["id"] == profile_id and created["status"] == "ACTIVE" and created["account_id"] == ACCOUNT_ID
@@ -58,7 +58,7 @@ async def test_created_once_then_used(fake, spec):
                                                                                "renewal_settings.renew_valid_cert"
                                                                                in entries)
     fake.calls.clear()
-    assert await call(fake, "shared_profile", spec) == (profile_id, "used")
+    assert (await call(fake, "shared_profile", spec))[:2] == (profile_id, "used")
     assert writes(fake) == [] and len(fake.created_profiles) == 1
     assert fake.violations == []
 
@@ -123,7 +123,7 @@ async def test_base_without_template_is_refused(fake):
 @pytest.mark.parametrize("status", ["DISABLED", "INACTIVE"])
 async def test_retired_profile_is_enabled_again(fake, status):
     old = shared(fake, EVERGREEN, status=status)
-    assert await call(fake, "shared_profile", EVERGREEN) == (old["id"], "enabled")
+    assert (await call(fake, "shared_profile", EVERGREEN))[:2] == (old["id"], "enabled")
     assert old["status"] == "ACTIVE" and fake.names("profile_enable") == [old["id"]]
     assert fake.created_profiles == []
 
@@ -131,7 +131,7 @@ async def test_retired_profile_is_enabled_again(fake, status):
 async def test_active_preferred_over_retired_duplicate(fake):
     shared(fake, EVERGREEN, status="DISABLED")
     active = shared(fake, EVERGREEN, status="ACTIVE", id="second")
-    assert await call(fake, "shared_profile", EVERGREEN) == ("second", "used")
+    assert (await call(fake, "shared_profile", EVERGREEN))[:2] == ("second", "used")
     assert writes(fake) == []
     assert active["status"] == "ACTIVE"
 
@@ -142,7 +142,7 @@ async def test_deleted_shared_profile_is_restored_not_recreated(fake):
     old = shared(fake, EVERGREEN)
     fake.delete_profile(old)
     assert fake.profile(EVERGREEN.name)["status"] == "DELETED"
-    assert await call(fake, "shared_profile", EVERGREEN) == (old["id"], "restored")
+    assert (await call(fake, "shared_profile", EVERGREEN))[:2] == (old["id"], "restored")
     assert old["status"] == "ACTIVE" and fake.names("profile_undelete") == [old["id"]]
     assert fake.names("profile_create") == [] and fake.created_profiles == []
     assert writes(fake) == ["profile_undelete"]
@@ -153,7 +153,7 @@ async def test_deleted_shared_profile_is_restored_not_recreated(fake):
 async def test_deleted_and_retired_profile_is_restored_and_enabled(fake):
     old = shared(fake, CMP, status="DISABLED")
     fake.delete_profile(old)
-    assert await call(fake, "shared_profile", CMP) == (old["id"], "restored")
+    assert (await call(fake, "shared_profile", CMP))[:2] == (old["id"], "restored")
     assert old["status"] == "ACTIVE"
     assert writes(fake) == ["profile_undelete", "profile_enable"] and fake.created_profiles == []
 
@@ -175,7 +175,7 @@ async def test_deleted_profile_with_other_settings_stays_deleted(fake, spec, cha
 async def test_deleted_profile_of_another_account_is_ignored(fake):
     foreign = shared(fake, EVERGREEN, account_id=OTHER_ACCOUNT_ID)
     fake.delete_profile(foreign)
-    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    profile_id, how, _body = await call(fake, "shared_profile", EVERGREEN)
     assert how == "created" and profile_id != foreign["id"]
     assert fake.names("profile_undelete") == [] and foreign["status"] == "DELETED"
     assert fake.profile(EVERGREEN.name)["id"] == profile_id
@@ -184,12 +184,12 @@ async def test_deleted_profile_of_another_account_is_ignored(fake):
 async def test_deleted_profile_of_another_name_is_ignored(fake):
     other = shared(fake, CMP)
     fake.delete_profile(other)
-    _profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    _profile_id, how, _body = await call(fake, "shared_profile", EVERGREEN)
     assert how == "created" and fake.names("profile_undelete") == [] and other["status"] == "DELETED"
 
 
 async def test_no_deleted_record_creates_as_before(fake):
-    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    profile_id, how, _body = await call(fake, "shared_profile", EVERGREEN)
     assert how == "created" and fake.names("profile_undelete") == []
     lists = [r.url.params.get("status") for r in fake.requests if r.url.path == dtm.PROFILES and r.method == "GET"]
     assert lists == [None, "DELETED"] and fake.profile(EVERGREEN.name)["id"] == profile_id
@@ -211,7 +211,7 @@ async def test_fake_keeps_deleted_names_reserved(fake):
 
 async def test_string_values_from_dtm_still_match(fake):
     old = shared(fake, EVERGREEN, unit="Years", value="5")
-    assert await call(fake, "shared_profile", EVERGREEN) == (old["id"], "used")
+    assert (await call(fake, "shared_profile", EVERGREEN))[:2] == (old["id"], "used")
 
 
 @pytest.mark.parametrize("spec,changes", [
@@ -240,7 +240,7 @@ async def test_foreign_account_profile_of_that_name_is_ignored(fake):
     import copy
     foreign = shared(fake, EVERGREEN, account_id=OTHER_ACCOUNT_ID, value=1)  # mismatching on purpose
     before = copy.deepcopy(foreign)
-    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    profile_id, how, _body = await call(fake, "shared_profile", EVERGREEN)
     assert how == "created" and profile_id != foreign["id"]
     assert foreign == before and not any(oid == foreign["id"] for _n, oid in fake.calls)
     assert fake.profile(EVERGREEN.name)["account_id"] == ACCOUNT_ID
@@ -253,7 +253,7 @@ async def test_race_with_another_installation(fake):
             shared(fake, EVERGREEN, id="theirs")
         return None  # the fake then refuses the duplicate name with 400
     fake.fail["profile_create"] = other_installation_first
-    assert await call(fake, "shared_profile", EVERGREEN) == ("theirs", "used")
+    assert (await call(fake, "shared_profile", EVERGREEN))[:2] == ("theirs", "used")
     assert [p["id"] for p in fake.profiles if p["name"] == EVERGREEN.name] == ["theirs"]
 
 
@@ -279,8 +279,11 @@ async def test_template_cap_disables_the_new_profile_and_stops(fake):
 
 async def test_concurrent_calls_create_once(fake):
     results = await asyncio.gather(*(call(fake, "shared_profile", EVERGREEN) for _ in range(3)))
-    assert sorted(how for _id, how in results) == ["created", "used", "used"]
-    assert len({profile_id for profile_id, _how in results}) == 1 and len(fake.created_profiles) == 1
+    assert sorted(how for _id, how, _body in results) == ["created", "used", "used"]
+    assert len({profile_id for profile_id, _how, _body in results}) == 1 and len(fake.created_profiles) == 1
+    # a run that found the profile shows the same create call as the run that made it
+    created = next(body for _id, how, body in results if how == "created")
+    assert all(body == created for _id, _how, body in results) and created == fake.created_profiles[0]
 
 
 # --- status and retire -------------------------------------------------------------------------
@@ -322,7 +325,7 @@ async def test_retire_disables_ours_only(fake):
     assert fake.route_order().count("profiles") == 1  # one listing, the status comes from it
     assert next(p for p in fake.profiles if p["id"] == PROFILE_ID)["status"] == "ACTIVE"  # base untouched
     # a later run enables it again
-    assert await call(fake, "shared_profile", EVERGREEN) == (ours["id"], "enabled")
+    assert (await call(fake, "shared_profile", EVERGREEN))[:2] == (ours["id"], "enabled")
 
 
 # --- runs use the right one; never in the ledger, never deleted --------------------------------
@@ -457,5 +460,5 @@ async def test_deleted_list_record_with_another_status_is_not_undeleted(fake, mo
 
     fake._list_profiles = unfiltered
     fake._register()
-    profile_id, how = await call(fake, "shared_profile", EVERGREEN)
+    profile_id, how, _body = await call(fake, "shared_profile", EVERGREEN)
     assert how == "created" and fake.names("profile_undelete") == [] and profile_id != "odd-status"

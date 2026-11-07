@@ -2,6 +2,7 @@
 adding IoT minions, firmware routes with their limits, the polled tile and the rollback."""
 
 import dataclasses
+import httpx
 import json
 import re
 
@@ -58,7 +59,7 @@ def test_uc08_needs_the_minion_runtime(configured_user, monkeypatch, docker):
     assert response.status_code == 400 and "IoT minion runtime" in response.text
 
 
-def test_uc08_runs_on_an_nl_connection(store, auth, data_dir, docker):
+def test_uc08_runs_on_an_nl_connection(nl_per_run, store, auth, data_dir, docker):
     nl = FakeDTM(host=NL_HOST)
     store.save_connection(None, "NL", NL_HOST, ACCOUNT_ID, API_KEY)
     with make_web(store, auth, nl, data_dir) as user:
@@ -405,3 +406,36 @@ def test_start_all_only_for_iot_minions(configured_user, store, enroll_net):
 def test_start_all_requires_login(web, configured_store):
     response = web.post("/runs/t1/devices/start-all", follow_redirects=False)
     assert response.status_code == 303 and response.headers["location"] == "/login"
+
+
+# --- device log in the side panel ----------------------------------------------------------------------
+
+def test_device_log_shows_dtm_events_newest_first(configured_user, store, fake, docker):
+    started(configured_user, store)
+    name = names(store)[0]
+    (device,) = [o for o in store.objects("t1", "device") if o["name"] == name]
+    fake.log_device_event(device["dtm_id"], "DEVICE_STATE", "ENROLLED", "2026-11-07T06:12:38.000Z")
+    fake.log_device_event(device["dtm_id"], "DEPLOYMENT", "INSTALLED", "2026-11-07T06:12:55.000Z")
+    html = configured_user.get(f"/runs/t1/devices/{name}/log").text
+    assert html.index("Update installed") < html.index("Enrolled")  # newest first
+    assert '<li class="log-deployment">' in html and "06:12:55" in html
+    assert "hx-trigger" not in html  # app.js reloads it (a CSP without eval rules out htmx filters)
+    assert "INSTALLED" not in html and "DEPLOYMENT" not in html  # no raw API codes
+    assert 'class="panel-log"' in configured_user.get("/runs/t1").text
+
+
+def test_device_log_routes_refuse_what_is_not_the_runs_device(configured_user, store, fake, docker):
+    started(configured_user, store)
+    assert configured_user.get("/runs/t1/devices/robot-other-device/log").status_code == 404
+    assert configured_user.get("/runs/nope/devices/x/log").status_code == 404
+    assert not any(c[0] == "device_logs" for c in fake.calls)
+
+
+def test_device_log_when_dtm_fails(configured_user, store, fake, docker):
+    started(configured_user, store)
+    fake.fail["device_logs"] = httpx.ReadError("Connection reset by peer")
+    response = configured_user.get(f"/runs/t1/devices/{names(store)[0]}/log")
+    assert response.status_code == 200 and "The device log is not available right now." in response.text
+    # a background reload keeps the log already shown: no content instead of the message
+    response = configured_user.get(f"/runs/t1/devices/{names(store)[0]}/log?refresh=1")
+    assert response.status_code == 204 and response.text == ""

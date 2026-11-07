@@ -314,7 +314,7 @@ def test_connection_actions_order_and_side_by_side_fields(user, store, fake):
     assert any("name=\"account_id\"" in r and "name=\"api_key\"" in r for r in rows)  # side by side
     assert any("name=\"name\"" in r and "name=\"host\"" in r for r in rows)
     summaries = re.findall(r'<summary class="meta">(Profiles: [^<]+)</summary>', html)
-    assert sorted(summaries) == ["Profiles: per run", "Profiles: shared"]
+    assert summaries == ["Profiles: shared", "Profiles: shared"]  # both platforms share profiles for now
 
 
 def test_unsupported_summary(user, store):

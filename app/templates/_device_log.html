@@ -1,0 +1,9 @@
+{# The device's life events from DTM, newest first – app.js reloads it while the side panel shows it. #}
+<section class="device-log">
+  <h4>Device log <span class="meta">from Device Trust Manager · UTC</span></h4>
+  {% if failed %}<p class="muted">The device log is not available right now.</p>
+  {% elif not entries %}<p class="muted">No events yet.</p>
+  {% else %}<ol class="timeline">
+    {% for e in entries %}<li class="log-{{ e.kind }}"><time class="t" datetime="{{ e.ts }}" data-tip="{{ e.date }} {{ e.time }} UTC">{{ e.time }}</time><span class="msg">{{ e.text }}</span></li>
+    {% endfor %}</ol>{% endif %}
+</section>

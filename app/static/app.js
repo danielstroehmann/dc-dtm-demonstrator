@@ -167,6 +167,12 @@ function openPanel(certs, tile) {
   if (tile) htmx.ajax("GET", tile, { target: tileBox });  // htmx swaps the inner content by default
   certsBox.replaceChildren();  // a device without certificates answers 404 – nothing of the previous one stays
   htmx.ajax("GET", certs, { target: certsBox });
+  // The device's DTM log below (Advanced use cases; others answer 404 and the box stays empty)
+  const logBox = panel.querySelector(".panel-log");
+  if (logBox && certs !== panel.dataset.certs) {
+    logBox.replaceChildren();
+    watchLog(certs.replace(/\/certificates$/, "/log"));
+  }
   panel.dataset.certs = certs;
   panel.dataset.sig = certSig(certs);
 }
@@ -206,12 +212,44 @@ function openCertificates(box) {
   openPanel(box.dataset.certs, inPanel ? undefined : null);
 }
 
+// The device log looks live: reloaded every few seconds while the panel shows it and the page is visible.
+// Failsafe – a failed or slow answer keeps what is shown and the next round tries again; one request at a time.
+const LOG_EVERY_MS = 5000;
+let logTimer = null;
+let logUrl = null;
+
+function watchLog(url) {
+  clearTimeout(logTimer);
+  logUrl = url;
+  refreshLog(url, true);
+}
+
+async function refreshLog(url, first) {
+  const box = document.querySelector("#side-panel .panel-log");
+  if (!box || url !== logUrl) return;  // closed or another device meanwhile
+  if (first || !document.hidden) {
+    try {
+      const response = await fetch(first ? url : `${url}?refresh=1`, { signal: AbortSignal.timeout(10000) });
+      // 200: the new log; 204: DTM did not answer this time – keep the shown one; 404: no log for this device
+      // the server's own HTML, swapped by htmx like every other partial
+      if (url === logUrl && response.status === 200) htmx.swap(box, await response.text(), { swapStyle: htmx.config.defaultSwapStyle });
+      if (response.status === 404) return;
+    } catch {
+      // network error or timeout – the next round tries again
+    }
+  }
+  if (url === logUrl) logTimer = setTimeout(() => refreshLog(url, false), LOG_EVERY_MS);
+}
+
 function closePanel() {
   const panel = document.getElementById("side-panel");
   if (!panel || panel.hidden) return;
   panel.hidden = true;
   panel.querySelector(".panel-tile").replaceChildren();  // its tile must not keep polling
   panel.querySelector(".panel-certs").replaceChildren();
+  panel.querySelector(".panel-log")?.replaceChildren();
+  clearTimeout(logTimer);  // its log must not keep polling
+  logUrl = null;
   delete panel.dataset.certs;
   document.querySelector(".wall use.selected")?.classList.remove("selected");
 }

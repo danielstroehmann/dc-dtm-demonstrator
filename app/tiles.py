@@ -117,3 +117,43 @@ def _identity(d: dict) -> dict:
     serial, cn = cert.get("serial") or "", cert.get("common_name")
     parts = [d["name"], cn if cn != d["name"] else None, short(serial), f"until {cert['valid_to']}" if cert.get("valid_to") else None]
     return {"serial": serial, "tip": " · ".join(p for p in parts if p)}
+
+
+# A device's DTM log as a timeline: (type, activity) -> text; the dot colour follows the type
+LOG_TEXTS = {
+    ("DEVICE_STATE", "ENROLLED"): "Enrolled",
+    ("DEVICE_STATE", "REGISTERED"): "Registered",
+    ("DEVICE_STATE", "PROVISIONED"): "Provisioned",
+    ("CONNECTION_STATUS", "CONNECTED"): "Connected",
+    ("CONNECTION_STATUS", "DISCONNECTED"): "Disconnected",
+    ("CERTIFICATE", "REQUESTED"): "Certificate requested",
+    ("CERTIFICATE", "ISSUED"): "Certificate issued",
+    ("CERTIFICATE", "REVOKED"): "Certificate revoked",
+    ("DEPLOYMENT", "PENDING"): "Update pending",
+    ("DEPLOYMENT", "DOWNLOADING"): "Downloading update",
+    ("DEPLOYMENT", "INSTALLING"): "Installing update",
+    ("DEPLOYMENT", "INSTALLED"): "Update installed",
+    ("DEPLOYMENT", "COMPLETED"): "Update completed",
+    ("DEPLOYMENT", "FAILED"): "Update failed",
+}
+LOG_KINDS = {"DEVICE_STATE": "state", "CONNECTION_STATUS": "connection", "CERTIFICATE": "certificate",
+             "DEPLOYMENT": "deployment"}
+LOG_TYPE_WORDS = {"DEVICE_STATE": "Device", "CONNECTION_STATUS": "Connection", "CERTIFICATE": "Certificate",
+                  "DEPLOYMENT": "Update"}
+
+
+def log_entries(records: list[dict]) -> list[dict]:
+    """DTM's log records (newest first) as timeline rows: time, text and a kind for the dot – unknown
+    activities read as words ("Update rolled back"), never as raw codes."""
+    rows = []
+    for r in records:
+        kind, activity = str(r.get("type") or ""), str(r.get("activity") or "")
+        text = LOG_TEXTS.get((kind, activity)) or " ".join(
+            w for w in (LOG_TYPE_WORDS.get(kind, kind.replace("_", " ").capitalize()),
+                        activity.replace("_", " ").lower()) if w)
+        # TrustEdge disconnects between its regular check-ins – grey, not an error
+        level = ("failed" if activity in ("FAILED", "REVOKED") else "offline" if activity == "DISCONNECTED"
+                 else LOG_KINDS.get(kind, "state"))
+        rows.append({"ts": r["created_on"], "time": r["created_on"][11:19], "date": r["created_on"][:10],
+                     "text": text, "kind": level})
+    return rows

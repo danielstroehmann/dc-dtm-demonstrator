@@ -318,6 +318,52 @@ async def test_revoke_only_removes_minions_and_keeps_the_devices(store, fake, do
     assert docker.containers == {} and fake.issued() == [] and len(fake.active_devices()) == 1
 
 
+async def test_rollback_goes_on_when_the_release_service_is_unreachable(store, fake, docker, minion, tmp_path):
+    """DTM NL resets every release-service connection; a run without deployments still rolls back."""
+    await start(store, fake, "tf", tmp_path, pause=False)
+    fake.fail["deployment_list"] = httpx.ReadError("Connection reset by peer")
+    run = await do_cleanup(store, fake, "tf", tmp_path)
+    assert run["cleanup_status"] == "done", events(store, "tf")
+    assert "Firmware deployments could not be checked" in events(store, "tf")
+    assert fake.issued() == [] and fake.active_devices() == [] and store.objects("tf") == []
+
+
+async def test_rollback_stops_when_a_recorded_deployment_cannot_be_checked(store, fake, docker, minion, tmp_path):
+    await start(store, fake, "tg", tmp_path, pause=False)
+    store.add_object("tg", "deployment", "d1", "robot-tg-uc08-firmware-2")
+    fake.fail["deployment_list"] = httpx.ReadError("Connection reset by peer")
+    run = await do_cleanup(store, fake, "tg", tmp_path)
+    assert run["cleanup_status"] == "failed" and "deployment failed: ReadError" in events(store, "tg")
+
+
+
+async def test_rollback_removes_the_rest_when_dtm_keeps_a_profile(monkeypatch, store, fake, docker, minion, tmp_path):
+    """Per-run profiles DTM refuses to delete (still referenced by the run's deleted policies – this fake
+    refuses that like DTM does now): everything else goes, the run stays failed with the profiles
+    recorded, so a later rollback tries them again."""
+    monkeypatch.setitem(cleanup.PLATFORMS, fake.host, "per_run")  # only the per-run mode deletes profiles
+    await start(store, fake, "th", tmp_path, pause=False)
+    run = await do_cleanup(store, fake, "th", tmp_path)
+    assert run["cleanup_status"] == "failed"
+    failure = next(e["message"] for e in store.events("th") if e["message"].startswith("Cleanup failed"))
+    kept = failure.split("certificate profile(s) ", 1)[1].split(" – ", 1)[0]
+    assert sorted(kept.split(", ")) == ["robot-th-uc08-op-profile", "robot-th-uc08-profile"], failure
+    assert fake.issued() == [] and fake.active_devices() == [] and fake.policies == {}
+    assert fake.active_auth("passcode") == [] and fake.active_auth("auth_policy") == []
+    assert sorted(o["name"] for o in store.objects("th")) == ["robot-th-uc08-op-profile", "robot-th-uc08-profile"]
+
+
+async def test_shared_mode_rollback_never_deletes_a_recorded_profile(store, fake, docker, minion, tmp_path):
+    """An older run's own profile in the ledger: with shared profiles the rollback leaves it in DTM."""
+    await start(store, fake, "ti", tmp_path, pause=False)
+    fake.profiles.append({"id": "p-ti", "name": "robot-ti-uc08-profile", "account_id": ACCOUNT_ID, "status": "ACTIVE"})
+    store.add_object("ti", "profile", "p-ti", "robot-ti-uc08-profile")
+    run = await do_cleanup(store, fake, "ti", tmp_path)
+    assert run["cleanup_status"] == "done", events(store, "ti")
+    assert "Leaving certificate profile robot-ti-uc08-profile in DTM" in events(store, "ti")
+    assert "profile_delete" not in fake.route_order() and store.objects("ti") == []
+
+
 async def test_rollback_refuses_another_runs_deployment_in_the_ledger(store, fake, docker, tmp_path):
     """Ledger rows are ours by construction – a corrupted one with another run's name is refused."""
     await start(store, fake, "te", tmp_path)

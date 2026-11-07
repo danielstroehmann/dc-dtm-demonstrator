@@ -269,6 +269,7 @@ SETUP = [("GET", "/devicetrustmanager/api/v4/rendezvous-zone"),
          ("POST", "/devicetrustmanager/api/v4/division"),
          ("GET", "/devicetrustmanager/api/v4/division"),
          ("GET", dtm.PROFILES),  # the shared profile (found or created once)
+         ("POST", dtm.PROFILES),  # its create – shown either way
          ("POST", "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy"),
          ("GET", "/devicetrustmanager/certificate-configuration-service/api/v2/certificate-policy")]
 
@@ -282,8 +283,8 @@ async def test_single_records_api_calls(store, fake, tmp_path):
         ("POST", "/devicetrustmanager/certificate-issuance-service/api/v2/certificate"), ("LOCAL", "jq")]
     assert all(c["outcome"] == "ok" and c["count"] == 1 for c in calls)
     # lookups by name and the local extract step are untimed
-    assert [c["seconds"] is None for c in calls] == [False, False, True, False, False, True, False, True]
-    assert calls[6]["seconds"] >= 0.05
+    assert [c["seconds"] is None for c in calls] == [False, False, True, False, True, False, True, False, True]
+    assert calls[7]["seconds"] >= 0.05
     variables = r["api_variables"]
     division_id, policy_id = next(iter(fake.divisions)), next(iter(fake.policies))
     profile_id = fake.profile(dtm.PROFILE_EVERGREEN.name)["id"]
@@ -299,25 +300,25 @@ async def test_single_records_api_calls(store, fake, tmp_path):
     assert profile["capture"]["var"] == "PROFILE_ID" and profile["capture"]["arg"] == dtm.PROFILE_EVERGREEN.name
     assert '.status == "ACTIVE"' in profile["capture"]["jq"] and profile["capture"]["missing"]
     assert calls[3]["phase"] == "setup"
-    assert calls[5]["spec"]["capture"] == evergreen.by_name("POLICY_ID", "{RUN_NAME}-policy")
+    assert calls[6]["spec"]["capture"] == evergreen.by_name("POLICY_ID", "{RUN_NAME}-policy")
     # only the lookups right after a create are retried (DTM lists lag); zone and profile exist before
     assert [c["spec"]["capture"].get("retry", False) for c in calls if c["spec"].get("capture")] == [
         False, True, False, True]
     # The copyable JSON bodies are exactly what the client sent, once the variables are filled in.
     assert substitute(calls[1]["spec"]["json"], variables) == sent_json(fake, "division_create")
-    assert substitute(calls[4]["spec"]["json"], variables) == sent_json(fake, "policy_create")
-    assert calls[4]["spec"]["json"]["certificate_policy"]["certificate_profile_id"] == "{PROFILE_ID}"  # a token
-    assert substitute(calls[6]["spec"]["json"], variables) == sent_json(fake, "issue")
-    assert calls[6]["spec"]["json"]["certificate_policy_id"] == "{POLICY_ID}"  # a token, not a literal ID
-    assert calls[6]["spec"]["json"]["certificate_profile_attributes"][0]["value"] == "{RUN_NAME}-single-0001"
+    assert substitute(calls[5]["spec"]["json"], variables) == sent_json(fake, "policy_create")
+    assert calls[5]["spec"]["json"]["certificate_policy"]["certificate_profile_id"] == "{PROFILE_ID}"  # a token
+    assert substitute(calls[7]["spec"]["json"], variables) == sent_json(fake, "issue")
+    assert calls[7]["spec"]["json"]["certificate_policy_id"] == "{POLICY_ID}"  # a token, not a literal ID
+    assert calls[7]["spec"]["json"]["certificate_profile_attributes"][0]["value"] == "{RUN_NAME}-single-0001"
     assert calls[1]["spec"]["json"]["account_id"] == "{DTM_ACCOUNT_ID}"
     assert calls[1]["spec"]["json"]["name"] == "{RUN_NAME}-division"
     assert calls[1]["spec"]["json"]["primary_rzone_id"] == "{RZONE_ID}"
-    assert r["duration_s"] >= 0.05 and calls[6]["count"] == 1
+    assert r["duration_s"] >= 0.05 and calls[7]["count"] == 1
     # server-side keys: the extract step writes the certificate and the key DTM generated
-    assert calls[7]["spec"]["command"]["bash"] == ("jq -r .pem certificate.json.out > device.crt\n"
+    assert calls[8]["spec"]["command"]["bash"] == ("jq -r .pem certificate.json.out > device.crt\n"
                                                   "jq -r .private_key certificate.json.out > device.key")
-    assert "Set-Content device.key $r.private_key" in calls[7]["spec"]["command"]["powershell"]
+    assert "Set-Content device.key $r.private_key" in calls[8]["spec"]["command"]["powershell"]
     assert run["progress"] is None
 
 
@@ -326,9 +327,9 @@ async def test_batch_records_api_calls_without_secrets(store, fake, tmp_path):
     run = await start(store, fake, "a2", tmp_path, mode="batch", count=3, approval=True)
     assert run["status"] == "completed"
     calls = run["result"]["api_calls"]
-    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "GET", "LOCAL", "LOCAL", "POST", "GET",
+    assert [c["method"] for c in calls] == ["GET", "POST", "GET", "GET", "POST", "POST", "GET", "LOCAL", "LOCAL", "POST", "GET",
                                             "PUT", "GET", "GET", "LOCAL"]
-    csv, enc, upload, wait_approval, approve, poll, download, decrypt = calls[6:]
+    csv, enc, upload, wait_approval, approve, poll, download, decrypt = calls[7:]
     # the CSV is generated from RUN_NAME – same names and header as the batch.zip the run uploaded
     assert csv["spec"]["command"] == evergreen.csv_batch_command(3) and csv["seconds"] is None
     assert '"$RUN_NAME"' in csv["spec"]["command"]["bash"] and "seq 1 3" in csv["spec"]["command"]["bash"]

@@ -307,7 +307,7 @@ async def use_profile(client: DTMClient, api: ApiCalls, store: Store, run_id: st
 async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.ProfileSpec, variables: dict, log) -> str:
     """The purpose's shared profile (validity etc.) – created by the first run, reused afterwards."""
     validity = f"{spec.value} {spec.unit}"
-    profile_id, how = await api.timed(
+    profile_id, how, body = await api.timed(
         f"Find the shared profile {spec.name} ({validity})", "GET",
         dtm.PROFILES, client.shared_profile(spec),
         # The profile list spans every account the key sees – the account filter is essential.
@@ -317,6 +317,11 @@ async def use_shared_profile(client: DTMClient, api: ApiCalls, spec: dtm.Profile
             missing="not found or retired – run this use case once in the demonstrator, it creates or enables "
                     "the shared profile")},
         phase="setup")
+    # The create call shows in the one-time setup whether this run made it or found the profile – the
+    # script leaves it out, the lookup above already captures the ID (a second create would be refused)
+    create = {"method": "POST", "path": dtm.PROFILES, "body_file": "profile.json", "json": body | {"account_id": "{DTM_ACCOUNT_ID}"}} if body else None
+    api.add(f"Create the shared profile {spec.name} – only if it is missing", "POST", dtm.PROFILES, None,
+            "ok" if how == "created" else "exists", spec=create and create | {"script": False}, phase="setup")
     log({"created": "Created", "enabled": "Enabled again", "restored": "Restored"}.get(how, "Using")
         + f" the shared certificate profile {spec.name} ({validity}) – DTM keeps it permanently")
     variables["PROFILE_ID"] = profile_id

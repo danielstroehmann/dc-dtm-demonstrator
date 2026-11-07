@@ -323,3 +323,10 @@ def scep_client(tmp_path, monkeypatch, fake):
     tool = FakeScepClient(tmp_path / "fake-scep-bin", fake)
     monkeypatch.setenv("PATH", f"{tool.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     return tool
+
+
+@pytest.fixture
+def nl_per_run(monkeypatch):
+    """NL in its per-run profile mode (supported, though both platforms share profiles for now)."""
+    from app import dtm
+    monkeypatch.setitem(dtm.PLATFORMS, "one.nl.digicert.com", "per_run")

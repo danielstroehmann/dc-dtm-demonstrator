@@ -11,6 +11,8 @@ from tests.integration import test_uc01_flow, test_uc02_flow, test_uc03_flow, te
 from tests.integration.test_cleanup import do_cleanup
 from tests.integration.test_replayable_steps import assert_replayable
 
+pytestmark = pytest.mark.usefixtures("nl_per_run")  # the per-run mode, kept supported
+
 
 @pytest.fixture
 def fake() -> FakeDTM:  # this module runs against the NL platform (also for enroll_net, cmp_openssl …)
@@ -173,8 +175,10 @@ async def test_us_run_uses_the_shared_profile_and_never_deletes_it(store, tmp_pa
     assert store.objects("u1", "profile") == [] and us.profile("robot-u1-uc01-profile") is None
     shared = us.profile(dtm.PROFILE_EVERGREEN.name)
     assert shared["status"] == "ACTIVE" and run["result"]["api_variables"]["PROFILE_ID"] == shared["id"]
-    (step,) = [c for c in run["result"]["api_calls"] if c["path"] == dtm.PROFILES]
-    assert step["method"] == "GET"  # the shared lookup, not a create
+    lookup, create = [c for c in run["result"]["api_calls"] if c["path"] == dtm.PROFILES]
+    assert lookup["method"] == "GET" and lookup["outcome"] == "ok"  # the shared lookup
+    # the create shows in the setup although the profile was there, and stays out of the script
+    assert create["method"] == "POST" and create["outcome"] == "ok" and create["spec"]["script"] is False  # made by this first run
     # a profile with the per-run name (e.g. from elsewhere) is never adopted on US
     us.profiles.append(dict(shared, id="profile-lookalike", name="robot-u1-uc01-profile"))
     run = await do_cleanup(store, us, "u1", "full", tmp_path)
@@ -282,9 +286,11 @@ async def test_profile_still_in_use_fails_the_cleanup_with_the_reason(store, fak
     assert run["cleanup_status"] == "failed"
     assert profile["status"] == "ACTIVE" and store.objects("n1", "profile") != []
     failure = next(e["message"] for e in store.events("n1") if e["message"].startswith("Cleanup failed"))
-    assert f"profile {profile['id']} still exists after delete" in failure
-    assert "referenced by a certificate management policy" in failure
-    assert fake.divisions  # stopped before the division – retried later
+    assert "refused to delete certificate profile(s) robot-n1-uc01-profile" in failure
+    refusal = next(e["message"] for e in store.events("n1") if e["message"].startswith("DTM refuses"))
+    assert f"profile {profile['id']} still exists after delete" in refusal
+    assert "referenced by a certificate management policy" in refusal
+    assert [o["kind"] for o in store.objects("n1")] == ["profile"]  # the rest went on, only the profile stays
     del fake.policies["IOT_someone-else"]
     run = await do_cleanup(store, fake, "n1", "full", tmp_path)
     assert run["cleanup_status"] == "done" and profile["status"] == "DELETED"

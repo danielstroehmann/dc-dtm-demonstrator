@@ -29,6 +29,7 @@ AUTH = "/devicetrustmanager/authentication-service/api/v1"
 AUTH_CA = "/devicetrustmanager/authentication-service/api/v2/authentication-ca"
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # IDs from DTM that end up in URL paths
 DEVICES = "/devicetrustmanager/api/v4/device"
+DEVICE_LOGS = "/devicetrustmanager/api/v4/device/logs"
 DEVICE_GROUPS = "/devicetrustmanager/api/v4/device-group"
 CERTIFICATES = "/devicetrustmanager/certificate-issuance-service/api/v2/certificate"
 UPLOADS = "/devicetrustmanager/artifacts/api/v4/resumable-upload"  # tus 1.0.0, as the portal uploads payloads
@@ -282,7 +283,9 @@ def shared_profile_body(base: dict, spec: ProfileSpec, account_id: str) -> dict:
 # The supported DTM platforms and how certificate profiles are handled there (author, 2026-10-25):
 # NL deletes a profile once its policy is gone – one profile per run, removed by the full rollback;
 # US still refuses that (DTM bug) – shared profiles per account until it is fixed. Other hosts are refused.
-PLATFORMS = {"one.nl.digicert.com": "per_run", "one.digicert.com": "shared"}
+# NL could delete a run's own profile, but DTM there now also refuses profiles its deleted policies used
+# (2026-11-06) – until that is fixed both platforms share one profile per purpose; "per_run" stays supported.
+PLATFORMS = {"one.nl.digicert.com": "shared", "one.digicert.com": "shared"}
 PLATFORM_REGIONS = {"one.digicert.com": "US", "one.nl.digicert.com": "NL"}  # labels of the host choice
 
 
@@ -294,6 +297,16 @@ def profile_mode(host: str) -> str:
 
 LEGACY_PROFILES = ("robot-uc03-cmp-profile",)  # names of earlier releases – retired with the shared ones
 INACTIVE = ("DISABLED", "INACTIVE")
+
+
+def profile_create_body(profile: dict, spec: ProfileSpec, account_id: str) -> dict | None:
+    """The create body of an existing profile, rebuilt from its record – no extra DTM call."""
+    template = profile.get("certificate_template")
+    template_id = template.get("id") if isinstance(template, dict) else profile.get("certificate_template_id")
+    if not template_id or not isinstance(profile.get("body"), list):
+        return None
+    return shared_profile_body({"body": profile["body"], "certificate_template": {"id": template_id}},
+                               spec, account_id)
 
 
 def _profile_matches(profile: dict, spec: ProfileSpec) -> bool:
@@ -639,7 +652,8 @@ class DTMClient:
         """The account's profile for this purpose: found by name (restored if it was deleted, enabled again
         if it was retired), else copied once from a base profile of the account (preferably the basic
         client profile).
-        Returns (id, "used" | "enabled" | "restored" | "created")."""
+        Returns (id, "used" | "enabled" | "restored" | "created", create body) – the body is what the
+        profile is (or would be) created with, for the run's API calls; None if DTM's record lacks it."""
         async with _profile_lock:  # two runs at once must not both create it – it can never be deleted
             restored, clash = False, ""
             for attempt in (1, 2):
@@ -649,10 +663,11 @@ class DTMClient:
                     if not _profile_matches(found, spec):
                         raise DTMError(f"profile {spec.name} exists with other settings – fix or rename it in the "
                                        "DTM portal")
+                    body = profile_create_body(found, spec, self.config.account_id)
                     if found["status"] != "ACTIVE":
                         await self._request("PUT", f"{PROFILES}/{found['id']}/enable", json={}, expect=(200, 204))
-                        return found["id"], "restored" if restored else "enabled"
-                    return found["id"], "restored" if restored else "used"
+                        return found["id"], "restored" if restored else "enabled", body
+                    return found["id"], "restored" if restored else "used", body
                 if attempt == 2:
                     if restored:  # the list may lag behind the undelete
                         raise DTMError(f"profile {spec.name} was restored but is not listed yet – start the run again")
@@ -672,8 +687,8 @@ class DTMClient:
                     restored = True
                     continue
                 detail = await self._base_profile(records)
-                response = await self._request("POST", PROFILES, expect=(200, 201, 400, 409),
-                                               json=shared_profile_body(detail, spec, self.config.account_id))
+                body = shared_profile_body(detail, spec, self.config.account_id)
+                response = await self._request("POST", PROFILES, expect=(200, 201, 400, 409), json=body)
                 if response.status_code in (400, 409):
                     clash = _error_text(response)
                     continue  # another installation may have created it meanwhile – look once more
@@ -683,7 +698,7 @@ class DTMClient:
                     await self._request("PUT", f"{PROFILES}/{data['id']}/disable", json={}, expect=(200, 204))
                     raise DTMError(f"DTM did not accept the settings of {spec.name} ({spec.value} {spec.unit}) – the "
                                    f"template of {detail.get('name')} may limit them; the profile was disabled")
-                return data["id"], "created"
+                return data["id"], "created", body
         raise DTMError(f"could not create profile {spec.name}: {clash}")
 
     # devices (UC-6, Advanced license) – verified live on NL 2026-10-26
@@ -710,6 +725,22 @@ class DTMClient:
         records = await self._list(DEVICE_GROUPS, params={"name": name})
         return [r["id"] for r in records if r.get("name") == name and r.get("account_id") == self.config.account_id
                 and str(r.get("status", "")).upper() != "DELETED"]
+
+    async def device_logs(self, device_id: str, limit: int = 200) -> list[dict]:
+        """The device's life events (connected, certificate issued, update installed …), newest first.
+        Paged in the body – DTM ignores limit/offset as query parameters there (verified live on US, 2026-11-07)."""
+        _safe(device_id)
+        out: list[dict] = []
+        while len(out) < limit:
+            data = _json(await self._request("POST", DEVICE_LOGS, quiet=True, json={
+                "device_id": device_id, "account_id": self.config.account_id, "limit": 100, "offset": len(out)}))
+            page = data.get("records") or []
+            out += page
+            if not page or len(out) >= data.get("total", 0):
+                break
+        mine = [r for r in out if isinstance(r, dict) and r.get("device_id") == device_id and not self._foreign(r)
+                and isinstance(r.get("created_on"), str)]
+        return sorted(mine, key=lambda r: r["created_on"], reverse=True)[:limit]
 
     async def device_ids(self, group_id: str, prefix: str) -> list[tuple[str, str]]:
         """(id, name) of this account's devices in the group that carry the run's name prefix or the name

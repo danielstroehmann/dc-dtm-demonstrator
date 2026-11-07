@@ -170,7 +170,7 @@ def test_batch_commands_name_devices_like_common_names(tmp_path, mode):
 # --- NL: the run creates its own profile – the replay creates one, too (captured, never the run's ID) ----
 
 @pytest.mark.parametrize("use_case,mode", [("uc01", "single"), ("uc02", "batch")])
-async def test_nl_steps_are_replayable(store, tmp_path, monkeypatch, use_case, mode):
+async def test_nl_steps_are_replayable(nl_per_run, store, tmp_path, monkeypatch, use_case, mode):
     from app import dtm
     from tests.fakedtm import NL_HOST, FakeDTM
     monkeypatch.setattr(evergreen, "STORY_INTERVAL", 0.0)

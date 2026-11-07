@@ -711,6 +711,21 @@ table.data-table.checks-table td, table.data-table.checks-table th { max-width: 
   overflow-y: auto; background: var(--dc-grey-bg); border-left: 1px solid var(--dc-border); box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12); }
 /* The panel shows a wall cell's tile above its certificate detail, or – from a large tile – the detail alone */
 .side-panel .panel-tile:not(:empty) { margin-bottom: var(--s4); }
+/* The device's DTM log below the certificate detail: the run timeline's look, a wider time column, a dot per kind */
+.side-panel .panel-log:not(:empty) { margin-top: var(--s4); }
+.device-log { background: #fff; border: 1px solid var(--dc-border); border-radius: var(--pico-border-radius); padding: var(--s3) var(--s4); }
+.device-log h4 { font-size: 0.95rem; margin: 0 0 var(--s3); }
+.device-log h4 .meta { font-weight: 400; margin-left: var(--s2); }
+.device-log p { margin: 0; }
+.device-log .timeline li { grid-template-columns: 4.2rem 1fr; }
+.device-log .log-state::before { background: var(--dc-blue); }
+.device-log .log-connection::before { background: var(--ok); }
+.device-log .log-certificate::before { background: var(--dc-blue-light); }
+.device-log .log-deployment::before { background: var(--dc-orange); }
+.device-log .log-offline::before { background: #bbb; }
+.device-log .log-offline .msg { color: var(--pico-muted-color); }
+.device-log .log-failed::before { background: var(--bad); }
+.device-log .log-failed .msg { color: var(--bad); }
 /* Certificates of a tile: a click opens their detail view */
 .certs[data-certs], .device-empty[data-certs] { cursor: pointer; }
 .tstack > .certs[data-certs]:hover, .tstack > .device-empty[data-certs]:hover { background: var(--dc-blue-tint); }
